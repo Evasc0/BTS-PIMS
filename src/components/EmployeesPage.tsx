@@ -10,7 +10,7 @@ interface Employee {
   id: string;
   name: string;
   email: string;
-  role: 'administrator' | 'supervisor' | 'employee';
+  role: 'administrator' | 'employee';
   phone: string;
   department: string;
   assignedProducts: number;
@@ -26,7 +26,7 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
   // Mock employees data
   const [employees] = useState<Employee[]>([
     { id: '1', name: 'John Admin', email: 'admin@company.com', role: 'administrator', phone: '+1 234 567 8900', department: 'IT', assignedProducts: 0, status: 'active', joinedDate: '2023-01-15' },
-    { id: '2', name: 'Sarah Supervisor', email: 'supervisor@company.com', role: 'supervisor', phone: '+1 234 567 8901', department: 'Operations', assignedProducts: 3, status: 'active', joinedDate: '2023-03-20' },
+    { id: '2', name: 'Sarah Johnson', email: 'sarah@company.com', role: 'employee', phone: '+1 234 567 8901', department: 'Operations', assignedProducts: 3, status: 'active', joinedDate: '2023-03-20' },
     { id: '3', name: 'Mike Employee', email: 'employee@company.com', role: 'employee', phone: '+1 234 567 8902', department: 'Warehouse', assignedProducts: 1, status: 'active', joinedDate: '2023-06-10' },
     { id: '4', name: 'Emma Worker', email: 'emma@company.com', role: 'employee', phone: '+1 234 567 8903', department: 'Warehouse', assignedProducts: 2, status: 'active', joinedDate: '2023-08-05' },
     { id: '5', name: 'David Staff', email: 'david@company.com', role: 'employee', phone: '+1 234 567 8904', department: 'Logistics', assignedProducts: 4, status: 'active', joinedDate: '2023-09-12' },
@@ -37,13 +37,7 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
   const canDeleteEmployee = user.role === 'administrator';
 
   // Filter employees based on role
-  const filteredEmployees = employees.filter((employee) => {
-    // Supervisor can only see assigned employees
-    if (user.role as string === 'supervisor') {
-      return employee.role === 'employee'; // Simplified - would check actual assignments
-    }
-    return true;
-  }).filter((employee) => 
+  const filteredEmployees = employees.filter((employee) =>
     employee.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
     employee.email.toLowerCase().includes(searchTerm.toLowerCase()) ||
     employee.department.toLowerCase().includes(searchTerm.toLowerCase())
@@ -53,8 +47,6 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
     switch (role) {
       case 'administrator':
         return { color: 'bg-purple-100 text-purple-700', icon: Shield };
-      case 'supervisor':
-        return { color: 'bg-blue-100 text-blue-700', icon: UserCog };
       case 'employee':
         return { color: 'bg-green-100 text-green-700', icon: Users };
       default:
@@ -194,7 +186,6 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
                   <label className="block text-sm font-medium text-gray-700 mb-2">Role</label>
                   <select className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none">
                     <option value="employee">Employee</option>
-                    <option value="supervisor">Supervisor</option>
                     <option value="administrator">Administrator</option>
                   </select>
                 </div>

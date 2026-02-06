@@ -57,8 +57,8 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
       },
       receivers: [
         {
-          name: 'Sarah Supervisor',
-          position: 'supervisor',
+          name: 'Sarah Johnson',
+          position: 'employee',
           receivedDate: '2024-02-03',
           location: 'Main Office'
         }

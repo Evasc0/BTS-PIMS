@@ -20,13 +20,13 @@ export function Dashboard({ user }: DashboardProps) {
   const stats = {
     totalProducts: user.role === 'employee' ? user.assignedProducts?.length || 0 : 150,
     lowStockItems: user.role === 'employee' ? 0 : 12,
-    totalEmployees: user.role === 'administrator' ? 45 : user.role === 'supervisor' ? 8 : 0,
+    totalEmployees: user.role === 'administrator' ? 45 : 0,
     pendingReturns: user.role === 'employee' ? 1 : 5,
   };
 
   const recentActivity = [
     { id: 1, action: 'Product Added', item: 'Laptop Dell XPS 15', user: 'John Admin', time: '2 hours ago', type: 'success' },
-    { id: 2, action: 'Return Approved', item: 'Mouse Logitech MX', user: 'Sarah Supervisor', time: '3 hours ago', type: 'info' },
+    { id: 2, action: 'Return Approved', item: 'Mouse Logitech MX', user: 'Sarah Johnson', time: '3 hours ago', type: 'info' },
     { id: 3, action: 'Low Stock Alert', item: 'USB-C Cable', user: 'System', time: '5 hours ago', type: 'warning' },
     { id: 4, action: 'Employee Added', item: 'Mike Employee', user: 'John Admin', time: '1 day ago', type: 'success' },
   ];
@@ -38,7 +38,6 @@ export function Dashboard({ user }: DashboardProps) {
   ];
 
   const isAdministrator = user.role === 'administrator';
-  const isSupervisor = user.role === 'supervisor';
   const isEmployee = user.role === 'employee';
 
   return (
@@ -49,7 +48,6 @@ export function Dashboard({ user }: DashboardProps) {
         </h1>
         <p className="text-gray-600">
           {isAdministrator && 'You have full system control and oversight'}
-          {isSupervisor && 'Manage day-to-day operations and your team'}
           {isEmployee && 'View your assigned products and submit returns'}
         </p>
       </div>
@@ -88,7 +86,7 @@ export function Dashboard({ user }: DashboardProps) {
           </div>
         )}
 
-        {(isAdministrator || isSupervisor) && (
+        {(isAdministrator ) && (
           <div className="bg-white p-6 rounded-xl border border-gray-200">
             <div className="flex items-start justify-between mb-4">
               <div className="w-12 h-12 bg-purple-100 rounded-lg flex items-center justify-center">

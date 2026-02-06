@@ -23,11 +23,11 @@ interface SidebarProps {
 
 export function Sidebar({ user, currentPage, onNavigate, onLogout }: SidebarProps) {
   const menuItems = [
-    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: ['administrator', 'supervisor', 'employee'] },
-    { id: 'products', label: 'Products', icon: Package, roles: ['administrator', 'supervisor', 'employee'] },
-    { id: 'employees', label: 'Employees', icon: Users, roles: ['administrator', 'supervisor'] },
-    { id: 'returns', label: 'Returns', icon: RotateCcw, roles: ['administrator', 'supervisor', 'employee'] },
-    { id: 'reports', label: 'Reports', icon: FileText, roles: ['administrator', 'supervisor'] },
+    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: ['administrator', 'employee'] },
+    { id: 'products', label: 'Products', icon: Package, roles: ['administrator', 'employee'] },
+    { id: 'employees', label: 'Employees', icon: Users, roles: ['administrator'] },
+    { id: 'returns', label: 'Returns', icon: RotateCcw, roles: ['administrator', 'employee'] },
+    { id: 'reports', label: 'Reports', icon: FileText, roles: ['administrator'] },
     { id: 'activity-logs', label: 'Activity Logs', icon: History, roles: ['administrator'] },
     { id: 'settings', label: 'Settings', icon: Settings, roles: ['administrator'] },
   ];
