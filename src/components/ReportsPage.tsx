@@ -4,6 +4,15 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import type { Employee, ReturnCondition, ValueCategory } from '../lib/types';
 import { db } from '../lib/db';
 import { formatCurrency, formatDate } from '../lib/utils';
+import {
+  buildInventoryReportRows,
+  buildReturnReportRows,
+  createInventoryExcelBlob,
+  createReturnsExcelBlob,
+  downloadBlob,
+  exportReturnsToPDF,
+  exportToPDF
+} from '../lib/reportExports';
 
 interface ReportsPageProps {
   user: Employee;
@@ -109,88 +118,28 @@ export function ReportsPage({ user }: ReportsPageProps) {
     setExpandedItems(newExpanded);
   };
 
-  const handleExportCsv = (rows: string[][], filename: string) => {
-    const csv = rows.map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(',')).join('\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    link.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const handleExportPdf = (content: string, title: string) => {
-    const printWindow = window.open('', '_blank');
-    if (!printWindow) return;
-    printWindow.document.write(`
-      <html>
-        <head><title>${title}</title></head>
-        <body style="font-family: Arial, sans-serif; padding: 16px;">
-          <h2>${title}</h2>
-          <pre style="white-space: pre-wrap;">${content}</pre>
-        </body>
-      </html>
-    `);
-    printWindow.document.close();
-    printWindow.focus();
-    printWindow.print();
-  };
-
-  const handleExport = (format: 'pdf' | 'excel') => {
+  const handleExportPdf = () => {
     if (reportType === 'inventory') {
-      const rows = [
-        ['Article', 'Description', 'Date', 'PAR Control Number', 'Property Number', 'Unit', 'Unit Value', 'Balance', 'On Hand', 'Total', 'Remarks', 'Value', 'Assigned To']
-      ];
-      filteredProducts.forEach((item) => {
-        rows.push([
-          item.article,
-          item.description,
-          item.date,
-          item.parControlNumber,
-          item.propertyNumber,
-          item.unit,
-          formatCurrency(item.unitValue),
-          String(item.balancePerCard),
-          String(item.onHandPerCount),
-          formatCurrency(item.total),
-          item.remarks,
-          item.valueCategory,
-          item.assignedToEmployeeId ? employeeMap.get(item.assignedToEmployeeId) || '' : ''
-        ]);
-      });
-
-      if (format === 'excel') {
-        handleExportCsv(rows, 'inventory-report.csv');
-      } else {
-        const content = rows.map((row) => row.join(' | ')).join('\n');
-        handleExportPdf(content, 'Inventory Report');
-      }
-    } else {
-      const rows = [
-        ['RRSP Number', 'Return Date', 'Quantity', 'Condition', 'Returned By', 'Product', 'Location', 'Status']
-      ];
-      filteredReturns.forEach((item) => {
-        const product = products?.find((product) => product.id === item.productId);
-        rows.push([
-          item.rrspNumber,
-          item.returnDate,
-          String(item.quantity),
-          item.condition,
-          employeeMap.get(item.returnedByEmployeeId) || '',
-          product?.article || '',
-          item.location,
-          item.status
-        ]);
-      });
-
-      if (format === 'excel') {
-        handleExportCsv(rows, 'returns-report.csv');
-      } else {
-        const content = rows.map((row) => row.join(' | ')).join('\n');
-        handleExportPdf(content, 'Returns Report');
-      }
+      const rows = buildInventoryReportRows(filteredProducts);
+      exportToPDF(rows);
+      return;
     }
+
+    const rows = buildReturnReportRows(filteredReturns, products || [], employees || []);
+    exportReturnsToPDF(rows);
+  };
+
+  const handleExportExcel = async () => {
+    if (reportType === 'inventory') {
+      const rows = buildInventoryReportRows(filteredProducts);
+      const blob = await createInventoryExcelBlob(rows, 'Inventory Report');
+      downloadBlob(blob, 'inventory-report.xlsx');
+      return;
+    }
+
+    const rows = buildReturnReportRows(filteredReturns, products || [], employees || []);
+    const blob = await createReturnsExcelBlob(rows, 'Returns Report');
+    downloadBlob(blob, 'returns-report.xlsx');
   };
 
   const handleCustomRange = () => {
@@ -213,14 +162,14 @@ export function ReportsPage({ user }: ReportsPageProps) {
           {canExportData && (
             <div className="flex gap-2">
               <button
-                onClick={() => handleExport('pdf')}
+                onClick={handleExportPdf}
                 className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition flex items-center gap-2"
               >
                 <Download className="w-5 h-5" />
                 Export PDF
               </button>
               <button
-                onClick={() => handleExport('excel')}
+                onClick={handleExportExcel}
                 className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition flex items-center gap-2"
               >
                 <Download className="w-5 h-5" />
