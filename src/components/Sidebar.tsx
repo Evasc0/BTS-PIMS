@@ -1,13 +1,13 @@
 import React from 'react';
-import { User } from '../App';
-import { 
-  LayoutDashboard, 
-  Package, 
-  Users, 
-  RotateCcw, 
-  FileText, 
-  History, 
-  Settings, 
+import type { Employee } from '../lib/types';
+import {
+  LayoutDashboard,
+  Package,
+  Users,
+  RotateCcw,
+  FileText,
+  History,
+  Settings,
   UserCircle,
   LogOut,
   Shield,
@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 
 interface SidebarProps {
-  user: User;
+  user: Employee;
   currentPage: string;
   onNavigate: (page: string) => void;
   onLogout: () => void;
@@ -23,19 +23,21 @@ interface SidebarProps {
 
 export function Sidebar({ user, currentPage, onNavigate, onLogout }: SidebarProps) {
   const menuItems = [
-    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: ['administrator', 'employee'] },
-    { id: 'products', label: 'Products', icon: Package, roles: ['administrator', 'employee'] },
-    { id: 'employees', label: 'Employees', icon: Users, roles: ['administrator'] },
-    { id: 'returns', label: 'Returns', icon: RotateCcw, roles: ['administrator', 'employee'] },
-    { id: 'reports', label: 'Reports', icon: FileText, roles: ['administrator'] },
-    { id: 'activity-logs', label: 'Activity Logs', icon: History, roles: ['administrator'] },
-    { id: 'settings', label: 'Settings', icon: Settings, roles: ['administrator'] },
+    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: ['admin', 'supervisor', 'employee'] },
+    { id: 'products', label: 'Products', icon: Package, roles: ['admin', 'supervisor', 'employee'] },
+    { id: 'employees', label: 'Employees', icon: Users, roles: ['admin'] },
+    { id: 'returns', label: 'Returns', icon: RotateCcw, roles: ['admin', 'supervisor', 'employee'] },
+    { id: 'reports', label: 'Reports', icon: FileText, roles: ['admin'] },
+    { id: 'activity-logs', label: 'Activity Logs', icon: History, roles: ['admin'] },
+    { id: 'settings', label: 'Settings', icon: Settings, roles: ['admin'] },
   ];
 
   const getRoleColor = () => {
     switch (user.role) {
-      case 'administrator':
+      case 'admin':
         return 'bg-purple-100 text-purple-700 border-purple-200';
+      case 'supervisor':
+        return 'bg-blue-100 text-blue-700 border-blue-200';
       case 'employee':
         return 'bg-green-100 text-green-700 border-green-200';
     }
@@ -43,8 +45,10 @@ export function Sidebar({ user, currentPage, onNavigate, onLogout }: SidebarProp
 
   const getRoleIcon = () => {
     switch (user.role) {
-      case 'administrator':
+      case 'admin':
         return <Shield className="w-4 h-4" />;
+      case 'supervisor':
+        return <UserCog className="w-4 h-4" />;
       case 'employee':
         return <UserCircle className="w-4 h-4" />;
     }

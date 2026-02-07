@@ -1,139 +1,70 @@
-import React, { useState } from 'react';
-import { User } from '../App';
-import { History, Search, Filter, Download, Calendar } from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import { History, Search, Download, Calendar } from 'lucide-react';
+import { useLiveQuery } from 'dexie-react-hooks';
+import type { Employee } from '../lib/types';
+import { db } from '../lib/db';
 
 interface ActivityLogsPageProps {
-  user: User;
+  user: Employee;
 }
 
-interface ActivityLog {
-  id: string;
-  timestamp: string;
-  user: string;
-  action: string;
-  target: string;
-  details: string;
-  ipAddress: string;
-  status: 'success' | 'warning' | 'error';
-}
+const escapeCsv = (value: string) => {
+  if (value.includes(',') || value.includes('"') || value.includes('\n')) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+  return value;
+};
 
 export function ActivityLogsPage({ user }: ActivityLogsPageProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const [filterAction, setFilterAction] = useState('all');
+  const [dateFilter, setDateFilter] = useState<{ start: string; end: string } | null>(null);
+  const [page, setPage] = useState(1);
+  const pageSize = 10;
 
-  // Mock activity logs
-  const [logs] = useState<ActivityLog[]>([
-    {
-      id: '1',
-      timestamp: '2024-02-05 14:32:15',
-      user: 'John Admin',
-      action: 'CREATE',
-      target: 'Product',
-      details: 'Created product "Laptop Dell XPS 15" (SKU: LAP-001)',
-      ipAddress: '192.168.1.100',
-      status: 'success'
-    },
-    {
-      id: '2',
-      timestamp: '2024-02-05 13:45:22',
-      user: 'Sarah Supervisor',
-      action: 'APPROVE',
-      target: 'Return',
-      details: 'Approved return request #42 for "Mouse Logitech MX"',
-      ipAddress: '192.168.1.101',
-      status: 'success'
-    },
-    {
-      id: '3',
-      timestamp: '2024-02-05 12:18:05',
-      user: 'Mike Employee',
-      action: 'VIEW',
-      target: 'Product',
-      details: 'Viewed product details for "USB-C Cable"',
-      ipAddress: '192.168.1.102',
-      status: 'success'
-    },
-    {
-      id: '4',
-      timestamp: '2024-02-05 11:22:40',
-      user: 'John Admin',
-      action: 'UPDATE',
-      target: 'Employee',
-      details: 'Updated employee role for "Emma Worker" from Employee to Supervisor',
-      ipAddress: '192.168.1.100',
-      status: 'success'
-    },
-    {
-      id: '5',
-      timestamp: '2024-02-05 10:15:33',
-      user: 'Sarah Supervisor',
-      action: 'REJECT',
-      target: 'Return',
-      details: 'Rejected return request #38 for "HDMI Adapter"',
-      ipAddress: '192.168.1.101',
-      status: 'warning'
-    },
-    {
-      id: '6',
-      timestamp: '2024-02-05 09:45:12',
-      user: 'Unknown User',
-      action: 'LOGIN',
-      target: 'Authentication',
-      details: 'Failed login attempt for user "test@company.com"',
-      ipAddress: '192.168.1.200',
-      status: 'error'
-    },
-    {
-      id: '7',
-      timestamp: '2024-02-04 16:30:25',
-      user: 'John Admin',
-      action: 'DELETE',
-      target: 'Product',
-      details: 'Deleted product "Old Monitor 22"" (SKU: MON-999)',
-      ipAddress: '192.168.1.100',
-      status: 'success'
-    },
-    {
-      id: '8',
-      timestamp: '2024-02-04 15:22:18',
-      user: 'Mike Employee',
-      action: 'SUBMIT',
-      target: 'Return',
-      details: 'Submitted return request for "Laptop Dell XPS 15" - Reason: Defective screen',
-      ipAddress: '192.168.1.102',
-      status: 'success'
-    },
-    {
-      id: '9',
-      timestamp: '2024-02-04 14:10:50',
-      user: 'Sarah Supervisor',
-      action: 'UPDATE',
-      target: 'Product',
-      details: 'Updated quantity for "USB-C Cable" from 8 to 5',
-      ipAddress: '192.168.1.101',
-      status: 'success'
-    },
-    {
-      id: '10',
-      timestamp: '2024-02-04 13:05:42',
-      user: 'John Admin',
-      action: 'CREATE',
-      target: 'Employee',
-      details: 'Created new employee account for "David Staff"',
-      ipAddress: '192.168.1.100',
-      status: 'success'
-    },
-  ]);
+  const logs = useLiveQuery(() => db.activityLogs.toArray(), []);
+  const employees = useLiveQuery(() => db.employees.toArray(), []);
 
-  const filteredLogs = logs.filter((log) => {
+  const employeeMap = useMemo(() => {
+    const map = new Map<string, Employee>();
+    (employees || []).forEach((employee) => map.set(employee.id, employee));
+    return map;
+  }, [employees]);
+
+  const actionOptions = useMemo(() => {
+    const set = new Set<string>();
+    (logs || []).forEach((log) => set.add(log.action));
+    return Array.from(set).sort();
+  }, [logs]);
+
+  const logsWithUsers = useMemo(() => {
+    return (logs || []).map((log) => ({
+      ...log,
+      userName: employeeMap.get(log.performedByEmployeeId)?.fullName || 'System',
+      target: log.entityType
+    }));
+  }, [logs, employeeMap]);
+
+  const filteredLogs = logsWithUsers.filter((log) => {
     if (filterAction !== 'all' && log.action !== filterAction) return false;
-    if (searchTerm && !log.details.toLowerCase().includes(searchTerm.toLowerCase()) &&
-        !log.user.toLowerCase().includes(searchTerm.toLowerCase()) &&
-        !log.target.toLowerCase().includes(searchTerm.toLowerCase())) {
-      return false;
+    if (dateFilter) {
+      const logDate = new Date(log.timestamp);
+      const start = new Date(dateFilter.start);
+      const end = new Date(dateFilter.end);
+      if (logDate < start || logDate > end) return false;
     }
-    return true;
+    if (!searchTerm.trim()) return true;
+    const term = searchTerm.trim().toLowerCase();
+    return (
+      log.details.toLowerCase().includes(term) ||
+      log.userName.toLowerCase().includes(term) ||
+      log.target.toLowerCase().includes(term)
+    );
   });
+
+  const totalPages = Math.max(1, Math.ceil(filteredLogs.length / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const pagedLogs = filteredLogs.slice((currentPage - 1) * pageSize, currentPage * pageSize);
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -156,24 +87,47 @@ export function ActivityLogsPage({ user }: ActivityLogsPageProps) {
         return 'bg-purple-100 text-purple-700';
       case 'DELETE':
         return 'bg-red-100 text-red-700';
-      case 'VIEW':
-        return 'bg-gray-100 text-gray-700';
-      case 'APPROVE':
-        return 'bg-green-100 text-green-700';
-      case 'REJECT':
+      case 'ASSIGN':
         return 'bg-orange-100 text-orange-700';
-      case 'LOGIN':
-        return 'bg-indigo-100 text-indigo-700';
       case 'SUBMIT':
         return 'bg-cyan-100 text-cyan-700';
+      case 'SYNC':
+        return 'bg-indigo-100 text-indigo-700';
       default:
         return 'bg-gray-100 text-gray-700';
     }
   };
 
   const handleExport = () => {
-    console.log('Exporting activity logs...');
-    // Would trigger download
+    const headers = ['Timestamp', 'User', 'Action', 'Target', 'Details', 'IP Address', 'Status'];
+    const rows = logsWithUsers.map((log) => [
+      new Date(log.timestamp).toLocaleString(),
+      log.userName,
+      log.action,
+      log.target,
+      log.details,
+      log.ipAddress,
+      log.status
+    ]);
+    const csv = [headers, ...rows]
+      .map((row) => row.map((cell) => escapeCsv(String(cell || ''))).join(','))
+      .join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'activity-logs.csv';
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleDateRange = () => {
+    const start = window.prompt('Enter start date (YYYY-MM-DD):', dateFilter?.start || '');
+    if (!start) return;
+    const end = window.prompt('Enter end date (YYYY-MM-DD):', dateFilter?.end || '');
+    if (!end) return;
+    setDateFilter({ start, end });
+    setPage(1);
   };
 
   return (
@@ -184,7 +138,7 @@ export function ActivityLogsPage({ user }: ActivityLogsPageProps) {
             <h1 className="font-bold text-gray-900 mb-2">Activity Logs</h1>
             <p className="text-gray-600">View all system activity and audit trail</p>
           </div>
-          <button 
+          <button
             onClick={handleExport}
             className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition flex items-center gap-2"
           >
@@ -204,49 +158,47 @@ export function ActivityLogsPage({ user }: ActivityLogsPageProps) {
               className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
             />
           </div>
-          <select 
+          <select
             value={filterAction}
             onChange={(e) => setFilterAction(e.target.value)}
             className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
           >
             <option value="all">All Actions</option>
-            <option value="CREATE">Create</option>
-            <option value="UPDATE">Update</option>
-            <option value="DELETE">Delete</option>
-            <option value="VIEW">View</option>
-            <option value="APPROVE">Approve</option>
-            <option value="REJECT">Reject</option>
-            <option value="LOGIN">Login</option>
-            <option value="SUBMIT">Submit</option>
+            {actionOptions.map((action) => (
+              <option key={action} value={action}>
+                {action}
+              </option>
+            ))}
           </select>
-          <button className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition flex items-center gap-2">
+          <button
+            onClick={handleDateRange}
+            className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition flex items-center gap-2"
+          >
             <Calendar className="w-5 h-5" />
             Date Range
           </button>
         </div>
       </div>
 
-      {/* Stats */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
         <div className="bg-white p-4 rounded-xl border border-gray-200">
           <p className="text-sm text-gray-600 mb-1">Total Actions</p>
-          <p className="font-bold text-gray-900">{logs.length}</p>
+          <p className="font-bold text-gray-900">{logsWithUsers.length}</p>
         </div>
         <div className="bg-white p-4 rounded-xl border border-gray-200">
           <p className="text-sm text-gray-600 mb-1">Successful</p>
-          <p className="font-bold text-green-600">{logs.filter(l => l.status === 'success').length}</p>
+          <p className="font-bold text-green-600">{logsWithUsers.filter((log) => log.status === 'success').length}</p>
         </div>
         <div className="bg-white p-4 rounded-xl border border-gray-200">
           <p className="text-sm text-gray-600 mb-1">Warnings</p>
-          <p className="font-bold text-yellow-600">{logs.filter(l => l.status === 'warning').length}</p>
+          <p className="font-bold text-yellow-600">{logsWithUsers.filter((log) => log.status === 'warning').length}</p>
         </div>
         <div className="bg-white p-4 rounded-xl border border-gray-200">
           <p className="text-sm text-gray-600 mb-1">Errors</p>
-          <p className="font-bold text-red-600">{logs.filter(l => l.status === 'error').length}</p>
+          <p className="font-bold text-red-600">{logsWithUsers.filter((log) => log.status === 'error').length}</p>
         </div>
       </div>
 
-      {/* Activity Logs Table */}
       <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full">
@@ -262,31 +214,30 @@ export function ActivityLogsPage({ user }: ActivityLogsPageProps) {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200">
-              {filteredLogs.map((log) => (
+              {pagedLogs.length === 0 && (
+                <tr>
+                  <td className="px-6 py-6 text-center text-gray-500" colSpan={7}>
+                    No activity logs available.
+                  </td>
+                </tr>
+              )}
+              {pagedLogs.map((log) => (
                 <tr key={log.id} className="hover:bg-gray-50">
                   <td className="px-6 py-4 whitespace-nowrap">
                     <div className="flex items-center gap-2">
                       <History className="w-4 h-4 text-gray-400" />
-                      <span className="text-sm text-gray-900">{log.timestamp}</span>
+                      <span className="text-sm text-gray-900">{new Date(log.timestamp).toLocaleString()}</span>
                     </div>
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                    {log.user}
-                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{log.userName}</td>
                   <td className="px-6 py-4 whitespace-nowrap">
                     <span className={`px-2 py-1 rounded-full text-xs font-medium ${getActionColor(log.action)}`}>
                       {log.action}
                     </span>
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
-                    {log.target}
-                  </td>
-                  <td className="px-6 py-4 text-sm text-gray-600 max-w-md truncate">
-                    {log.details}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600 font-mono">
-                    {log.ipAddress}
-                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{log.target}</td>
+                  <td className="px-6 py-4 text-sm text-gray-600 max-w-md truncate">{log.details}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600 font-mono">{log.ipAddress}</td>
                   <td className="px-6 py-4 whitespace-nowrap">
                     <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusColor(log.status)}`}>
                       {log.status}
@@ -299,16 +250,23 @@ export function ActivityLogsPage({ user }: ActivityLogsPageProps) {
         </div>
       </div>
 
-      {/* Pagination */}
       <div className="mt-6 flex items-center justify-between">
         <p className="text-sm text-gray-600">
-          Showing {filteredLogs.length} of {logs.length} logs
+          Showing {pagedLogs.length} of {filteredLogs.length} logs
         </p>
         <div className="flex gap-2">
-          <button className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition text-sm">
+          <button
+            onClick={() => setPage((prev) => Math.max(1, prev - 1))}
+            disabled={currentPage === 1}
+            className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition text-sm disabled:opacity-50"
+          >
             Previous
           </button>
-          <button className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition text-sm">
+          <button
+            onClick={() => setPage((prev) => Math.min(totalPages, prev + 1))}
+            disabled={currentPage === totalPages}
+            className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition text-sm disabled:opacity-50"
+          >
             Next
           </button>
         </div>

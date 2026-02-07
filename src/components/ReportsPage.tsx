@@ -1,182 +1,103 @@
-import React, { useState } from 'react';
-import { User } from '../App';
-import { FileText, Download, Calendar, Eye, EyeOff, ChevronDown, ChevronUp } from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import { Download, Calendar, Eye, EyeOff, ChevronDown, ChevronUp } from 'lucide-react';
+import { useLiveQuery } from 'dexie-react-hooks';
+import type { Employee, ReturnCondition, ValueCategory } from '../lib/types';
+import { db } from '../lib/db';
+import { formatCurrency, formatDate } from '../lib/utils';
 
 interface ReportsPageProps {
-  user: User;
+  user: Employee;
 }
 
-interface InventoryItem {
-  id: string;
-  value: 'HV' | 'MV' | 'LV';
-  article: string;
-  description: string;
-  date: string;
-  parControlNumber: string;
-  propertyNumber: string;
-  unit: string;
-  unitValue: number;
-  balancePerCard: number;
-  onHandPerCount: number;
-  total: number;
-  remarks: string;
-  assignedTo?: string;
-}
+type DateRange = 'week' | 'month' | 'quarter' | 'year' | 'custom';
 
-interface ReturnItemData {
-  id: string;
-  product: {
-    article: string;
-    description: string;
-    date: string;
-    parControlNumber: string;
-    propertyNumber: string;
-    unit: string;
-    unitValue: number;
-    balancePerCard: number;
-    onHandPerCount: number;
-    total: number;
-    remarks: string;
-  };
-  returnInfo: {
-    rrspNo: string;
-    returnDate: string;
-    quantity: number;
-    remarks: string;
-    condition: 'Functional' | 'Destroyed' | 'For Disposal' | 'Need Repair' | 'Damaged';
-    returnedBy: {
-      name: string;
-      position: string;
-    };
-    receivedDate: string;
-    location: string;
-  };
-}
+const getRangeStart = (range: DateRange, customStart?: string) => {
+  if (range === 'custom' && customStart) {
+    return new Date(customStart);
+  }
+  const now = new Date();
+  const start = new Date(now);
+  switch (range) {
+    case 'week':
+      start.setDate(now.getDate() - 7);
+      break;
+    case 'month':
+      start.setMonth(now.getMonth() - 1);
+      break;
+    case 'quarter':
+      start.setMonth(now.getMonth() - 3);
+      break;
+    case 'year':
+      start.setFullYear(now.getFullYear() - 1);
+      break;
+    default:
+      start.setMonth(now.getMonth() - 1);
+  }
+  return start;
+};
+
+const getValueColor = (value: ValueCategory) => {
+  switch (value) {
+    case 'HV':
+      return 'bg-purple-100 text-purple-700';
+    case 'MV':
+      return 'bg-blue-100 text-blue-700';
+    case 'LV':
+      return 'bg-green-100 text-green-700';
+    default:
+      return 'bg-gray-100 text-gray-700';
+  }
+};
+
+const getConditionColor = (condition: ReturnCondition) => {
+  switch (condition) {
+    case 'functional':
+      return 'bg-green-100 text-green-700';
+    case 'destroyed':
+    case 'for disposal':
+      return 'bg-red-100 text-red-700';
+    case 'need repair':
+    case 'damaged':
+      return 'bg-orange-100 text-orange-700';
+    default:
+      return 'bg-gray-100 text-gray-700';
+  }
+};
 
 export function ReportsPage({ user }: ReportsPageProps) {
-  const [reportType, setReportType] = useState('inventory');
-  const [dateRange, setDateRange] = useState('month');
+  const [reportType, setReportType] = useState<'inventory' | 'returns'>('inventory');
+  const [dateRange, setDateRange] = useState<DateRange>('month');
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
+  const [customRange, setCustomRange] = useState<{ start: string; end: string } | null>(null);
 
-  // Mock inventory data
-  const inventoryItems: InventoryItem[] = [
-    {
-      id: '1',
-      value: 'HV',
-      article: 'Laptop Dell XPS 15',
-      description: 'High-performance laptop with 16GB RAM',
-      date: '2024-01-15',
-      parControlNumber: 'PAR-2024-001',
-      propertyNumber: 'PROP-2024-001',
-      unit: 'pcs',
-      unitValue: 1499,
-      balancePerCard: 25,
-      onHandPerCount: 25,
-      total: 37475,
-      remarks: 'In good condition',
-      assignedTo: 'Mike Employee'
-    },
-    {
-      id: '2',
-      value: 'MV',
-      article: 'Mouse Logitech MX',
-      description: 'Wireless ergonomic mouse',
-      date: '2024-01-20',
-      parControlNumber: 'PAR-2024-002',
-      propertyNumber: 'PROP-2024-002',
-      unit: 'pcs',
-      unitValue: 99,
-      balancePerCard: 45,
-      onHandPerCount: 45,
-      total: 4455,
-      remarks: 'New stock',
-      assignedTo: 'John Admin'
-    },
-    {
-      id: '3',
-      value: 'LV',
-      article: 'USB-C Cable',
-      description: 'Standard USB-C charging cable',
-      date: '2024-01-25',
-      parControlNumber: 'PAR-2024-003',
-      propertyNumber: 'PROP-2024-003',
-      unit: 'pcs',
-      unitValue: 15,
-      balancePerCard: 50,
-      onHandPerCount: 48,
-      total: 720,
-      remarks: 'Low stock warning',
-      assignedTo: 'Emma Worker'
-    }
-  ];
+  const products = useLiveQuery(() => db.products.toArray(), []);
+  const returns = useLiveQuery(() => db.returns.toArray(), []);
+  const employees = useLiveQuery(() => db.employees.toArray(), []);
 
-  // Mock returns data
-  const returnItems: ReturnItemData[] = [
-    {
-      id: '1',
-      product: {
-        article: 'Laptop Dell XPS 15',
-        description: 'High-performance laptop with 16GB RAM',
-        date: '2024-01-15',
-        parControlNumber: 'PAR-2024-001',
-        propertyNumber: 'PROP-2024-001',
-        unit: 'pcs',
-        unitValue: 1499,
-        balancePerCard: 25,
-        onHandPerCount: 25,
-        total: 37475,
-        remarks: 'In good condition'
-      },
-      returnInfo: {
-        rrspNo: 'RRSP-2024-001',
-        returnDate: '2024-02-03',
-        quantity: 1,
-        remarks: 'Screen not working properly',
-        condition: 'Need Repair',
-        returnedBy: {
-          name: 'Mike Employee',
-          position: 'employee'
-        },
-        receivedDate: '2024-02-03',
-        location: 'Main Office'
-      }
-    },
-    {
-      id: '2',
-      product: {
-        article: 'Mouse Logitech MX',
-        description: 'Wireless ergonomic mouse',
-        date: '2024-01-20',
-        parControlNumber: 'PAR-2024-002',
-        propertyNumber: 'PROP-2024-002',
-        unit: 'pcs',
-        unitValue: 99,
-        balancePerCard: 45,
-        onHandPerCount: 45,
-        total: 4455,
-        remarks: 'New stock'
-      },
-      returnInfo: {
-        rrspNo: 'RRSP-2024-002',
-        returnDate: '2024-02-02',
-        quantity: 2,
-        remarks: 'Customer changed preference',
-        condition: 'Functional',
-        returnedBy: {
-          name: 'Emma Worker',
-          position: 'employee'
-        },
-        receivedDate: '2024-02-02',
-        location: 'Warehouse A'
-      }
-    }
-  ];
+  const employeeMap = useMemo(() => {
+    const map = new Map<string, string>();
+    (employees || []).forEach((employee) => map.set(employee.id, employee.fullName));
+    return map;
+  }, [employees]);
 
-  const canExportData = user.role === 'administrator';
+  const rangeStart = getRangeStart(dateRange, customRange?.start);
+  const rangeEnd = customRange?.end ? new Date(customRange.end) : new Date();
 
-  const handleExport = (format: 'pdf' | 'excel') => {
-    console.log(`Exporting ${reportType} report as ${format}`);
-  };
+  const filteredProducts = useMemo(() => {
+    return (products || []).filter((product) => {
+      const date = new Date(product.date);
+      return date >= rangeStart && date <= rangeEnd;
+    });
+  }, [products, rangeStart, rangeEnd]);
+
+  const filteredReturns = useMemo(() => {
+    return (returns || []).filter((ret) => {
+      const date = new Date(ret.returnDate);
+      return date >= rangeStart && date <= rangeEnd;
+    });
+  }, [returns, rangeStart, rangeEnd]);
+
+  const canExportData = user.role === 'admin';
 
   const toggleExpand = (id: string) => {
     const newExpanded = new Set(expandedItems);
@@ -188,32 +109,97 @@ export function ReportsPage({ user }: ReportsPageProps) {
     setExpandedItems(newExpanded);
   };
 
-  const getValueColor = (value: string) => {
-    switch (value) {
-      case 'HV':
-        return 'bg-purple-100 text-purple-700';
-      case 'MV':
-        return 'bg-blue-100 text-blue-700';
-      case 'LV':
-        return 'bg-green-100 text-green-700';
-      default:
-        return 'bg-gray-100 text-gray-700';
+  const handleExportCsv = (rows: string[][], filename: string) => {
+    const csv = rows.map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleExportPdf = (content: string, title: string) => {
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) return;
+    printWindow.document.write(`
+      <html>
+        <head><title>${title}</title></head>
+        <body style="font-family: Arial, sans-serif; padding: 16px;">
+          <h2>${title}</h2>
+          <pre style="white-space: pre-wrap;">${content}</pre>
+        </body>
+      </html>
+    `);
+    printWindow.document.close();
+    printWindow.focus();
+    printWindow.print();
+  };
+
+  const handleExport = (format: 'pdf' | 'excel') => {
+    if (reportType === 'inventory') {
+      const rows = [
+        ['Article', 'Description', 'Date', 'PAR Control Number', 'Property Number', 'Unit', 'Unit Value', 'Balance', 'On Hand', 'Total', 'Remarks', 'Value', 'Assigned To']
+      ];
+      filteredProducts.forEach((item) => {
+        rows.push([
+          item.article,
+          item.description,
+          item.date,
+          item.parControlNumber,
+          item.propertyNumber,
+          item.unit,
+          formatCurrency(item.unitValue),
+          String(item.balancePerCard),
+          String(item.onHandPerCount),
+          formatCurrency(item.total),
+          item.remarks,
+          item.valueCategory,
+          item.assignedToEmployeeId ? employeeMap.get(item.assignedToEmployeeId) || '' : ''
+        ]);
+      });
+
+      if (format === 'excel') {
+        handleExportCsv(rows, 'inventory-report.csv');
+      } else {
+        const content = rows.map((row) => row.join(' | ')).join('\n');
+        handleExportPdf(content, 'Inventory Report');
+      }
+    } else {
+      const rows = [
+        ['RRSP Number', 'Return Date', 'Quantity', 'Condition', 'Returned By', 'Product', 'Location', 'Status']
+      ];
+      filteredReturns.forEach((item) => {
+        const product = products?.find((product) => product.id === item.productId);
+        rows.push([
+          item.rrspNumber,
+          item.returnDate,
+          String(item.quantity),
+          item.condition,
+          employeeMap.get(item.returnedByEmployeeId) || '',
+          product?.article || '',
+          item.location,
+          item.status
+        ]);
+      });
+
+      if (format === 'excel') {
+        handleExportCsv(rows, 'returns-report.csv');
+      } else {
+        const content = rows.map((row) => row.join(' | ')).join('\n');
+        handleExportPdf(content, 'Returns Report');
+      }
     }
   };
 
-  const getConditionColor = (condition: string) => {
-    switch (condition) {
-      case 'Functional':
-        return 'bg-green-100 text-green-700';
-      case 'Destroyed':
-      case 'For Disposal':
-        return 'bg-red-100 text-red-700';
-      case 'Need Repair':
-      case 'Damaged':
-        return 'bg-orange-100 text-orange-700';
-      default:
-        return 'bg-gray-100 text-gray-700';
-    }
+  const handleCustomRange = () => {
+    const start = window.prompt('Enter start date (YYYY-MM-DD):', customRange?.start || '');
+    if (!start) return;
+    const end = window.prompt('Enter end date (YYYY-MM-DD):', customRange?.end || '');
+    if (!end) return;
+    setCustomRange({ start, end });
+    setDateRange('custom');
   };
 
   return (
@@ -226,14 +212,14 @@ export function ReportsPage({ user }: ReportsPageProps) {
           </div>
           {canExportData && (
             <div className="flex gap-2">
-              <button 
+              <button
                 onClick={() => handleExport('pdf')}
                 className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition flex items-center gap-2"
               >
                 <Download className="w-5 h-5" />
                 Export PDF
               </button>
-              <button 
+              <button
                 onClick={() => handleExport('excel')}
                 className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition flex items-center gap-2"
               >
@@ -245,35 +231,43 @@ export function ReportsPage({ user }: ReportsPageProps) {
         </div>
 
         <div className="flex gap-4">
-          <select 
+          <select
             value={reportType}
-            onChange={(e) => setReportType(e.target.value)}
+            onChange={(e) => setReportType(e.target.value as 'inventory' | 'returns')}
             className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
           >
             <option value="inventory">Inventory Report</option>
             <option value="returns">Returns Report</option>
           </select>
-          <select 
+          <select
             value={dateRange}
-            onChange={(e) => setDateRange(e.target.value)}
+            onChange={(e) => setDateRange(e.target.value as DateRange)}
             className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
           >
             <option value="week">Last Week</option>
             <option value="month">Last Month</option>
             <option value="quarter">Last Quarter</option>
             <option value="year">Last Year</option>
+            <option value="custom">Custom Range</option>
           </select>
-          <button className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition flex items-center gap-2">
+          <button
+            onClick={handleCustomRange}
+            className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition flex items-center gap-2"
+          >
             <Calendar className="w-5 h-5" />
             Custom Range
           </button>
         </div>
       </div>
 
-      {/* Inventory Report */}
       {reportType === 'inventory' && (
         <div className="space-y-4">
-          {inventoryItems.map((item) => {
+          {filteredProducts.length === 0 && (
+            <div className="bg-white rounded-xl border border-gray-200 p-8 text-center text-gray-600">
+              Not enough data to generate report
+            </div>
+          )}
+          {filteredProducts.map((item) => {
             const isExpanded = expandedItems.has(item.id);
             return (
               <div key={item.id} className="bg-white rounded-xl border border-gray-200 overflow-hidden">
@@ -289,7 +283,7 @@ export function ReportsPage({ user }: ReportsPageProps) {
                     </div>
                     <div>
                       <p className="text-sm text-gray-600 mb-1">Date:</p>
-                      <p className="text-sm text-gray-900">{new Date(item.date).toLocaleDateString()}</p>
+                      <p className="text-sm text-gray-900">{formatDate(item.date)}</p>
                     </div>
                     <div>
                       <p className="text-sm text-gray-600 mb-1">PAR Control Number:</p>
@@ -305,7 +299,7 @@ export function ReportsPage({ user }: ReportsPageProps) {
                     </div>
                     <div>
                       <p className="text-sm text-gray-600 mb-1">Unit Value:</p>
-                      <p className="text-sm text-gray-900">₱{item.unitValue.toLocaleString()}</p>
+                      <p className="text-sm text-gray-900">{formatCurrency(item.unitValue)}</p>
                     </div>
                     <div>
                       <p className="text-sm text-gray-600 mb-1">Balance per Card:</p>
@@ -317,7 +311,7 @@ export function ReportsPage({ user }: ReportsPageProps) {
                     </div>
                     <div>
                       <p className="text-sm text-gray-600 mb-1">Total:</p>
-                      <p className="font-medium text-gray-900">₱{item.total.toLocaleString()}</p>
+                      <p className="font-medium text-gray-900">{formatCurrency(item.total)}</p>
                     </div>
                     <div className="md:col-span-2">
                       <p className="text-sm text-gray-600 mb-1">Remarks:</p>
@@ -325,19 +319,20 @@ export function ReportsPage({ user }: ReportsPageProps) {
                     </div>
                   </div>
 
-                  {/* Expandable Section */}
                   {isExpanded && (
                     <div className="mt-4 pt-4 border-t border-gray-200">
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div>
                           <p className="text-sm text-gray-600 mb-1">Value:</p>
-                          <span className={`inline-flex px-3 py-1 rounded-full text-xs font-medium ${getValueColor(item.value)}`}>
-                            {item.value} - {item.value === 'HV' ? 'High Value' : item.value === 'MV' ? 'Mid Value' : 'Low Value'}
+                          <span className={`inline-flex px-3 py-1 rounded-full text-xs font-medium ${getValueColor(item.valueCategory)}`}>
+                            {item.valueCategory}
                           </span>
                         </div>
                         <div>
                           <p className="text-sm text-gray-600 mb-1">Assigned To:</p>
-                          <p className="text-sm font-medium text-gray-900">{item.assignedTo}</p>
+                          <p className="text-sm font-medium text-gray-900">
+                            {item.assignedToEmployeeId ? employeeMap.get(item.assignedToEmployeeId) || 'Unknown' : 'Unassigned'}
+                          </p>
                         </div>
                       </div>
                     </div>
@@ -368,11 +363,16 @@ export function ReportsPage({ user }: ReportsPageProps) {
         </div>
       )}
 
-      {/* Returns Report */}
       {reportType === 'returns' && (
         <div className="space-y-4">
-          {returnItems.map((item) => {
+          {filteredReturns.length === 0 && (
+            <div className="bg-white rounded-xl border border-gray-200 p-8 text-center text-gray-600">
+              Not enough data to generate report
+            </div>
+          )}
+          {filteredReturns.map((item) => {
             const isExpanded = expandedItems.has(item.id);
+            const product = products?.find((product) => product.id === item.productId);
             return (
               <div key={item.id} className="bg-white rounded-xl border border-gray-200 overflow-hidden">
                 <div className="p-6">
@@ -380,92 +380,91 @@ export function ReportsPage({ user }: ReportsPageProps) {
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                     <div>
                       <p className="text-sm text-gray-600 mb-1">Article:</p>
-                      <p className="font-medium text-gray-900">{item.product.article}</p>
+                      <p className="font-medium text-gray-900">{product?.article || 'Unknown'}</p>
                     </div>
                     <div>
                       <p className="text-sm text-gray-600 mb-1">Description:</p>
-                      <p className="text-sm text-gray-900">{item.product.description}</p>
+                      <p className="text-sm text-gray-900">{product?.description || ''}</p>
                     </div>
                     <div>
                       <p className="text-sm text-gray-600 mb-1">Date:</p>
-                      <p className="text-sm text-gray-900">{new Date(item.product.date).toLocaleDateString()}</p>
+                      <p className="text-sm text-gray-900">{product?.date ? formatDate(product.date) : ''}</p>
                     </div>
                     <div>
                       <p className="text-sm text-gray-600 mb-1">PAR Control Number:</p>
-                      <p className="text-sm text-gray-900">{item.product.parControlNumber}</p>
+                      <p className="text-sm text-gray-900">{product?.parControlNumber || ''}</p>
                     </div>
                     <div>
                       <p className="text-sm text-gray-600 mb-1">Property Number:</p>
-                      <p className="text-sm text-gray-900">{item.product.propertyNumber}</p>
+                      <p className="text-sm text-gray-900">{product?.propertyNumber || ''}</p>
                     </div>
                     <div>
                       <p className="text-sm text-gray-600 mb-1">Unit:</p>
-                      <p className="text-sm text-gray-900">{item.product.unit}</p>
+                      <p className="text-sm text-gray-900">{product?.unit || ''}</p>
                     </div>
                     <div>
                       <p className="text-sm text-gray-600 mb-1">Unit Value:</p>
-                      <p className="text-sm text-gray-900">₱{item.product.unitValue.toLocaleString()}</p>
+                      <p className="text-sm text-gray-900">{product ? formatCurrency(product.unitValue) : ''}</p>
                     </div>
                     <div>
                       <p className="text-sm text-gray-600 mb-1">Balance per Card:</p>
-                      <p className="text-sm text-gray-900">{item.product.balancePerCard}</p>
+                      <p className="text-sm text-gray-900">{product?.balancePerCard ?? ''}</p>
                     </div>
                     <div>
                       <p className="text-sm text-gray-600 mb-1">On Hand per Count:</p>
-                      <p className="text-sm text-gray-900">{item.product.onHandPerCount}</p>
+                      <p className="text-sm text-gray-900">{product?.onHandPerCount ?? ''}</p>
                     </div>
                     <div>
                       <p className="text-sm text-gray-600 mb-1">Total:</p>
-                      <p className="font-medium text-gray-900">₱{item.product.total.toLocaleString()}</p>
+                      <p className="font-medium text-gray-900">{product ? formatCurrency(product.total) : ''}</p>
                     </div>
                     <div className="md:col-span-2">
                       <p className="text-sm text-gray-600 mb-1">Remarks:</p>
-                      <p className="text-sm text-gray-900">{item.product.remarks}</p>
+                      <p className="text-sm text-gray-900">{product?.remarks || ''}</p>
                     </div>
                   </div>
 
-                  {/* Expandable Return Information Section */}
                   {isExpanded && (
                     <div className="mt-6 pt-6 border-t border-gray-200">
                       <h3 className="font-medium text-gray-900 mb-4">Return Information</h3>
                       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                         <div>
                           <p className="text-sm text-gray-600 mb-1">RRSP No.:</p>
-                          <p className="font-medium text-gray-900">{item.returnInfo.rrspNo}</p>
+                          <p className="font-medium text-gray-900">{item.rrspNumber}</p>
                         </div>
                         <div>
                           <p className="text-sm text-gray-600 mb-1">Return Date:</p>
-                          <p className="text-sm text-gray-900">{new Date(item.returnInfo.returnDate).toLocaleDateString()}</p>
+                          <p className="text-sm text-gray-900">{formatDate(item.returnDate)}</p>
                         </div>
                         <div>
                           <p className="text-sm text-gray-600 mb-1">Quantity:</p>
-                          <p className="text-sm text-gray-900">{item.returnInfo.quantity} units</p>
+                          <p className="text-sm text-gray-900">{item.quantity} units</p>
                         </div>
                         <div>
                           <p className="text-sm text-gray-600 mb-1">Condition:</p>
-                          <span className={`inline-flex px-3 py-1 rounded-full text-xs font-medium ${getConditionColor(item.returnInfo.condition)}`}>
-                            {item.returnInfo.condition}
+                          <span className={`inline-flex px-3 py-1 rounded-full text-xs font-medium ${getConditionColor(item.condition)}`}>
+                            {item.condition}
                           </span>
                         </div>
                         <div className="md:col-span-2">
                           <p className="text-sm text-gray-600 mb-1">Remarks:</p>
-                          <p className="text-sm text-gray-900">{item.returnInfo.remarks}</p>
+                          <p className="text-sm text-gray-900">{item.remarks}</p>
                         </div>
                         <div>
                           <p className="text-sm text-gray-600 mb-1">Returned By - Name:</p>
-                          <p className="text-sm text-gray-900">{item.returnInfo.returnedBy.name}</p>
+                          <p className="text-sm text-gray-900">{employeeMap.get(item.returnedByEmployeeId) || 'Unknown'}</p>
                         </div>
                         <div>
                           <p className="text-sm text-gray-600 mb-1">Position:</p>
-                          <p className="text-sm text-gray-900 capitalize">{item.returnInfo.returnedBy.position}</p>
+                          <p className="text-sm text-gray-900 capitalize">{item.returnedByPosition}</p>
                         </div>
                         <div>
                           <p className="text-sm text-gray-600 mb-1">Received Date:</p>
-                          <p className="text-sm text-gray-900">{new Date(item.returnInfo.receivedDate).toLocaleDateString()}</p>
+                          <p className="text-sm text-gray-900">{formatDate(item.receivedDate)}</p>
                         </div>
                         <div>
                           <p className="text-sm text-gray-600 mb-1">Location:</p>
-                          <p className="text-sm text-gray-900">{item.returnInfo.location}</p>
+                          <p className="text-sm text-gray-900">{item.location}</p>
                         </div>
                       </div>
                     </div>

@@ -1,45 +1,30 @@
 import React, { useState } from 'react';
-import { User, UserRole } from '../App';
-import { LogIn, Shield, Users, UserCircle } from 'lucide-react';
+import { LogIn, Shield, UserCircle } from 'lucide-react';
+import { useAuth } from '../lib/auth';
+import { DEFAULT_ADMIN_CREDENTIALS } from '../lib/db';
 
 interface LoginPageProps {
-  onLogin: (user: User) => void;
+  initError: string | null;
 }
 
-// Mock users for demo
-const mockUsers = {
-  admin: {
-    id: '1',
-    name: 'John Admin',
-    email: 'admin@company.com',
-    role: 'administrator' as UserRole,
-  },
-  employee: {
-    id: '3',
-    name: 'Mike Employee',
-    email: 'employee@company.com',
-    role: 'employee' as UserRole,
-    assignedProducts: ['1'],
-  },
-};
-
-export function LoginPage({ onLogin }: LoginPageProps) {
+export function LoginPage({ initError }: LoginPageProps) {
+  const { login } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [error, setError] = useState<string | null>(null);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    // Simple mock authentication
-    if (email.includes('admin')) {
-      onLogin(mockUsers.admin);
-    } else {
-      onLogin(mockUsers.employee);
+    setError(null);
+    const result = await login(email, password);
+    if (!result.success) {
+      setError(result.error || 'Unable to sign in.');
     }
   };
 
-  const handleQuickLogin = (userType: keyof typeof mockUsers) => {
-    onLogin(mockUsers[userType]);
+  const fillDefaultAdmin = () => {
+    setEmail(DEFAULT_ADMIN_CREDENTIALS.email);
+    setPassword(DEFAULT_ADMIN_CREDENTIALS.password);
   };
 
   return (
@@ -80,10 +65,22 @@ export function LoginPage({ onLogin }: LoginPageProps) {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition"
-                placeholder="••••••••"
+                placeholder="********"
                 required
               />
             </div>
+
+            {initError && (
+              <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                {initError}
+              </div>
+            )}
+
+            {error && (
+              <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                {error}
+              </div>
+            )}
 
             <button
               type="submit"
@@ -95,22 +92,28 @@ export function LoginPage({ onLogin }: LoginPageProps) {
           </form>
 
           <div className="mt-8 pt-8 border-t border-gray-200">
-            <p className="text-sm text-gray-600 text-center mb-4">Quick Login (Demo)</p>
-            <div className="space-y-2">
+            <p className="text-sm text-gray-600 text-center mb-4">First Run Admin Credentials</p>
+            <div className="space-y-3 text-sm text-gray-700">
+              <div className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2">
+                <span>Email</span>
+                <span className="font-medium">{DEFAULT_ADMIN_CREDENTIALS.email}</span>
+              </div>
+              <div className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2">
+                <span>Password</span>
+                <span className="font-medium">{DEFAULT_ADMIN_CREDENTIALS.password}</span>
+              </div>
               <button
-                onClick={() => handleQuickLogin('admin')}
-                className="w-full px-4 py-2 bg-purple-50 text-purple-700 rounded-lg hover:bg-purple-100 transition font-medium text-sm flex items-center justify-center gap-2"
+                type="button"
+                onClick={fillDefaultAdmin}
+                className="w-full px-4 py-2 bg-indigo-50 text-indigo-700 rounded-lg hover:bg-indigo-100 transition font-medium text-sm flex items-center justify-center gap-2"
               >
                 <Shield className="w-4 h-4" />
-                Administrator
+                Use Default Admin
               </button>
-              <button
-                onClick={() => handleQuickLogin('employee')}
-                className="w-full px-4 py-2 bg-green-50 text-green-700 rounded-lg hover:bg-green-100 transition font-medium text-sm flex items-center justify-center gap-2"
-              >
+              <div className="flex items-center gap-2 text-xs text-gray-500">
                 <UserCircle className="w-4 h-4" />
-                Employee
-              </button>
+                Update these credentials after first login.
+              </div>
             </div>
           </div>
         </div>
