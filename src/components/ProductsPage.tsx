@@ -31,6 +31,7 @@ interface ProductFormState {
   unitValue: string;
   balancePerCard: string;
   onHandPerCount: string;
+  location: string;
   remarks: string;
   assignedToEmployeeId: string;
 }
@@ -46,6 +47,7 @@ const emptyFormState: ProductFormState = {
   unitValue: '',
   balancePerCard: '',
   onHandPerCount: '',
+  location: '',
   remarks: '',
   assignedToEmployeeId: ''
 };
@@ -117,6 +119,7 @@ export function ProductsPage({ user }: ProductsPageProps) {
       unitValue: String(product.unitValue),
       balancePerCard: String(product.balancePerCard),
       onHandPerCount: String(product.onHandPerCount),
+      location: product.location,
       remarks: product.remarks,
       assignedToEmployeeId: product.assignedToEmployeeId || ''
     });
@@ -155,6 +158,7 @@ export function ProductsPage({ user }: ProductsPageProps) {
       balancePerCard: toNumber(formState.balancePerCard),
       onHandPerCount: toNumber(formState.onHandPerCount),
       total,
+      location: formState.location.trim(),
       remarks: formState.remarks.trim(),
       assignedToEmployeeId: assignedId,
       status
@@ -208,6 +212,7 @@ export function ProductsPage({ user }: ProductsPageProps) {
       balancePerCard: toNumber(formState.balancePerCard),
       onHandPerCount: toNumber(formState.onHandPerCount),
       total,
+      location: formState.location.trim(),
       remarks: formState.remarks.trim(),
       assignedToEmployeeId: assignedId,
       status
@@ -356,16 +361,20 @@ export function ProductsPage({ user }: ProductsPageProps) {
               <tr>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Value</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Article</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Discription</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date Acquired</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">PAR Control No.</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Property No.</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Unit</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Unit Value</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">On Hand</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Total</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">UOM</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Unit Cost</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">QTY</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Total Amount</th>
                 {user.role !== 'employee' && (
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Assigned To</th>
                 )}
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Location</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Remarks</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
                 <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
               </tr>
             </thead>
@@ -391,26 +400,29 @@ export function ProductsPage({ user }: ProductsPageProps) {
                       </div>
                       <div>
                         <p className="font-medium text-gray-900">{product.article}</p>
-                        <p className="text-xs text-gray-500">{product.description}</p>
                       </div>
                     </div>
                   </td>
+                  <td className="px-6 py-4 text-sm text-gray-600">{product.description}</td>
+                  <td className="px-6 py-4 text-sm text-gray-600">{product.date}</td>
                   <td className="px-6 py-4 text-sm text-gray-600">{product.parControlNumber}</td>
                   <td className="px-6 py-4 text-sm text-gray-600">{product.propertyNumber}</td>
                   <td className="px-6 py-4 text-sm text-gray-600">{product.unit}</td>
                   <td className="px-6 py-4 text-sm text-gray-900">{formatCurrency(product.unitValue)}</td>
                   <td className="px-6 py-4 text-sm text-gray-900">{product.onHandPerCount}</td>
                   <td className="px-6 py-4 text-sm font-medium text-gray-900">{formatCurrency(product.total)}</td>
-                  <td className="px-6 py-4">
-                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusColor(product.status)}`}>
-                      {product.status}
-                    </span>
-                  </td>
                   {user.role !== 'employee' && (
                     <td className="px-6 py-4 text-sm text-gray-600">
                       {product.assignedToEmployeeId ? employeeMap.get(product.assignedToEmployeeId)?.fullName || '-' : '-'}
                     </td>
                   )}
+                  <td className="px-6 py-4 text-sm text-gray-600">{product.location}</td>
+                  <td className="px-6 py-4 text-sm font-medium text-gray-900">{product.remarks}</td>
+                  <td className="px-6 py-4">
+                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusColor(product.status)}`}>
+                      {product.status}
+                    </span>
+                  </td>
                   <td className="px-6 py-4 text-right">
                     <div className="flex items-center justify-end gap-2">
                       {canManageProduct && (
@@ -566,7 +578,7 @@ export function ProductsPage({ user }: ProductsPageProps) {
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-3 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">On Hand per Count *</label>
                   <input
@@ -584,6 +596,16 @@ export function ProductsPage({ user }: ProductsPageProps) {
                     value={formatCurrency(computeTotal(formState.unitValue, formState.onHandPerCount))}
                     disabled
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-50 text-gray-600"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Location *</label>
+                  <input
+                    type="text"
+                    value={formState.location}
+                    onChange={(e) => setFormState({ ...formState, location: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
+                    required
                   />
                 </div>
               </div>
@@ -755,7 +777,7 @@ export function ProductsPage({ user }: ProductsPageProps) {
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-3 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">On Hand per Count *</label>
                   <input
@@ -773,6 +795,16 @@ export function ProductsPage({ user }: ProductsPageProps) {
                     value={formatCurrency(computeTotal(formState.unitValue, formState.onHandPerCount))}
                     disabled
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-50 text-gray-600"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Location *</label>
+                  <input
+                    type="text"
+                    value={formState.location}
+                    onChange={(e) => setFormState({ ...formState, location: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
+                    required
                   />
                 </div>
               </div>

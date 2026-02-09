@@ -28,11 +28,11 @@ const inventoryColumns: ReportColumn[] = [
   { key: 'date', header: 'Date', align: 'center', pdfWidth: 60, excelWidth: 14 },
   { key: 'parControlNumber', header: 'PAR Control Number', align: 'left', pdfWidth: 85, excelWidth: 22 },
   { key: 'propertyNumber', header: 'Property Number', align: 'left', pdfWidth: 85, excelWidth: 22 },
-  { key: 'unit', header: 'Unit', align: 'left', pdfWidth: 40, excelWidth: 10 },
+  { key: 'unit', header: 'UOM', align: 'left', pdfWidth: 40, excelWidth: 10 },
   { key: 'unitValue', header: 'Unit Value', align: 'right', pdfWidth: 65, excelWidth: 16, format: 'currency' },
-  { key: 'balance', header: 'Balance', align: 'right', pdfWidth: 50, excelWidth: 12, format: 'number' },
-  { key: 'onHand', header: 'On Hand', align: 'right', pdfWidth: 50, excelWidth: 12, format: 'number' },
+  { key: 'balance', header: 'QTY', align: 'right', pdfWidth: 50, excelWidth: 12, format: 'number' },
   { key: 'total', header: 'Total', align: 'right', pdfWidth: 65, excelWidth: 16, format: 'currency' },
+  { key: 'location', header: 'Location', align: 'left', pdfWidth: 65, excelWidth: 18 },
   { key: 'remarks', header: 'Remarks', align: 'left', pdfWidth: 64, excelWidth: 40 }
 ];
 
@@ -192,6 +192,8 @@ export const buildInventoryReportRows = (products: Product[]): ReportRow[] => {
       balance: product.balancePerCard,
       onHand: product.onHandPerCount,
       total: product.total,
+      location: product.location,
+      assignedTo: product.assignedToEmployeeId || null,
       remarks: product.remarks
     };
   });
