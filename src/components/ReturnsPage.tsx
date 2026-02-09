@@ -1,7 +1,7 @@
 
 import React, { useMemo, useState } from 'react';
 import { RotateCcw, Plus, Search, Check, X, Clock, AlertCircle, UserPlus } from 'lucide-react';
-import { useLiveQuery } from 'dexie-react-hooks';
+import { useLiveQuery } from '../lib/useLiveQuery';
 import type { Employee, EmployeeRole, Product, ReturnCondition, ReturnRecord, ReturnStatus } from '../lib/types';
 import { db } from '../lib/db';
 import { createId, formatDate, nowIso, toNumber } from '../lib/utils';

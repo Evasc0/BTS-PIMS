@@ -10,7 +10,7 @@ import {
   MoreVertical,
   X
 } from 'lucide-react';
-import { useLiveQuery } from 'dexie-react-hooks';
+import { useLiveQuery } from '../lib/useLiveQuery';
 import type { Employee, Product, ProductStatus, ValueCategory } from '../lib/types';
 import { db } from '../lib/db';
 import { createId, formatCurrency, toNumber } from '../lib/utils';
@@ -69,28 +69,28 @@ export function ProductsPage({ user }: ProductsPageProps) {
 
   const employeeMap = useMemo(() => {
     const map = new Map<string, Employee>();
-    (employees || []).forEach((employee) => map.set(employee.id, employee));
+    (employees || []).forEach((employee: Employee) => map.set(employee.id, employee));
     return map;
   }, [employees]);
 
   const canManageProduct = user.role === 'admin' || user.role === 'supervisor';
 
   const filteredProducts = (products || [])
-    .filter((product) => {
+    .filter((product: Product) => {
       if (user.role === 'employee') {
         return product.assignedToEmployeeId === user.id;
       }
       return true;
     })
-    .filter((product) => (statusFilter === 'all' ? true : product.status === statusFilter))
-    .filter((product) => {
+    .filter((product: Product) => (statusFilter === 'all' ? true : product.status === statusFilter))
+    .filter((product: Product) => {
       const term = searchTerm.trim().toLowerCase();
       if (!term) return true;
       return (
-        product.article.toLowerCase().includes(term) ||
-        product.propertyNumber.toLowerCase().includes(term) ||
-        product.parControlNumber.toLowerCase().includes(term) ||
-        product.description.toLowerCase().includes(term)
+        (product.article || '').toLowerCase().includes(term) ||
+        (product.propertyNumber || '').toLowerCase().includes(term) ||
+        (product.parControlNumber || '').toLowerCase().includes(term) ||
+        (product.description || '').toLowerCase().includes(term)
       );
     });
 
@@ -311,6 +311,8 @@ export function ProductsPage({ user }: ProductsPageProps) {
     }
   };
 
+  const columnCount = user.role !== 'employee' ? 15 : 14;
+
   return (
     <div className="p-8">
       <div className="mb-8">
@@ -361,7 +363,7 @@ export function ProductsPage({ user }: ProductsPageProps) {
               <tr>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Value</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Article</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Discription</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Description</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date Acquired</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">PAR Control No.</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Property No.</th>
@@ -381,12 +383,12 @@ export function ProductsPage({ user }: ProductsPageProps) {
             <tbody className="divide-y divide-gray-200">
               {filteredProducts.length === 0 && (
                 <tr>
-                  <td className="px-6 py-6 text-center text-gray-500" colSpan={user.role !== 'employee' ? 11 : 10}>
+                  <td className="px-6 py-6 text-center text-gray-500" colSpan={columnCount}>
                     No products available.
                   </td>
                 </tr>
               )}
-              {filteredProducts.map((product) => (
+              {filteredProducts.map((product: Product) => (
                 <tr key={product.id} className="hover:bg-gray-50">
                   <td className="px-6 py-4">
                     <span className={`px-2 py-1 rounded-full text-xs font-medium ${getValueColor(product.valueCategory)}`}>

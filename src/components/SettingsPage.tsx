@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Settings, Save, Bell, Lock, Database, Mail, Globe, Shield } from 'lucide-react';
-import { useLiveQuery } from 'dexie-react-hooks';
+import { useLiveQuery } from '../lib/useLiveQuery';
 import type { Employee, SystemSettings } from '../lib/types';
 import { db } from '../lib/db';
 import { maskSecret, regenerateApiKey } from '../lib/security';

@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { Download, Calendar, Eye, EyeOff, ChevronDown, ChevronUp } from 'lucide-react';
-import { useLiveQuery } from 'dexie-react-hooks';
+import { useLiveQuery } from '../lib/useLiveQuery';
 import type { Employee, ReturnCondition, ValueCategory } from '../lib/types';
 import { db } from '../lib/db';
 import { formatCurrency, formatDate } from '../lib/utils';

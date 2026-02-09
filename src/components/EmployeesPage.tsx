@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { Users, Plus, Search, Edit, Trash2, Mail, Phone, X, Shield, UserCog } from 'lucide-react';
-import { useLiveQuery } from 'dexie-react-hooks';
+import { useLiveQuery } from '../lib/useLiveQuery';
 import type { Employee, EmployeeRole } from '../lib/types';
 import { db } from '../lib/db';
 import { createPasswordHash } from '../lib/security';

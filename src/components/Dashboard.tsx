@@ -9,7 +9,7 @@ import {
   CheckCircle,
   Clock
 } from 'lucide-react';
-import { useLiveQuery } from 'dexie-react-hooks';
+import { useLiveQuery } from '../lib/useLiveQuery';
 import type { Employee } from '../lib/types';
 import { db } from '../lib/db';
 import { formatDate } from '../lib/utils';
