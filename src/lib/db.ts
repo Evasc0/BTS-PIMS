@@ -1,109 +1,69 @@
-import Dexie, { Table } from 'dexie';
 import type { ActivityLog, Employee, Product, ReturnRecord, SystemSettings } from './types';
-import { createPasswordHash, regenerateApiKey } from './security';
-import { createId, nowIso } from './utils';
-
-class InventoryDatabase extends Dexie {
-  employees!: Table<Employee, string>;
-  products!: Table<Product, string>;
-  returns!: Table<ReturnRecord, string>;
-  activityLogs!: Table<ActivityLog, string>;
-  settings!: Table<SystemSettings, string>;
-
-  constructor() {
-    super('bts-inventory-db');
-    this.version(1).stores({
-      employees: 'id, email, role, status',
-      products: 'id, valueCategory, article, parControlNumber, propertyNumber, status, assignedToEmployeeId',
-      returns: 'id, rrspNumber, productId, returnDate, status, returnedByEmployeeId',
-      activityLogs: 'id, action, entityType, entityId, performedByEmployeeId, timestamp',
-      settings: 'id'
-    });
-  }
-}
-
-export const db = new InventoryDatabase();
 
 export const DEFAULT_ADMIN_CREDENTIALS = {
   email: 'admin@local',
   password: 'admin123'
 };
 
-const seedAdminIfNeeded = async (): Promise<void> => {
-  const count = await db.employees.count();
-  if (count > 0) return;
-
-  const { hash, salt } = await createPasswordHash(DEFAULT_ADMIN_CREDENTIALS.password);
-  const adminId = createId();
-  await db.employees.add({
-    id: adminId,
-    fullName: 'System Administrator',
-    email: DEFAULT_ADMIN_CREDENTIALS.email,
-    phone: '',
-    department: 'Administration',
-    role: 'admin',
-    status: 'active',
-    passwordHash: hash,
-    passwordSalt: salt,
-    createdAt: nowIso(),
-    location: '',
-    twoFactorEnabled: false,
-    emailNotifications: false,
-    lowStockAlerts: false,
-    language: 'English'
-  });
-
-  await db.activityLogs.add({
-    id: createId(),
-    action: 'CREATE',
-    entityType: 'employee',
-    entityId: adminId,
-    performedByEmployeeId: adminId,
-    timestamp: nowIso(),
-    details: 'Initial admin account created',
-    status: 'success',
-    ipAddress: 'offline'
-  });
+type TableApi<T> = {
+  list: () => Promise<T[]>;
+  get: (id: string) => Promise<T | undefined>;
+  add: (record: T) => Promise<void>;
+  update?: (id: string, changes: Partial<T>) => Promise<void>;
+  delete?: (id: string) => Promise<void>;
+  findBy?: (field: string, value: unknown) => Promise<T | undefined>;
+  count?: () => Promise<number>;
+  put?: (record: T) => Promise<void>;
 };
 
-const seedSettingsIfNeeded = async (): Promise<void> => {
-  const count = await db.settings.count();
-  if (count > 0) return;
+type TableWrapper<T> = {
+  toArray: () => Promise<T[]>;
+  get: (id: string) => Promise<T | undefined>;
+  add: (record: T) => Promise<void>;
+  update: (id: string, changes: Partial<T>) => Promise<void>;
+  delete: (id: string) => Promise<void>;
+  count: () => Promise<number>;
+  put: (record: T) => Promise<void>;
+  where: (field: string) => { equals: (value: unknown) => { first: () => Promise<T | undefined> } };
+};
 
-  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-  await db.settings.add({
-    id: 'system',
-    systemName: 'BTS Property Inventory Management System',
-    companyName: '',
-    timeZone,
-    dateFormat: 'YYYY-MM-DD',
-    maintenanceMode: false,
-    notificationsLowStock: false,
-    notificationsNewReturn: false,
-    notificationsReturnApproved: false,
-    notificationsEmployeeAdded: false,
-    notificationsSystemUpdates: false,
-    passwordPolicy: 'medium',
-    sessionTimeoutMinutes: 30,
-    maxLoginAttempts: 5,
-    requireTwoFactor: false,
-    ipWhitelistEnabled: false,
-    backupFrequency: 'monthly',
-    lastBackupAt: '',
-    smtpServer: '',
-    smtpPort: '',
-    smtpEncryption: 'TLS',
-    smtpFromEmail: '',
-    apiKey: regenerateApiKey(),
-    apiRateLimit: 100,
-    apiEnabled: false
-  });
+let isOpen = false;
+
+const ensureApi = () => {
+  if (!window.api?.db) {
+    throw new Error('Database API is not available. Ensure the app is running in Electron.');
+  }
+  return window.api.db;
+};
+
+const makeTable = <T>(tableApi: TableApi<T>): TableWrapper<T> => ({
+  toArray: () => tableApi.list(),
+  get: (id: string) => tableApi.get(id),
+  add: (record: T) => tableApi.add(record),
+  update: (id: string, changes: Partial<T>) => (tableApi.update ? tableApi.update(id, changes) : Promise.resolve()),
+  delete: (id: string) => (tableApi.delete ? tableApi.delete(id) : Promise.resolve()),
+  count: () => (tableApi.count ? tableApi.count() : Promise.resolve(0)),
+  put: (record: T) => (tableApi.put ? tableApi.put(record) : Promise.resolve()),
+  where: (field: string) => ({
+    equals: (value: unknown) => ({
+      first: () => (tableApi.findBy ? tableApi.findBy(field, value) : Promise.resolve(undefined))
+    })
+  })
+});
+
+export const db = {
+  employees: makeTable<Employee>(ensureApi().employees),
+  products: makeTable<Product>(ensureApi().products),
+  returns: makeTable<ReturnRecord>(ensureApi().returns),
+  activityLogs: makeTable<ActivityLog>(ensureApi().activityLogs),
+  settings: makeTable<SystemSettings>(ensureApi().settings),
+  isOpen: () => isOpen,
+  open: async () => {
+    await ensureApi().initialize();
+    isOpen = true;
+  }
 };
 
 export const initializeDatabase = async (): Promise<void> => {
-  if (!db.isOpen()) {
-    await db.open();
-  }
-  await seedAdminIfNeeded();
-  await seedSettingsIfNeeded();
+  await db.open();
 };
