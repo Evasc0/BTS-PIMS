@@ -72,7 +72,7 @@ export function Dashboard({ user, syncNotice, onDismissSyncNotice }: DashboardPr
         <h1 className="font-bold text-gray-900 mb-2">Welcome back, {user.fullName}</h1>
         <p className="text-gray-600">
           {isAdmin && 'You have full system control and oversight'}
-          {isEmployee && 'View your assigned products and submit returns'}
+          {isEmployee && 'View your assigned property and submit returns'}
         </p>
       </div>
 
@@ -96,7 +96,7 @@ export function Dashboard({ user, syncNotice, onDismissSyncNotice }: DashboardPr
               Live
             </span>
           </div>
-          <p className="text-gray-600 text-sm mb-1">{isEmployee ? 'Assigned Products' : 'Total Products'}</p>
+          <p className="text-gray-600 text-sm mb-1">{isEmployee ? 'Assigned Property' : 'Total Property'}</p>
           <p className="font-bold text-gray-900">{stats.totalProducts}</p>
         </div>
 
@@ -212,9 +212,9 @@ export function Dashboard({ user, syncNotice, onDismissSyncNotice }: DashboardPr
 
         {isEmployee && (
           <div className="bg-white rounded-xl border border-gray-200 p-6 lg:col-span-2">
-            <h2 className="font-bold text-gray-900 mb-4">My Assigned Products</h2>
+            <h2 className="font-bold text-gray-900 mb-4">My Assigned Property</h2>
             {assignedProducts.length === 0 ? (
-              <p className="text-sm text-gray-600">No products assigned yet.</p>
+              <p className="text-sm text-gray-600">No property assigned yet.</p>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {assignedProducts.map((product) => (

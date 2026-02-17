@@ -23,7 +23,7 @@ interface SidebarProps {
 export function Sidebar({ user, currentPage, onNavigate, onLogout }: SidebarProps) {
   const menuItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: ['system_admin', 'employee'] },
-    { id: 'products', label: 'Products', icon: Package, roles: ['system_admin', 'employee'] },
+    { id: 'products', label: 'Property', icon: Package, roles: ['system_admin', 'employee'] },
     { id: 'employees', label: 'Employees', icon: Users, roles: ['system_admin'] },
     { id: 'returns', label: 'Returns', icon: RotateCcw, roles: ['system_admin', 'employee'] },
     { id: 'reports', label: 'Reports', icon: FileText, roles: ['system_admin'] },
@@ -57,8 +57,8 @@ export function Sidebar({ user, currentPage, onNavigate, onLogout }: SidebarProp
             <Package className="w-6 h-6 text-white" />
           </div>
           <div>
-            <h1 className="font-bold text-gray-900">BTS PIMS</h1>
-            <p className="text-xs text-gray-500">Property System</p>
+            <h1 className="font-bold text-gray-900">BTS</h1>
+            <p className="text-xs text-gray-500">Property Inventory Management System</p>
           </div>
         </div>
         

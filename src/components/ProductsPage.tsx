@@ -332,9 +332,9 @@ export function ProductsPage({ user }: ProductsPageProps) {
       <div className="mb-8">
         <div className="flex items-center justify-between mb-4">
           <div>
-            <h1 className="font-bold text-gray-900 mb-2">Products</h1>
+            <h1 className="font-bold text-gray-900 mb-2">Property</h1>
             <p className="text-gray-600">
-              {user.role === 'employee' ? 'View your assigned products' : 'Manage inventory products'}
+              {user.role === 'employee' ? 'View your assigned property' : 'Manage inventory property'}
             </p>
           </div>
           {canManageProduct && (
@@ -343,7 +343,7 @@ export function ProductsPage({ user }: ProductsPageProps) {
               className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition flex items-center gap-2"
             >
               <Plus className="w-5 h-5" />
-              Add Product
+              Add Property
             </button>
           )}
         </div>
@@ -680,7 +680,7 @@ export function ProductsPage({ user }: ProductsPageProps) {
                   Cancel
                 </button>
                 <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition">
-                  Add Product
+                  Add Property
                 </button>
               </div>
             </form>
