@@ -2,8 +2,10 @@ import { app, BrowserWindow, ipcMain } from 'electron';
 import { dataStore } from '../db';
 import { authService } from '../auth/authService';
 import {
+  autoPullEmployeeSubmissions,
   clearSyncActorAccessToken,
   getFullSyncSession,
+  getLocalChanges,
   getSyncStatus,
   listFullSyncRequests,
   previewRemoteChanges,
@@ -203,9 +205,19 @@ export function registerIpc(mainWindow: BrowserWindow): void {
     notify('sync_state', [`sync:${actor.userId}`]);
     return result;
   });
-  ipcMain.handle('sync:push', async (_evt, userId: string) => {
+  ipcMain.handle('sync:push', async (_evt, userId: string, stage?: { categories?: string[]; outboxIds?: number[] }) => {
     const actor = resolveSyncActor(userId);
-    const result = await pushLocalChanges(actor);
+    const result = await pushLocalChanges(actor, stage);
+    notify('sync_state', [`sync:${actor.userId}`]);
+    return result;
+  });
+  ipcMain.handle('sync:view-local-changes', (_evt, userId: string) => {
+    const actor = resolveSyncActor(userId);
+    return getLocalChanges(actor);
+  });
+  ipcMain.handle('sync:auto-pull-employee-submissions', async (_evt, userId: string) => {
+    const actor = resolveSyncActor(userId);
+    const result = await autoPullEmployeeSubmissions(actor);
     notify('sync_state', [`sync:${actor.userId}`]);
     return result;
   });

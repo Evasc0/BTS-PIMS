@@ -13,6 +13,8 @@ const MAX_STORED_EVENTS = 200;
 const SYNC_QUEUE_RETENTION_DAYS = Math.max(1, Number(process.env.SYNC_QUEUE_RETENTION_DAYS || 7));
 const SYNC_MAX_OFFLINE_DAYS = Math.max(1, Number(process.env.SYNC_MAX_OFFLINE_DAYS || 7));
 const SYNC_DELETE_RETRY_ATTEMPTS = Math.max(1, Number(process.env.SYNC_DELETE_RETRY_ATTEMPTS || 3));
+const SYNC_PUSH_MAX_BATCH_MB = Math.max(1, Number(process.env.SYNC_PUSH_MAX_BATCH_MB || 5));
+const SYNC_PUSH_MAX_BATCH_BYTES = SYNC_PUSH_MAX_BATCH_MB * 1024 * 1024;
 const FULL_SYNC_CHUNK_MB = Math.min(200, Math.max(1, Number(process.env.SYNC_FULL_CHUNK_MB || 200)));
 const FULL_SYNC_CHUNK_SIZE_BYTES = FULL_SYNC_CHUNK_MB * 1024 * 1024;
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
@@ -57,6 +59,11 @@ interface SyncActor {
   role: SyncRole;
 }
 
+interface PushStageOptions {
+  categories?: string[];
+  outboxIds?: number[];
+}
+
 interface SyncStateRow {
   id: string;
   online_mode: number;
@@ -98,11 +105,16 @@ interface OutboxRow {
 interface RemoteQueueRow {
   id: string;
   employee_id?: string;
-  table_name: string;
-  operation: string;
-  record_id: string;
-  data: any;
-  timestamp: string;
+  origin_device_id?: string | null;
+  origin_user_id?: string | null;
+  payload?: any;
+  payload_size_kb?: number | null;
+  created_at?: string | null;
+  table_name?: string;
+  operation?: string;
+  record_id?: string;
+  data?: any;
+  timestamp?: string;
 }
 
 interface ConflictRecord {
@@ -115,6 +127,22 @@ interface ConflictRecord {
 
 type FullSyncRequestStatus = 'pending' | 'approved' | 'rejected' | 'transferring' | 'completed' | 'cancelled';
 type FullSyncChunkStatus = 'uploaded' | 'acked' | 'deleted' | 'failed';
+type LocalChangeCategoryKey =
+  | 'new_returns'
+  | 'inventory_updates'
+  | 'property_assignments'
+  | 'employee_submissions'
+  | 'other_changes';
+
+interface LocalChangeSummaryItem {
+  outboxId: number;
+  entityType: string;
+  entityId: string;
+  operation: QueueOperation;
+  categoryKey: LocalChangeCategoryKey;
+  label: string;
+  sizeKb: number;
+}
 
 interface FullSyncRequestRow {
   id: string;
@@ -218,7 +246,7 @@ const stateIdForActor = (actor: SyncActor): string => `sync:${actor.userId}`;
 
 const canAdminSync = (actor: SyncActor): boolean => actor.role === 'system_admin';
 const canEmployeePull = (actor: SyncActor): boolean => actor.role === 'employee';
-const canPushLocalChanges = (actor: SyncActor): boolean => actor.role === 'system_admin';
+const canPushLocalChanges = (actor: SyncActor): boolean => actor.role === 'system_admin' || actor.role === 'employee';
 const canRequestFullSync = (actor: SyncActor): boolean => actor.role === 'system_admin';
 
 const canPushEntityType = (actor: SyncActor, entityType: string): boolean => {
@@ -280,6 +308,28 @@ const formatIsoUtc = (value: string | null): string => {
   const parsed = parseTimestamp(value);
   if (parsed === null) return value;
   return new Date(parsed).toISOString();
+};
+const sizeKbForJson = (value: unknown): number => {
+  try {
+    const bytes = Buffer.byteLength(JSON.stringify(value ?? {}), 'utf8');
+    return Number((bytes / 1024).toFixed(3));
+  } catch {
+    return 0;
+  }
+};
+const sizeBytesForJson = (value: unknown): number => {
+  try {
+    return Buffer.byteLength(JSON.stringify(value ?? {}), 'utf8');
+  } catch {
+    return 0;
+  }
+};
+const categoryLabelByKey: Record<LocalChangeCategoryKey, string> = {
+  new_returns: 'New Returns',
+  inventory_updates: 'Inventory Updates',
+  property_assignments: 'Property Assignments',
+  employee_submissions: 'Employee Submissions',
+  other_changes: 'Other Changes'
 };
 
 const getQueueRetentionCutoffIso = (): string => new Date(Date.now() - SYNC_QUEUE_RETENTION_DAYS * DAY_IN_MS).toISOString();
@@ -637,6 +687,108 @@ const getPendingOutboxRows = (db: Database.Database, actor: SyncActor): OutboxRo
   return Array.from(latestByEntity.values()).sort((a, b) => a.id - b.id);
 };
 
+const parseOutboxPayload = (row: OutboxRow): any => {
+  try {
+    return JSON.parse(row.payload || '{}');
+  } catch {
+    return {};
+  }
+};
+
+const getLocalChangeCategory = (
+  actor: SyncActor,
+  entityType: string | null,
+  operation: QueueOperation,
+  payload: any
+): LocalChangeCategoryKey => {
+  if (entityType === 'returns' && operation === 'insert') {
+    return actor.role === 'employee' ? 'employee_submissions' : 'new_returns';
+  }
+
+  if (entityType === 'products') {
+    if (actor.role === 'employee') return 'employee_submissions';
+    const assignmentChanged = Boolean(payload?._meta?.assignmentChanged);
+    return assignmentChanged ? 'property_assignments' : 'inventory_updates';
+  }
+
+  if (entityType === 'returns' && actor.role === 'employee') {
+    return 'employee_submissions';
+  }
+
+  return 'other_changes';
+};
+
+const buildLocalChangeLabel = (entityType: string | null, payload: any, recordId: string): string => {
+  if (entityType === 'products') {
+    const propertyNumber = payload?.propertyNumber || payload?.property_number || recordId;
+    const article = payload?.article || '';
+    return article ? `${propertyNumber} (${article})` : String(propertyNumber);
+  }
+  if (entityType === 'returns') {
+    return String(payload?.rrspNumber || payload?.rrsp_number || recordId);
+  }
+  if (entityType === 'employees') {
+    return String(payload?.email || payload?.fullName || payload?.full_name || recordId);
+  }
+  return String(recordId);
+};
+
+const buildLocalChangeSummary = (actor: SyncActor, rows: OutboxRow[]) => {
+  const categories = new Map<LocalChangeCategoryKey, { count: number; sizeKb: number }>();
+  const changes: LocalChangeSummaryItem[] = [];
+  let totalSizeKb = 0;
+
+  for (const row of rows) {
+    const entityType = normalizeEntityType(row.entity_type);
+    const operation = normalizeOperation(row.operation);
+    const payload = parseOutboxPayload(row);
+    const categoryKey = getLocalChangeCategory(actor, entityType, operation, payload);
+    const sizeKb = sizeKbForJson(payload);
+    totalSizeKb += sizeKb;
+
+    const current = categories.get(categoryKey) || { count: 0, sizeKb: 0 };
+    current.count += 1;
+    current.sizeKb = Number((current.sizeKb + sizeKb).toFixed(3));
+    categories.set(categoryKey, current);
+
+    changes.push({
+      outboxId: row.id,
+      entityType: entityType || row.entity_type,
+      entityId: row.entity_id,
+      operation,
+      categoryKey,
+      label: buildLocalChangeLabel(entityType, payload, row.entity_id),
+      sizeKb
+    });
+  }
+
+  const totalBytes = Math.round(totalSizeKb * 1024);
+  const recommendedBatchCount = totalBytes === 0 ? 0 : Math.max(1, Math.ceil(totalBytes / SYNC_PUSH_MAX_BATCH_BYTES));
+
+  return {
+    total: rows.length,
+    totalSizeKb: Number(totalSizeKb.toFixed(3)),
+    safeToPush: true,
+    recommendedBatchCount,
+    maxBatchMb: SYNC_PUSH_MAX_BATCH_MB,
+    categories: (Array.from(categories.entries()) as Array<[LocalChangeCategoryKey, { count: number; sizeKb: number }]>)
+      .map(([key, value]) => ({
+        key,
+        label: categoryLabelByKey[key],
+        count: value.count,
+        sizeKb: Number(value.sizeKb.toFixed(3))
+      }))
+      .sort((a, b) => b.count - a.count),
+    changes
+  };
+};
+
+export function getLocalChanges(actor: SyncActor) {
+  const db = dataStore.getDb();
+  const rows = getPendingOutboxRows(db, actor);
+  return buildLocalChangeSummary(actor, rows);
+}
+
 const pruneUnsupportedOutboxRows = (db: Database.Database): number => {
   const result = db.prepare("DELETE FROM sync_outbox WHERE entity_type = 'activity_logs'").run();
   return result.changes ?? 0;
@@ -790,23 +942,34 @@ const pushQueueBatch = async (tableName: string, records: Array<Record<string, u
   });
 };
 
+const EMPLOYEE_ID_NULL_FILTER = '__is_null__';
+
 const fetchRemoteQueuePage = async (
   tableName: string,
   sinceTimestamp: string | null,
   employeeId: string | null,
+  excludeOriginDeviceId: string | null,
   offset: number,
   limit: number
 ): Promise<RemoteQueueRow[]> => {
   const params = new URLSearchParams();
-  params.set('select', 'id,table_name,operation,record_id,data,timestamp');
-  params.set('order', 'timestamp.asc');
+  params.set(
+    'select',
+    'id,employee_id,origin_device_id,origin_user_id,payload,payload_size_kb,created_at,table_name,operation,record_id,data,timestamp'
+  );
+  params.set('order', 'created_at.asc,id.asc');
   params.set('limit', String(limit));
   params.set('offset', String(offset));
   if (sinceTimestamp) {
-    params.set('timestamp', `gt.${sinceTimestamp}`);
+    params.set('created_at', `gt.${sinceTimestamp}`);
   }
-  if (employeeId) {
+  if (employeeId === EMPLOYEE_ID_NULL_FILTER) {
+    params.set('employee_id', 'is.null');
+  } else if (employeeId) {
     params.set('employee_id', `eq.${employeeId}`);
+  }
+  if (excludeOriginDeviceId) {
+    params.set('or', `(origin_device_id.is.null,origin_device_id.neq.${excludeOriginDeviceId})`);
   }
 
   const response = await supabaseRequest(`${tableName}?${params.toString()}`, {
@@ -820,14 +983,15 @@ const fetchRemoteQueuePage = async (
 const fetchAllRemoteQueueRows = async (
   tableName: string,
   sinceTimestamp: string | null,
-  employeeId: string | null = null
+  employeeId: string | null = null,
+  excludeOriginDeviceId: string | null = null
 ): Promise<RemoteQueueRow[]> => {
   const pullPageSize = getPullPageSize();
   const rows: RemoteQueueRow[] = [];
   let offset = 0;
 
   while (true) {
-    const page = await fetchRemoteQueuePage(tableName, sinceTimestamp, employeeId, offset, pullPageSize);
+    const page = await fetchRemoteQueuePage(tableName, sinceTimestamp, employeeId, excludeOriginDeviceId, offset, pullPageSize);
     rows.push(...page);
     if (page.length < pullPageSize) break;
     offset += pullPageSize;
@@ -836,24 +1000,67 @@ const fetchAllRemoteQueueRows = async (
   return rows;
 };
 
-const deleteRemoteQueueRows = async (tableName: string, ids: string[]): Promise<void> => {
+const readRemotePayload = (row: RemoteQueueRow): any => {
+  if (row.payload && typeof row.payload === 'object') return row.payload;
+  return null;
+};
+
+const readRemoteTableName = (row: RemoteQueueRow): string | null => {
+  const payload = readRemotePayload(row);
+  const value = payload?.table_name ?? row.table_name;
+  return value ? String(value) : null;
+};
+
+const readRemoteOperation = (row: RemoteQueueRow): QueueOperation => {
+  const payload = readRemotePayload(row);
+  return normalizeOperation(payload?.operation ?? row.operation ?? 'update');
+};
+
+const readRemoteRecordId = (row: RemoteQueueRow): string => {
+  const payload = readRemotePayload(row);
+  return String(payload?.record_id ?? row.record_id ?? '');
+};
+
+const readRemoteData = (row: RemoteQueueRow): any => {
+  const payload = readRemotePayload(row);
+  if (payload && Object.prototype.hasOwnProperty.call(payload, 'data')) {
+    return payload.data;
+  }
+  return row.data || {};
+};
+
+const readRemoteTimestamp = (row: RemoteQueueRow): string => {
+  if (row.created_at) return row.created_at;
+  if (row.timestamp) return row.timestamp;
+  return nowIso();
+};
+
+const deleteRemoteQueueRows = async (tableName: string, ids: string[], excludeOriginDeviceId: string | null = null): Promise<void> => {
   if (!ids.length) return;
   const pullPageSize = getPullPageSize();
 
   for (let index = 0; index < ids.length; index += pullPageSize) {
     const chunk = ids.slice(index, index + pullPageSize);
-    const inFilter = `id=in.(${chunk.join(',')})`;
-    await supabaseRequest(`${tableName}?${inFilter}`, { method: 'DELETE' });
+    const params = new URLSearchParams();
+    params.set('id', `in.(${chunk.join(',')})`);
+    if (excludeOriginDeviceId) {
+      params.set('or', `(origin_device_id.is.null,origin_device_id.neq.${excludeOriginDeviceId})`);
+    }
+    await supabaseRequest(`${tableName}?${params.toString()}`, { method: 'DELETE' });
   }
 };
 
-const deleteRemoteQueueRowsWithRetry = async (tableName: string, ids: string[]): Promise<void> => {
+const deleteRemoteQueueRowsWithRetry = async (
+  tableName: string,
+  ids: string[],
+  excludeOriginDeviceId: string | null = null
+): Promise<void> => {
   if (!ids.length) return;
   let lastError: unknown = null;
 
   for (let attempt = 1; attempt <= SYNC_DELETE_RETRY_ATTEMPTS; attempt += 1) {
     try {
-      await deleteRemoteQueueRows(tableName, ids);
+      await deleteRemoteQueueRows(tableName, ids, excludeOriginDeviceId);
       return;
     } catch (error: unknown) {
       lastError = error;
@@ -871,7 +1078,7 @@ const deleteRemoteQueueRowsWithRetry = async (tableName: string, ids: string[]):
 
 const deleteQueueRowsOlderThan = async (tableName: string, cutoffIso: string): Promise<void> => {
   const params = new URLSearchParams();
-  params.set('timestamp', `lt.${cutoffIso}`);
+  params.set('created_at', `lt.${cutoffIso}`);
   await supabaseRequest(`${tableName}?${params.toString()}`, { method: 'DELETE' });
 };
 
@@ -1664,7 +1871,7 @@ const createConflictRecord = (
 ): ConflictRecord => ({
   queueId: row.id,
   tableName: entityType,
-  recordId: row.record_id,
+  recordId: readRemoteRecordId(row),
   localVersion,
   remoteVersion
 });
@@ -1728,8 +1935,16 @@ const buildEmployeeQueueRecords = (
       data: any;
     };
   }
-) => {
-  if (entry.entityType !== 'products') return [] as Array<Record<string, unknown>>;
+) : Array<{
+  employee_id: string;
+  payload: {
+    table_name: string;
+    operation: QueueOperation;
+    record_id: string;
+    data: any;
+  };
+}> => {
+  if (entry.entityType !== 'products') return [];
 
   const payload = entry.queueRecord.data || {};
   const currentAssigned = payload.assignedToEmployeeId ? String(payload.assignedToEmployeeId) : null;
@@ -1741,17 +1956,90 @@ const buildEmployeeQueueRecords = (
   if (currentAssigned) recipients.add(currentAssigned);
   if (previousAssigned) recipients.add(previousAssigned);
 
-  if (!recipients.size) return [] as Array<Record<string, unknown>>;
+  if (!recipients.size) return [];
 
   const data = sanitizeQueueData(payload);
 
   return Array.from(recipients).map((employeeId) => ({
     employee_id: employeeId,
-    table_name: entry.entityType,
-    operation: entry.queueRecord.operation,
-    record_id: entry.entityId,
-    data
+    payload: {
+      table_name: entry.entityType,
+      operation: entry.queueRecord.operation,
+      record_id: entry.entityId,
+      data
+    }
   }));
+};
+
+const isUuidLike = (value: string): boolean => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value);
+
+const resolveOriginUserId = (db: Database.Database, actor: SyncActor): string | null => {
+  const row = db
+    .prepare('SELECT supabase_user_id FROM employees WHERE id = ?')
+    .get(actor.userId) as { supabase_user_id?: string | null } | undefined;
+  if (row?.supabase_user_id) return row.supabase_user_id;
+  return isUuidLike(actor.userId) ? actor.userId : null;
+};
+
+const buildRelayQueueRow = (
+  payload: { table_name: string; operation: QueueOperation; record_id: string; data: any },
+  originDeviceId: string,
+  originUserId: string | null,
+  employeeId: string | null
+) => {
+  const createdAt = nowIso();
+  return {
+    employee_id: employeeId,
+    origin_device_id: originDeviceId,
+    origin_user_id: originUserId,
+    payload,
+    payload_size_kb: sizeKbForJson(payload),
+    created_at: createdAt,
+    // backward-compatibility columns
+    table_name: payload.table_name,
+    operation: payload.operation,
+    record_id: payload.record_id,
+    data: payload.data,
+    timestamp: createdAt
+  };
+};
+
+const chunkRecordsBySize = <T extends Record<string, unknown>>(
+  records: T[],
+  maxBytes: number
+): Array<{ rows: T[]; bytes: number }> => {
+  if (!records.length) return [];
+
+  const batches: Array<{ rows: T[]; bytes: number }> = [];
+  let currentRows: T[] = [];
+  let currentBytes = 0;
+
+  for (const row of records) {
+    const rowBytes = Math.max(1, sizeBytesForJson(row));
+    const rowExceeds = rowBytes > maxBytes;
+    const wouldOverflow = currentRows.length > 0 && currentBytes + rowBytes > maxBytes;
+
+    if (wouldOverflow) {
+      batches.push({ rows: currentRows, bytes: currentBytes });
+      currentRows = [];
+      currentBytes = 0;
+    }
+
+    currentRows.push(row);
+    currentBytes += rowBytes;
+
+    if (rowExceeds) {
+      batches.push({ rows: currentRows, bytes: currentBytes });
+      currentRows = [];
+      currentBytes = 0;
+    }
+  }
+
+  if (currentRows.length > 0) {
+    batches.push({ rows: currentRows, bytes: currentBytes });
+  }
+
+  return batches;
 };
 
 const mapStatus = (actor: SyncActor, state: SyncStateRow, db: Database.Database) => ({
@@ -1787,6 +2075,27 @@ const mapStatus = (actor: SyncActor, state: SyncStateRow, db: Database.Database)
 const getSyncPermissionError = (actor: SyncActor): string | null => {
   if (canAdminSync(actor) || canEmployeePull(actor)) return null;
   return 'Sync controls are available to system admins and employees only.';
+};
+
+const filterPreparedEntriesByStage = <T extends { localOutboxId: number }>(
+  entries: T[],
+  stage: PushStageOptions | undefined,
+  categoryByOutboxId: Map<number, LocalChangeCategoryKey>
+) => {
+  if (!stage) return entries;
+
+  const selectedIds = new Set((stage.outboxIds || []).map((value) => Number(value)).filter((value) => Number.isFinite(value)));
+  if (selectedIds.size > 0) {
+    return entries.filter((entry) => selectedIds.has(entry.localOutboxId));
+  }
+
+  const selectedCategories = new Set((stage.categories || []).map((value) => String(value || '').trim()).filter(Boolean));
+  if (Array.isArray(stage.categories)) {
+    if (selectedCategories.size === 0) return [];
+    return entries.filter((entry) => selectedCategories.has(categoryByOutboxId.get(entry.localOutboxId) || ''));
+  }
+
+  return entries;
 };
 
 export function getSyncStatus(actor: SyncActor) {
@@ -1825,13 +2134,13 @@ export function setOnlineMode(actor: SyncActor, online: boolean) {
   return reason && online ? { ...mapStatus(actor, state, db), error: reason } : mapStatus(actor, state, db);
 }
 
-export async function pushLocalChanges(actor: SyncActor) {
+export async function pushLocalChanges(actor: SyncActor, stage?: PushStageOptions) {
   return withActorToken(actor, async () => {
     const db = dataStore.getDb();
     const state = markFullSyncRequired(db, actor, readSyncState(db, actor));
 
     if (!canPushLocalChanges(actor)) {
-      return { status: 'forbidden', pushedCount: 0, error: 'Only system admin accounts can push local changes.' };
+      return { status: 'forbidden', pushedCount: 0, error: 'Only system admin and employee accounts can push local changes.' };
     }
 
     const fullSyncReason = getFullSyncRequiredReason(state);
@@ -1879,6 +2188,11 @@ export async function pushLocalChanges(actor: SyncActor) {
       return { status: 'idle', pushedCount: 0 };
     }
 
+    const localSummary = buildLocalChangeSummary(actor, pendingRows);
+    const categoryByOutboxId = new Map<number, LocalChangeCategoryKey>(
+      localSummary.changes.map((item) => [item.outboxId, item.categoryKey])
+    );
+
     const preparedAll = pendingRows.map((row) => buildPushQueueRecord(db, row)).filter(Boolean) as Array<{
       localOutboxId: number;
       entityType: string;
@@ -1891,31 +2205,69 @@ export async function pushLocalChanges(actor: SyncActor) {
       };
     }>;
 
-    const prepared = preparedAll.filter((entry) => canPushEntityType(actor, entry.entityType));
+    const pushablePrepared = preparedAll.filter((entry) => canPushEntityType(actor, entry.entityType));
+    const prepared = filterPreparedEntriesByStage(pushablePrepared, stage, categoryByOutboxId);
 
     if (!prepared.length) {
       return { status: 'idle', pushedCount: 0 };
     }
 
-    const adminQueueRecords = prepared.map((entry) => ({
-      table_name: entry.queueRecord.table_name,
-      operation: entry.queueRecord.operation,
-      record_id: entry.queueRecord.record_id,
-      data: sanitizeQueueData(entry.queueRecord.data)
-    }));
+    const originDeviceId = getLocalDeviceId(db);
+    const originUserId = resolveOriginUserId(db, actor);
 
-    const employeeQueueRecords = canAdminSync(actor) ? prepared.flatMap(buildEmployeeQueueRecords) : [];
+    const adminPayloadRecords = canAdminSync(actor)
+      ? prepared.map((entry) => ({
+          table_name: entry.queueRecord.table_name,
+          operation: entry.queueRecord.operation,
+          record_id: entry.queueRecord.record_id,
+          data: sanitizeQueueData(entry.queueRecord.data)
+        }))
+      : [];
+
+    const targetedAdminPayloadRecords = canAdminSync(actor)
+      ? prepared.flatMap((entry) => buildEmployeeQueueRecords(entry))
+      : [];
+
+    const employeePayloadRecords = !canAdminSync(actor)
+      ? prepared.map((entry) => ({
+          employee_id: actor.userId,
+          payload: {
+            table_name: entry.queueRecord.table_name,
+            operation: entry.queueRecord.operation,
+            record_id: entry.queueRecord.record_id,
+            data: sanitizeQueueData(entry.queueRecord.data)
+          }
+        }))
+      : [];
+
+    const adminQueueRecords = adminPayloadRecords.map((payload) => buildRelayQueueRow(payload, originDeviceId, originUserId, null));
+    const targetedAdminQueueRecords = targetedAdminPayloadRecords.map((item) =>
+      buildRelayQueueRow(item.payload, originDeviceId, originUserId, item.employee_id || null)
+    );
+    const employeeQueueRecords = employeePayloadRecords.map((item) =>
+      buildRelayQueueRow(item.payload, originDeviceId, originUserId, item.employee_id || null)
+    );
 
     try {
-      const pushBatchSize = getPushBatchSize();
-      for (let index = 0; index < adminQueueRecords.length; index += pushBatchSize) {
-        const batch = adminQueueRecords.slice(index, index + pushBatchSize);
-        await pushQueueBatch(getAdminQueueTable(), batch);
-      }
-      for (let index = 0; index < employeeQueueRecords.length; index += pushBatchSize) {
-        const batch = employeeQueueRecords.slice(index, index + pushBatchSize);
-        await pushQueueBatch(getEmployeeQueueTable(), batch);
-      }
+      let uploadedBatchCount = 0;
+      let uploadedBytes = 0;
+      const pushBatches = async (tableName: string, records: Array<Record<string, unknown>>) => {
+        const batches = chunkRecordsBySize(records, SYNC_PUSH_MAX_BATCH_BYTES);
+        for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+          const batch = batches[batchIndex];
+          await pushQueueBatch(tableName, batch.rows);
+          uploadedBatchCount += 1;
+          uploadedBytes += batch.bytes;
+          logSyncEvent(db, {
+            eventType: 'push_batch',
+            message: `Uploading batch ${batchIndex + 1}/${batches.length} to ${tableName} (${(batch.bytes / 1024 / 1024).toFixed(2)} MB)`
+          });
+        }
+      };
+
+      await pushBatches(getAdminQueueTable(), adminQueueRecords);
+      await pushBatches(getAdminQueueTable(), targetedAdminQueueRecords);
+      await pushBatches(getEmployeeQueueTable(), employeeQueueRecords);
 
       const syncedAt = nowIso();
       const tx = db.transaction(() => {
@@ -1937,8 +2289,8 @@ export async function pushLocalChanges(actor: SyncActor) {
         logSyncEvent(db, {
           eventType: 'push',
           message: canAdminSync(actor)
-            ? `System admin pushed ${prepared.length} global change(s) and ${employeeQueueRecords.length} employee-targeted update(s)`
-            : `Employee pushed ${prepared.length} change(s)`,
+            ? `System admin pushed ${prepared.length} staged change(s), ${uploadedBatchCount} batch(es), ${(uploadedBytes / 1024).toFixed(1)} KB`
+            : `Employee pushed ${prepared.length} submission(s) in ${uploadedBatchCount} batch(es)`,
           pushedCount: prepared.length
         });
       });
@@ -1948,7 +2300,9 @@ export async function pushLocalChanges(actor: SyncActor) {
       return {
         status: 'synced',
         pushedCount: prepared.length,
-        employeeQueueCount: canAdminSync(actor) ? employeeQueueRecords.length : 0
+        totalSizeKb: Number((uploadedBytes / 1024).toFixed(3)),
+        batchCount: uploadedBatchCount,
+        employeeQueueCount: canAdminSync(actor) ? targetedAdminQueueRecords.length : employeeQueueRecords.length
       };
     } catch (error: any) {
       const message = error?.message ?? 'Push failed';
@@ -1997,17 +2351,29 @@ export async function previewRemoteChanges(actor: SyncActor) {
     }
 
     try {
+      const currentDeviceId = getLocalDeviceId(db);
       const rows = canAdminSync(actor)
-        ? await fetchAllRemoteQueueRows(getAdminQueueTable(), state.last_pull_at)
-        : await fetchAllRemoteQueueRows(getEmployeeQueueTable(), state.last_pull_at, actor.userId);
+        ? await fetchAllRemoteQueueRows(getAdminQueueTable(), state.last_pull_at, EMPLOYEE_ID_NULL_FILTER, currentDeviceId)
+        : await fetchAllRemoteQueueRows(getAdminQueueTable(), state.last_pull_at, actor.userId, currentDeviceId);
       let conflicts = 0;
+      let totalSizeKb = 0;
 
       for (const row of rows) {
-        const entityType = normalizeEntityType(row.table_name);
+        const entityType = normalizeEntityType(readRemoteTableName(row) || '');
         if (!entityType || entityType === 'activity_logs') continue;
-        const remoteVersion = readVersion(row?.data?.version, 1);
-        const localVersion = getLocalVersion(db, entityType, row.record_id);
+        const remoteData = readRemoteData(row);
+        totalSizeKb += Number(row.payload_size_kb ?? sizeKbForJson(remoteData));
+        const remoteVersion = readVersion(remoteData?.version, 1);
+        const localVersion = getLocalVersion(db, entityType, readRemoteRecordId(row));
         if (localVersion > remoteVersion) conflicts += 1;
+      }
+
+      let previewMessage: string | undefined;
+      if (rows.length === 0) {
+        const allVisibleRows = canAdminSync(actor)
+          ? await fetchAllRemoteQueueRows(getAdminQueueTable(), state.last_pull_at, EMPLOYEE_ID_NULL_FILTER)
+          : await fetchAllRemoteQueueRows(getAdminQueueTable(), state.last_pull_at, actor.userId);
+        previewMessage = allVisibleRows.length > 0 ? 'Data already exists locally.' : 'No new remote records available.';
       }
 
       writeSyncState(db, actor, {
@@ -2019,7 +2385,9 @@ export async function previewRemoteChanges(actor: SyncActor) {
       return {
         status: 'ok',
         newRecords: rows.length,
-        conflictCount: conflicts
+        conflictCount: conflicts,
+        totalSizeKb: Number(totalSizeKb.toFixed(3)),
+        message: previewMessage
       };
     } catch (error: any) {
       return {
@@ -2032,9 +2400,17 @@ export async function previewRemoteChanges(actor: SyncActor) {
   });
 }
 
-const pullAdminChanges = async (db: Database.Database, actor: SyncActor, state: SyncStateRow, conflictStrategy: ConflictStrategy) => {
-  const rows = await fetchAllRemoteQueueRows(getAdminQueueTable(), state.last_pull_at);
+const pullAdminChanges = async (
+  db: Database.Database,
+  actor: SyncActor,
+  state: SyncStateRow,
+  conflictStrategy: ConflictStrategy,
+  currentDeviceId: string
+) => {
+  const rows = await fetchAllRemoteQueueRows(getAdminQueueTable(), state.last_pull_at, EMPLOYEE_ID_NULL_FILTER, currentDeviceId);
   if (!rows.length) {
+    const allVisibleRows = await fetchAllRemoteQueueRows(getAdminQueueTable(), state.last_pull_at, EMPLOYEE_ID_NULL_FILTER);
+    const message = allVisibleRows.length ? 'Data already exists locally.' : 'No new remote records available.';
     writeSyncState(db, actor, {
       last_status: 'online',
       last_error: null,
@@ -2048,7 +2424,8 @@ const pullAdminChanges = async (db: Database.Database, actor: SyncActor, state: 
       status: 'idle',
       pulledCount: 0,
       conflictCount: 0,
-      conflicts: [] as ConflictRecord[]
+      conflicts: [] as ConflictRecord[],
+      message
     };
   }
 
@@ -2059,22 +2436,30 @@ const pullAdminChanges = async (db: Database.Database, actor: SyncActor, state: 
 
   const applyTx = db.transaction(() => {
     for (const row of rows) {
-      const entityType = normalizeEntityType(row.table_name);
+      const entityType = normalizeEntityType(readRemoteTableName(row) || '');
+      const rowCreatedAt = readRemoteTimestamp(row);
       if (!entityType || entityType === 'activity_logs') {
         remoteIdsToDelete.push(row.id);
-        if (!latestAppliedTimestamp || row.timestamp > latestAppliedTimestamp) {
-          latestAppliedTimestamp = row.timestamp;
+        if (!latestAppliedTimestamp || rowCreatedAt > latestAppliedTimestamp) {
+          latestAppliedTimestamp = rowCreatedAt;
         }
         continue;
       }
 
-      const operation = normalizeOperation(row.operation);
-      const remoteVersion = readVersion(row?.data?.version, 1);
-      const localVersion = getLocalVersion(db, entityType, row.record_id);
+      const operation = readRemoteOperation(row);
+      const recordId = readRemoteRecordId(row);
+      if (!recordId) {
+        remoteIdsToDelete.push(row.id);
+        if (!latestAppliedTimestamp || rowCreatedAt > latestAppliedTimestamp) latestAppliedTimestamp = rowCreatedAt;
+        continue;
+      }
+      const remoteData = readRemoteData(row);
+      const remoteVersion = readVersion(remoteData?.version, 1);
+      const localVersion = getLocalVersion(db, entityType, recordId);
 
       if (localVersion > remoteVersion && conflictStrategy === 'skip') {
-        conflicts.push(createConflictRecord(row, entityType, localVersion, remoteVersion));
-        markEntityConflict(db, entityType, row.record_id);
+        conflicts.push(createConflictRecord({ ...row, table_name: entityType, record_id: recordId }, entityType, localVersion, remoteVersion));
+        markEntityConflict(db, entityType, recordId);
         continue;
       }
 
@@ -2082,13 +2467,13 @@ const pullAdminChanges = async (db: Database.Database, actor: SyncActor, state: 
         localVersion > remoteVersion && conflictStrategy === 'remote_wins' ? localVersion + 1 : remoteVersion;
 
       const payload = {
-        ...(row.data || {}),
-        id: row.record_id,
+        ...(remoteData || {}),
+        id: recordId,
         version: resolvedVersion
       };
 
       if (operation === 'delete') {
-        applyRemoteDelete(db, entityType, row.record_id, payload.deletedAt || row.timestamp || nowIso(), resolvedVersion);
+        applyRemoteDelete(db, entityType, recordId, payload.deletedAt || rowCreatedAt || nowIso(), resolvedVersion);
       } else {
         applyRemoteUpsert(db, entityType, payload, resolvedVersion);
       }
@@ -2096,8 +2481,8 @@ const pullAdminChanges = async (db: Database.Database, actor: SyncActor, state: 
       remoteIdsToDelete.push(row.id);
       pulledCount += 1;
 
-      if (!latestAppliedTimestamp || row.timestamp > latestAppliedTimestamp) {
-        latestAppliedTimestamp = row.timestamp;
+      if (!latestAppliedTimestamp || rowCreatedAt > latestAppliedTimestamp) {
+        latestAppliedTimestamp = rowCreatedAt;
       }
     }
   });
@@ -2105,7 +2490,7 @@ const pullAdminChanges = async (db: Database.Database, actor: SyncActor, state: 
   applyTx();
 
   if (remoteIdsToDelete.length) {
-    await deleteRemoteQueueRowsWithRetry(getAdminQueueTable(), remoteIdsToDelete);
+    await deleteRemoteQueueRowsWithRetry(getAdminQueueTable(), remoteIdsToDelete, currentDeviceId);
   }
 
   const shouldAdvanceCursor = conflicts.length === 0 && Boolean(latestAppliedTimestamp);
@@ -2148,10 +2533,13 @@ const pullEmployeeAssignedChanges = async (
   db: Database.Database,
   actor: SyncActor,
   state: SyncStateRow,
-  conflictStrategy: ConflictStrategy
+  conflictStrategy: ConflictStrategy,
+  currentDeviceId: string
 ) => {
-  const rows = await fetchAllRemoteQueueRows(getEmployeeQueueTable(), state.last_pull_at, actor.userId);
+  const rows = await fetchAllRemoteQueueRows(getAdminQueueTable(), state.last_pull_at, actor.userId, currentDeviceId);
   if (!rows.length) {
+    const allVisibleRows = await fetchAllRemoteQueueRows(getAdminQueueTable(), state.last_pull_at, actor.userId);
+    const message = allVisibleRows.length ? 'Data already exists locally.' : 'No new remote records available.';
     writeSyncState(db, actor, {
       last_status: 'online',
       last_error: null,
@@ -2165,7 +2553,8 @@ const pullEmployeeAssignedChanges = async (
       status: 'idle',
       pulledCount: 0,
       conflictCount: 0,
-      conflicts: [] as ConflictRecord[]
+      conflicts: [] as ConflictRecord[],
+      message
     };
   }
 
@@ -2176,22 +2565,30 @@ const pullEmployeeAssignedChanges = async (
 
   const applyTx = db.transaction(() => {
     for (const row of rows) {
-      const entityType = normalizeEntityType(row.table_name);
+      const entityType = normalizeEntityType(readRemoteTableName(row) || '');
+      const rowCreatedAt = readRemoteTimestamp(row);
       if (entityType !== 'products') {
         remoteIdsToDelete.push(row.id);
-        if (!latestAppliedTimestamp || row.timestamp > latestAppliedTimestamp) {
-          latestAppliedTimestamp = row.timestamp;
+        if (!latestAppliedTimestamp || rowCreatedAt > latestAppliedTimestamp) {
+          latestAppliedTimestamp = rowCreatedAt;
         }
         continue;
       }
 
-      const operation = normalizeOperation(row.operation);
-      const remoteVersion = readVersion(row?.data?.version, 1);
-      const localVersion = getLocalVersion(db, entityType, row.record_id);
+      const operation = readRemoteOperation(row);
+      const recordId = readRemoteRecordId(row);
+      if (!recordId) {
+        remoteIdsToDelete.push(row.id);
+        if (!latestAppliedTimestamp || rowCreatedAt > latestAppliedTimestamp) latestAppliedTimestamp = rowCreatedAt;
+        continue;
+      }
+      const remoteData = readRemoteData(row);
+      const remoteVersion = readVersion(remoteData?.version, 1);
+      const localVersion = getLocalVersion(db, entityType, recordId);
 
       if (localVersion > remoteVersion && conflictStrategy === 'skip') {
-        conflicts.push(createConflictRecord(row, entityType, localVersion, remoteVersion));
-        markEntityConflict(db, entityType, row.record_id);
+        conflicts.push(createConflictRecord({ ...row, table_name: entityType, record_id: recordId }, entityType, localVersion, remoteVersion));
+        markEntityConflict(db, entityType, recordId);
         continue;
       }
 
@@ -2199,8 +2596,8 @@ const pullEmployeeAssignedChanges = async (
         localVersion > remoteVersion && conflictStrategy === 'remote_wins' ? localVersion + 1 : remoteVersion;
 
       const payload = {
-        ...(row.data || {}),
-        id: row.record_id,
+        ...(remoteData || {}),
+        id: recordId,
         version: resolvedVersion
       };
 
@@ -2212,7 +2609,7 @@ const pullEmployeeAssignedChanges = async (
         payload.assignmentStatus === 'returned';
 
       if (shouldDeleteLocal) {
-        applyRemoteDelete(db, 'products', row.record_id, payload.deletedAt || row.timestamp || nowIso(), resolvedVersion);
+        applyRemoteDelete(db, 'products', recordId, payload.deletedAt || rowCreatedAt || nowIso(), resolvedVersion);
       } else {
         applyRemoteProduct(db, payload, resolvedVersion);
       }
@@ -2220,8 +2617,8 @@ const pullEmployeeAssignedChanges = async (
       remoteIdsToDelete.push(row.id);
       pulledCount += 1;
 
-      if (!latestAppliedTimestamp || row.timestamp > latestAppliedTimestamp) {
-        latestAppliedTimestamp = row.timestamp;
+      if (!latestAppliedTimestamp || rowCreatedAt > latestAppliedTimestamp) {
+        latestAppliedTimestamp = rowCreatedAt;
       }
     }
   });
@@ -2229,7 +2626,7 @@ const pullEmployeeAssignedChanges = async (
   applyTx();
 
   if (remoteIdsToDelete.length) {
-    await deleteRemoteQueueRowsWithRetry(getEmployeeQueueTable(), remoteIdsToDelete);
+    await deleteRemoteQueueRowsWithRetry(getAdminQueueTable(), remoteIdsToDelete, currentDeviceId);
   }
 
   const shouldAdvanceCursor = conflicts.length === 0 && Boolean(latestAppliedTimestamp);
@@ -2262,6 +2659,110 @@ const pullEmployeeAssignedChanges = async (
 
   return {
     status: conflicts.length ? 'conflict' : 'synced',
+    pulledCount,
+    conflictCount: conflicts.length,
+    conflicts
+  };
+};
+
+const pullEmployeeSubmissionsForAdmin = async (
+  db: Database.Database,
+  actor: SyncActor,
+  conflictStrategy: ConflictStrategy,
+  currentDeviceId: string
+) => {
+  const rows = await fetchAllRemoteQueueRows(getEmployeeQueueTable(), null, null, currentDeviceId);
+  if (!rows.length) {
+    return {
+      status: 'idle' as const,
+      pulledCount: 0,
+      conflictCount: 0,
+      conflicts: [] as ConflictRecord[]
+    };
+  }
+
+  const conflicts: ConflictRecord[] = [];
+  const remoteIdsToDelete: string[] = [];
+  let pulledCount = 0;
+  let latestAppliedTimestamp: string | null = null;
+
+  const applyTx = db.transaction(() => {
+    for (const row of rows) {
+      const entityType = normalizeEntityType(readRemoteTableName(row) || '');
+      const rowCreatedAt = readRemoteTimestamp(row);
+      if (!entityType || entityType === 'activity_logs') {
+        remoteIdsToDelete.push(row.id);
+        if (!latestAppliedTimestamp || rowCreatedAt > latestAppliedTimestamp) {
+          latestAppliedTimestamp = rowCreatedAt;
+        }
+        continue;
+      }
+
+      const operation = readRemoteOperation(row);
+      const recordId = readRemoteRecordId(row);
+      if (!recordId) {
+        remoteIdsToDelete.push(row.id);
+        if (!latestAppliedTimestamp || rowCreatedAt > latestAppliedTimestamp) latestAppliedTimestamp = rowCreatedAt;
+        continue;
+      }
+      const remoteData = readRemoteData(row);
+      const remoteVersion = readVersion(remoteData?.version, 1);
+      const localVersion = getLocalVersion(db, entityType, recordId);
+
+      if (localVersion > remoteVersion && conflictStrategy === 'skip') {
+        conflicts.push(createConflictRecord({ ...row, table_name: entityType, record_id: recordId }, entityType, localVersion, remoteVersion));
+        markEntityConflict(db, entityType, recordId);
+        continue;
+      }
+
+      const resolvedVersion =
+        localVersion > remoteVersion && conflictStrategy === 'remote_wins' ? localVersion + 1 : remoteVersion;
+
+      const payload = {
+        ...(remoteData || {}),
+        id: recordId,
+        version: resolvedVersion
+      };
+
+      if (operation === 'delete') {
+        applyRemoteDelete(db, entityType, recordId, payload.deletedAt || rowCreatedAt || nowIso(), resolvedVersion);
+      } else {
+        applyRemoteUpsert(db, entityType, payload, resolvedVersion);
+      }
+
+      remoteIdsToDelete.push(row.id);
+      pulledCount += 1;
+      if (!latestAppliedTimestamp || rowCreatedAt > latestAppliedTimestamp) {
+        latestAppliedTimestamp = rowCreatedAt;
+      }
+    }
+  });
+
+  applyTx();
+
+  if (remoteIdsToDelete.length) {
+    await deleteRemoteQueueRowsWithRetry(getEmployeeQueueTable(), remoteIdsToDelete, currentDeviceId);
+  }
+
+  writeSyncState(db, actor, {
+    last_successful_sync_at: nowIso(),
+    full_sync_required: 0,
+    full_sync_reason: null,
+    last_status: conflicts.length ? 'conflict' : 'online',
+    last_error: null
+  });
+
+  logSyncEvent(db, {
+    eventType: 'auto_pull_employee_submissions',
+    message: conflicts.length
+      ? `System admin auto-pulled ${pulledCount} employee submission(s) with ${conflicts.length} conflict(s)`
+      : `System admin auto-pulled ${pulledCount} employee submission(s)`,
+    pulledCount,
+    conflictCount: conflicts.length
+  });
+
+  return {
+    status: conflicts.length ? ('conflict' as const) : ('synced' as const),
     pulledCount,
     conflictCount: conflicts.length,
     conflicts
@@ -2325,12 +2826,13 @@ export async function pullRemoteChanges(actor: SyncActor, conflictStrategy: Conf
 
     try {
       await cleanupQueueRetention(actor);
+      const currentDeviceId = getLocalDeviceId(db);
 
       if (canAdminSync(actor)) {
-        return await pullAdminChanges(db, actor, state, conflictStrategy);
+        return await pullAdminChanges(db, actor, state, conflictStrategy, currentDeviceId);
       }
 
-      return await pullEmployeeAssignedChanges(db, actor, state, conflictStrategy);
+      return await pullEmployeeAssignedChanges(db, actor, state, conflictStrategy, currentDeviceId);
     } catch (error: any) {
       const message = error?.message ?? 'Pull failed';
       writeSyncState(db, actor, { last_status: 'error', last_error: message });
@@ -2343,6 +2845,49 @@ export async function pullRemoteChanges(actor: SyncActor, conflictStrategy: Conf
         conflicts: [] as ConflictRecord[],
         error: message
       };
+    }
+  });
+}
+
+export async function autoPullEmployeeSubmissions(actor: SyncActor) {
+  return withActorToken(actor, async () => {
+    const db = dataStore.getDb();
+    const state = markFullSyncRequired(db, actor, readSyncState(db, actor));
+
+    if (!canAdminSync(actor)) {
+      return { status: 'forbidden', pulledCount: 0, error: 'Only system admin accounts can pull employee submissions.' };
+    }
+
+    const fullSyncReason = getFullSyncRequiredReason(state);
+    if (fullSyncReason) {
+      writeSyncState(db, actor, {
+        full_sync_required: 1,
+        full_sync_reason: fullSyncReason,
+        last_status: 'full_sync_required',
+        last_error: fullSyncReason
+      });
+      return { status: 'full_sync_required', pulledCount: 0, error: fullSyncReason };
+    }
+
+    if (!state.online_mode) {
+      return { status: 'offline', pulledCount: 0, error: 'Sync is offline. Enable Online mode to pull employee submissions.' };
+    }
+
+    if (!isConfigured()) {
+      const message = 'Supabase is not configured. Set SUPABASE_URL and SUPABASE_ANON_KEY (or SUPABASE_PUBLISHABLE_KEY).';
+      writeSyncState(db, actor, { last_status: 'error', last_error: message });
+      return { status: 'error', pulledCount: 0, error: message };
+    }
+
+    try {
+      await cleanupQueueRetention(actor);
+      const currentDeviceId = getLocalDeviceId(db);
+      return await pullEmployeeSubmissionsForAdmin(db, actor, 'remote_wins', currentDeviceId);
+    } catch (error: any) {
+      const message = error?.message ?? 'Failed to auto pull employee submissions.';
+      writeSyncState(db, actor, { last_status: 'error', last_error: message });
+      logSyncEvent(db, { eventType: 'auto_pull_employee_submissions', message: `Auto pull failed: ${message}` });
+      return { status: 'error', pulledCount: 0, error: message };
     }
   });
 }

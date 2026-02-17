@@ -40,6 +40,24 @@ interface SyncConflict {
   remoteVersion: number;
 }
 
+interface SyncLocalChangesSummary {
+  total: number;
+  totalSizeKb: number;
+  safeToPush: boolean;
+  recommendedBatchCount: number;
+  maxBatchMb: number;
+  categories: Array<{ key: string; label: string; count: number; sizeKb: number }>;
+  changes: Array<{
+    outboxId: number;
+    entityType: string;
+    entityId: string;
+    operation: 'insert' | 'update' | 'delete';
+    categoryKey: string;
+    label: string;
+    sizeKb: number;
+  }>;
+}
+
 interface FullSyncRequestSummary {
   requestId: string;
   requesterDeviceId: string;
@@ -166,14 +184,28 @@ declare global {
         trigger: (userId: string) => Promise<{ status: string; pushedCount: number; error?: string }>;
         getStatus: (userId: string) => Promise<SyncStatusSnapshot>;
         setMode: (userId: string, online: boolean) => Promise<SyncStatusSnapshot>;
-        push: (userId: string) => Promise<{ status: string; pushedCount: number; error?: string }>;
+        push: (
+          userId: string,
+          stage?: { categories?: string[]; outboxIds?: number[] }
+        ) => Promise<{ status: string; pushedCount: number; totalSizeKb?: number; batchCount?: number; error?: string }>;
+        viewLocalChanges: (userId: string) => Promise<SyncLocalChangesSummary>;
+        autoPullEmployeeSubmissions: (
+          userId: string
+        ) => Promise<{ status: string; pulledCount?: number; conflictCount?: number; error?: string }>;
         previewPull: (
           userId: string
-        ) => Promise<{ status: string; newRecords: number; conflictCount: number; error?: string }>;
+        ) => Promise<{ status: string; newRecords: number; conflictCount: number; totalSizeKb?: number; message?: string; error?: string }>;
         pull: (
           userId: string,
           conflictStrategy?: 'skip' | 'remote_wins'
-        ) => Promise<{ status: string; pulledCount: number; conflictCount: number; conflicts: SyncConflict[]; error?: string }>;
+        ) => Promise<{
+          status: string;
+          pulledCount: number;
+          conflictCount: number;
+          conflicts: SyncConflict[];
+          message?: string;
+          error?: string;
+        }>;
         fullSyncRequest: (
           userId: string
         ) => Promise<{ status: string; request?: FullSyncRequestSummary; error?: string }>;

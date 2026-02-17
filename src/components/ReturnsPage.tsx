@@ -252,6 +252,43 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
     return null;
   };
 
+  const autoPushEmployeeSubmission = async (): Promise<string> => {
+    if (user.role !== 'employee' || !window.api?.sync) return '';
+
+    if (!navigator.onLine) {
+      return 'Return submitted locally. It will auto-push when internet becomes available.';
+    }
+
+    try {
+      let status = await window.api.sync.getStatus(user.id);
+      if (!status.configured) {
+        return 'Return submitted locally. Supabase sync is not configured.';
+      }
+
+      if (status.mode !== 'online') {
+        status = await window.api.sync.setMode(user.id, true);
+      }
+
+      if (status.fullSyncRequired) {
+        return status.fullSyncReason || 'Return submitted locally. Full sync is required before online sync can continue.';
+      }
+
+      const result = await window.api.sync.push(user.id);
+      if (result.status === 'synced') {
+        return `Return submitted and pushed (${result.pushedCount} change(s)).`;
+      }
+      if (result.status === 'idle') {
+        return 'Return submitted. No pending local changes were found to push.';
+      }
+      if (result.status === 'offline') {
+        return 'Return submitted locally. Sync is offline and will push when online mode is enabled.';
+      }
+      return `Return submitted locally. ${result.error || 'Automatic push will retry when possible.'}`;
+    } catch (error: any) {
+      return `Return submitted locally. ${error?.message || 'Automatic push will retry when possible.'}`;
+    }
+  };
+
   const handleSubmitReturn = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!canSubmit) return;
@@ -395,7 +432,8 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
     }
 
     if (user.role === 'employee') {
-      setSubmitSyncMessage('Return submitted locally. A system admin must push operational changes when online.');
+      const message = await autoPushEmployeeSubmission();
+      setSubmitSyncMessage(message);
     }
 
     setShowSubmitModal(false);

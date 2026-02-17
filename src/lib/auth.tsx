@@ -90,7 +90,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
 
       if (preview.newRecords === 0) {
-        setSyncNotice('Assigned data is up to date.');
+        setSyncNotice(preview.message || 'Assigned data is up to date.');
         return;
       }
 
@@ -116,6 +116,44 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  const autoPushEmployeeSubmissions = async (user: Employee): Promise<void> => {
+    if (user.role !== 'employee' || !window.api?.sync) return;
+    if (!navigator.onLine) return;
+
+    try {
+      let status = await window.api.sync.getStatus(user.id);
+      if (!status.configured) return;
+
+      if (status.mode !== 'online') {
+        status = await window.api.sync.setMode(user.id, true);
+      }
+
+      if (status.fullSyncRequired) return;
+      await window.api.sync.push(user.id);
+    } catch {
+      // keep silent for background push
+    }
+  };
+
+  const autoPullEmployeeSubmissionsForAdmin = async (user: Employee): Promise<void> => {
+    if (user.role !== 'system_admin' || !window.api?.sync?.autoPullEmployeeSubmissions) return;
+    if (!navigator.onLine) return;
+
+    try {
+      let status = await window.api.sync.getStatus(user.id);
+      if (!status.configured || status.fullSyncRequired) return;
+
+      if (status.mode !== 'online') {
+        status = await window.api.sync.setMode(user.id, true);
+      }
+
+      if (status.fullSyncRequired) return;
+      await window.api.sync.autoPullEmployeeSubmissions(user.id);
+    } catch {
+      // keep silent for background admin pull
+    }
+  };
+
   useEffect(() => {
     let isMounted = true;
     const init = async () => {
@@ -125,7 +163,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (sessionUserId) {
           const user = await db.employees.get(sessionUserId);
           if (user && user.status === 'active' && !isVerificationExpired(user)) {
-            await autoPullAssignedUpdates(user);
+            if (user.role === 'employee') {
+              await autoPushEmployeeSubmissions(user);
+              await autoPullAssignedUpdates(user);
+            } else if (user.role === 'system_admin') {
+              await autoPullEmployeeSubmissionsForAdmin(user);
+            }
             if (isMounted) setCurrentUser(user);
           } else {
             localStorage.removeItem(SESSION_KEY);
@@ -163,6 +206,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setCurrentUser(latest);
     });
     return unsubscribe;
+  }, [currentUser]);
+
+  useEffect(() => {
+    if (!currentUser || !window.api?.sync) return;
+    const onOnline = () => {
+      if (currentUser.role === 'employee') {
+        void autoPushEmployeeSubmissions(currentUser);
+        void autoPullAssignedUpdates(currentUser);
+      } else if (currentUser.role === 'system_admin') {
+        void autoPullEmployeeSubmissionsForAdmin(currentUser);
+      }
+    };
+    window.addEventListener('online', onOnline);
+    return () => window.removeEventListener('online', onOnline);
   }, [currentUser]);
 
   const login = async (email: string, password: string) => {
@@ -205,7 +262,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     }
 
-    await autoPullAssignedUpdates(user);
+    if (user.role === 'employee') {
+      await autoPushEmployeeSubmissions(user);
+      await autoPullAssignedUpdates(user);
+    } else if (user.role === 'system_admin') {
+      await autoPullEmployeeSubmissionsForAdmin(user);
+    }
 
     localStorage.setItem(SESSION_KEY, user.id);
     setInitError(null);

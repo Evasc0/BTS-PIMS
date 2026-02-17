@@ -39,6 +39,12 @@ create index if not exists idx_app_users_role_status on public.app_users(role, a
 
 create table if not exists public.admin_sync_queue (
   id uuid primary key default gen_random_uuid(),
+  employee_id text,
+  origin_device_id text not null default '',
+  origin_user_id uuid,
+  payload jsonb,
+  payload_size_kb numeric,
+  created_at timestamptz not null default now(),
   table_name text not null,
   operation text not null check (operation in ('insert', 'update', 'delete')),
   record_id text not null,
@@ -49,12 +55,60 @@ create table if not exists public.admin_sync_queue (
 create table if not exists public.employee_sync_queue (
   id uuid primary key default gen_random_uuid(),
   employee_id text not null,
+  origin_device_id text not null default '',
+  origin_user_id uuid,
+  payload jsonb,
+  payload_size_kb numeric,
+  created_at timestamptz not null default now(),
   table_name text not null,
   operation text not null check (operation in ('insert', 'update', 'delete')),
   record_id text not null,
   data jsonb,
   "timestamp" timestamptz not null default now()
 );
+
+alter table public.admin_sync_queue add column if not exists employee_id text;
+alter table public.admin_sync_queue add column if not exists origin_device_id text;
+alter table public.admin_sync_queue add column if not exists origin_user_id uuid;
+alter table public.admin_sync_queue add column if not exists payload jsonb;
+alter table public.admin_sync_queue add column if not exists payload_size_kb numeric;
+alter table public.admin_sync_queue add column if not exists created_at timestamptz not null default now();
+
+alter table public.employee_sync_queue add column if not exists origin_device_id text;
+alter table public.employee_sync_queue add column if not exists origin_user_id uuid;
+alter table public.employee_sync_queue add column if not exists payload jsonb;
+alter table public.employee_sync_queue add column if not exists payload_size_kb numeric;
+alter table public.employee_sync_queue add column if not exists created_at timestamptz not null default now();
+
+update public.admin_sync_queue
+set
+  payload = coalesce(
+    payload,
+    jsonb_build_object(
+      'table_name', table_name,
+      'operation', operation,
+      'record_id', record_id,
+      'data', data
+    )
+  ),
+  payload_size_kb = coalesce(payload_size_kb, round((pg_column_size(coalesce(payload, data))::numeric / 1024.0), 3)),
+  created_at = coalesce(created_at, "timestamp", now())
+where payload is null or payload_size_kb is null or created_at is null;
+
+update public.employee_sync_queue
+set
+  payload = coalesce(
+    payload,
+    jsonb_build_object(
+      'table_name', table_name,
+      'operation', operation,
+      'record_id', record_id,
+      'data', data
+    )
+  ),
+  payload_size_kb = coalesce(payload_size_kb, round((pg_column_size(coalesce(payload, data))::numeric / 1024.0), 3)),
+  created_at = coalesce(created_at, "timestamp", now())
+where payload is null or payload_size_kb is null or created_at is null;
 
 create table if not exists public.full_sync_requests (
   id uuid primary key default gen_random_uuid(),
@@ -122,11 +176,26 @@ alter table public.full_sync_chunks add column if not exists storage_deleted_at 
 create index if not exists idx_admin_sync_queue_timestamp
   on public.admin_sync_queue ("timestamp");
 
+create index if not exists idx_admin_sync_queue_employee_timestamp
+  on public.admin_sync_queue (employee_id, "timestamp");
+
+create index if not exists idx_admin_sync_queue_created_at
+  on public.admin_sync_queue (created_at desc);
+
+create index if not exists idx_admin_sync_queue_origin_device
+  on public.admin_sync_queue (origin_device_id);
+
 create index if not exists idx_employee_sync_queue_employee_timestamp
   on public.employee_sync_queue (employee_id, "timestamp");
 
 create index if not exists idx_employee_sync_queue_timestamp
   on public.employee_sync_queue ("timestamp");
+
+create index if not exists idx_employee_sync_queue_created_at
+  on public.employee_sync_queue (created_at desc);
+
+create index if not exists idx_employee_sync_queue_origin_device
+  on public.employee_sync_queue (origin_device_id);
 
 create index if not exists idx_full_sync_requests_status_requested_at
   on public.full_sync_requests (status, requested_at desc);
@@ -199,10 +268,20 @@ as $$
 $$;
 
 drop policy if exists "admin_queue_admin_all" on public.admin_sync_queue;
+drop policy if exists "admin_queue_employee_select_assigned" on public.admin_sync_queue;
 drop policy if exists "admin_queue_employee_insert_changes" on public.admin_sync_queue;
+drop policy if exists "admin_queue_insert_admin" on public.admin_sync_queue;
+drop policy if exists "admin_queue_select_authenticated" on public.admin_sync_queue;
+drop policy if exists "admin_queue_delete_authenticated" on public.admin_sync_queue;
 drop policy if exists "employee_queue_admin_all" on public.employee_sync_queue;
+drop policy if exists "employee_queue_admin_select" on public.employee_sync_queue;
+drop policy if exists "employee_queue_admin_delete" on public.employee_sync_queue;
 drop policy if exists "employee_queue_select_own" on public.employee_sync_queue;
 drop policy if exists "employee_queue_delete_own" on public.employee_sync_queue;
+drop policy if exists "employee_queue_employee_insert" on public.employee_sync_queue;
+drop policy if exists "employee_queue_insert_employee" on public.employee_sync_queue;
+drop policy if exists "employee_queue_select_admin" on public.employee_sync_queue;
+drop policy if exists "employee_queue_delete_admin" on public.employee_sync_queue;
 drop policy if exists "app_users_admin_all" on public.app_users;
 drop policy if exists "app_users_user_select_self" on public.app_users;
 drop policy if exists "app_users_user_insert_self" on public.app_users;
@@ -215,33 +294,56 @@ drop policy if exists "full_sync_chunks_admin_all" on public.full_sync_chunks;
 drop policy if exists "full_sync_chunks_requester_select" on public.full_sync_chunks;
 drop policy if exists "full_sync_chunks_requester_update" on public.full_sync_chunks;
 
-create policy "admin_queue_admin_all"
+create policy "admin_queue_insert_admin"
 on public.admin_sync_queue
-for all
+for insert
 to authenticated
-using (public.sync_is_admin())
-with check (public.sync_is_admin());
+with check (
+  public.sync_is_admin()
+  and coalesce(origin_device_id, '') <> ''
+);
 
--- employees cannot push global/admin queue records
+create policy "admin_queue_select_authenticated"
+on public.admin_sync_queue
+for select
+to authenticated
+using (
+  public.sync_is_admin()
+  or (public.sync_is_employee() and employee_id = public.sync_employee_id())
+  or (origin_user_id is not null and origin_user_id = auth.uid())
+);
 
-create policy "employee_queue_admin_all"
+create policy "admin_queue_delete_authenticated"
+on public.admin_sync_queue
+for delete
+to authenticated
+using (
+  public.sync_is_admin()
+  or (origin_user_id is not null and origin_user_id = auth.uid())
+  or (public.sync_is_employee() and employee_id = public.sync_employee_id())
+);
+
+create policy "employee_queue_insert_employee"
 on public.employee_sync_queue
-for all
+for insert
 to authenticated
-using (public.sync_is_admin())
-with check (public.sync_is_admin());
+with check (
+  public.sync_is_employee()
+  and employee_id = public.sync_employee_id()
+  and coalesce(origin_device_id, '') <> ''
+);
 
-create policy "employee_queue_select_own"
+create policy "employee_queue_select_admin"
 on public.employee_sync_queue
 for select
 to authenticated
-using (employee_id = public.sync_employee_id());
+using (public.sync_is_admin());
 
-create policy "employee_queue_delete_own"
+create policy "employee_queue_delete_admin"
 on public.employee_sync_queue
 for delete
 to authenticated
-using (employee_id = public.sync_employee_id());
+using (public.sync_is_admin());
 
 create policy "app_users_admin_all"
 on public.app_users
@@ -255,19 +357,6 @@ on public.app_users
 for select
 to authenticated
 using (user_id = auth.uid());
-
-create policy "app_users_user_insert_self"
-on public.app_users
-for insert
-to authenticated
-with check (user_id = auth.uid());
-
-create policy "app_users_user_update_self"
-on public.app_users
-for update
-to authenticated
-using (user_id = auth.uid())
-with check (user_id = auth.uid());
 
 create policy "full_sync_requests_admin_all"
 on public.full_sync_requests
@@ -314,10 +403,10 @@ language sql
 security definer
 as $$
   delete from public.admin_sync_queue
-  where "timestamp" < now() - interval '7 days';
+  where coalesce(created_at, "timestamp") < now() - interval '7 days';
 
   delete from public.employee_sync_queue
-  where "timestamp" < now() - interval '7 days';
+  where coalesce(created_at, "timestamp") < now() - interval '7 days';
 $$;
 
 create or replace function public.cleanup_full_sync_requests()

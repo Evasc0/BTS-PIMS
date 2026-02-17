@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Settings, Save, Bell, Lock, Database, Mail, Globe, Shield, Wifi, WifiOff, Upload, Download } from 'lucide-react';
+import { Settings, Save, Bell, Lock, Database, Mail, Globe, Shield, Upload, Download } from 'lucide-react';
 import { useLiveQuery } from '../lib/useLiveQuery';
 import type { Employee, SystemSettings } from '../lib/types';
 import { db } from '../lib/db';
@@ -38,6 +38,24 @@ interface SyncStatusSnapshot {
   lastError: string | null;
   pendingLocalChanges: number;
   recentLogs: SyncLogEntry[];
+}
+
+interface SyncLocalChangesSummary {
+  total: number;
+  totalSizeKb: number;
+  safeToPush: boolean;
+  recommendedBatchCount: number;
+  maxBatchMb: number;
+  categories: Array<{ key: string; label: string; count: number; sizeKb: number }>;
+  changes: Array<{
+    outboxId: number;
+    entityType: string;
+    entityId: string;
+    operation: 'insert' | 'update' | 'delete';
+    categoryKey: string;
+    label: string;
+    sizeKb: number;
+  }>;
 }
 
 interface FullSyncRequestSummary {
@@ -110,6 +128,15 @@ export function SettingsPage({ user }: SettingsPageProps) {
   const [saveMessage, setSaveMessage] = useState('');
   const [syncMessage, setSyncMessage] = useState('');
   const [syncBusy, setSyncBusy] = useState<'mode' | 'push' | 'pull' | null>(null);
+  const [localChanges, setLocalChanges] = useState<SyncLocalChangesSummary | null>(null);
+  const [viewChangesBusy, setViewChangesBusy] = useState(false);
+  const [selectedCategoryKeys, setSelectedCategoryKeys] = useState<string[]>([]);
+  const [selectedOutboxIds, setSelectedOutboxIds] = useState<number[]>([]);
+  const [expandedCategoryKeys, setExpandedCategoryKeys] = useState<string[]>([]);
+  const [showManualSyncPanel, setShowManualSyncPanel] = useState(false);
+  const [showPushConfirm, setShowPushConfirm] = useState(false);
+  const [remotePreview, setRemotePreview] = useState<{ count: number; totalSizeKb: number; message?: string } | null>(null);
+  const [syncRelayConnected, setSyncRelayConnected] = useState(false);
   const [fullSyncBusy, setFullSyncBusy] = useState<'request' | 'pull' | 'approve' | 'reject' | 'upload' | null>(null);
   const [fullSyncMessage, setFullSyncMessage] = useState('');
   const [fullSyncSession, setFullSyncSession] = useState<FullSyncSessionSnapshot | null>(null);
@@ -162,6 +189,25 @@ export function SettingsPage({ user }: SettingsPageProps) {
     };
   }, [user.id, isAdmin, syncStatus?.mode, syncStatus?.configured, syncStatus?.fullSyncRequired]);
 
+  useEffect(() => {
+    if (!isAdmin || syncStatus?.mode !== 'online' || networkOnline || !window.api?.sync?.setMode) return;
+    let cancelled = false;
+    void window.api.sync
+      .setMode(user.id, false)
+      .then(() => {
+        if (!cancelled) {
+          setSyncMessage('Connection lost. Switched to Offline Mode.');
+          setSyncRelayConnected(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setSyncRelayConnected(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isAdmin, syncStatus?.mode, networkOnline, user.id]);
+
   const handleSave = async () => {
     await db.settings.put(formState);
     await logActivity({
@@ -210,6 +256,56 @@ export function SettingsPage({ user }: SettingsPageProps) {
     }
     return `${size.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
   };
+  const formatKb = (kb?: number | null) => `${Number(kb || 0).toFixed(1)} KB`;
+  const formatSizeFromKb = (kb?: number | null) => {
+    const safeKb = Number(kb || 0);
+    if (safeKb < 1024) return `${safeKb.toFixed(1)} KB`;
+    return `${(safeKb / 1024).toFixed(2)} MB`;
+  };
+
+  useEffect(() => {
+    if (!localChanges) {
+      setSelectedCategoryKeys([]);
+      setSelectedOutboxIds([]);
+      setExpandedCategoryKeys([]);
+      return;
+    }
+
+    setSelectedCategoryKeys(localChanges.categories.map((category) => category.key));
+    setSelectedOutboxIds([]);
+    setExpandedCategoryKeys(localChanges.categories.map((category) => category.key));
+  }, [localChanges]);
+
+  const stagedChanges = useMemo(() => {
+    if (!localChanges) return [] as SyncLocalChangesSummary['changes'];
+    if (selectedOutboxIds.length > 0) {
+      const selected = new Set(selectedOutboxIds);
+      return localChanges.changes.filter((change) => selected.has(change.outboxId));
+    }
+    const selectedCategories = new Set(selectedCategoryKeys);
+    return localChanges.changes.filter((change) => selectedCategories.has(change.categoryKey));
+  }, [localChanges, selectedOutboxIds, selectedCategoryKeys]);
+
+  const stagedTotalSizeKb = useMemo(
+    () => Number(stagedChanges.reduce((total, change) => total + Number(change.sizeKb || 0), 0).toFixed(3)),
+    [stagedChanges]
+  );
+  const stagedBatchCount = useMemo(() => {
+    if (!localChanges || stagedTotalSizeKb <= 0) return 0;
+    const bytes = stagedTotalSizeKb * 1024;
+    const maxBatchBytes = localChanges.maxBatchMb * 1024 * 1024;
+    return Math.max(1, Math.ceil(bytes / maxBatchBytes));
+  }, [localChanges, stagedTotalSizeKb]);
+  const stagedCategorySummary = useMemo(() => {
+    const summary = new Map<string, { label: string; count: number }>();
+    for (const change of stagedChanges) {
+      const foundLabel = localChanges?.categories.find((category) => category.key === change.categoryKey)?.label || change.categoryKey;
+      const current = summary.get(change.categoryKey) || { label: foundLabel, count: 0 };
+      current.count += 1;
+      summary.set(change.categoryKey, current);
+    }
+    return Array.from(summary.values());
+  }, [stagedChanges, localChanges]);
 
   const loadFullSyncData = async () => {
     if (!window.api?.sync?.fullSyncSession) return;
@@ -230,8 +326,26 @@ export function SettingsPage({ user }: SettingsPageProps) {
     }
   };
 
+  const verifySyncRelayConnection = async (): Promise<boolean> => {
+    if (!window.api?.sync?.previewPull) return false;
+    try {
+      const preview = await window.api.sync.previewPull(user.id);
+      const connected = preview.status === 'ok' || preview.status === 'offline' || preview.status === 'full_sync_required';
+      setSyncRelayConnected(connected);
+      return connected;
+    } catch {
+      setSyncRelayConnected(false);
+      return false;
+    }
+  };
+
   const handleSyncModeChange = async (online: boolean) => {
     if (!window.api?.sync?.setMode) return;
+    if (online && !navigator.onLine) {
+      setSyncMessage('Internet connection required to switch Online.');
+      setSyncRelayConnected(false);
+      return;
+    }
     setSyncBusy('mode');
     try {
       const result = await window.api.sync.setMode(user.id, online);
@@ -248,7 +362,41 @@ export function SettingsPage({ user }: SettingsPageProps) {
         }
         setSyncMessage((result.fullSyncReason || 'Full sync is required before this device can push or pull.') + autoRequestNote);
       } else {
-        setSyncMessage(online ? 'Online mode enabled. Push and Pull are available.' : 'Offline mode enabled.');
+        let nextMessage = online ? 'Online mode enabled. Manual Sync is ready.' : 'Offline mode enabled.';
+        if (online) {
+          const relayOk = await verifySyncRelayConnection();
+          if (!relayOk) {
+            await window.api.sync.setMode(user.id, false);
+            setSyncMessage('Not Connected. Switched back to Offline Mode.');
+            return;
+          }
+        } else {
+          setSyncRelayConnected(false);
+        }
+        if (online && isAdmin && window.api?.sync?.autoPullEmployeeSubmissions) {
+          const autoPull = await window.api.sync.autoPullEmployeeSubmissions(user.id);
+          if (autoPull.status === 'synced' || autoPull.status === 'idle' || autoPull.status === 'conflict') {
+            const pulled = Number(autoPull.pulledCount || 0);
+            nextMessage += ` Auto-pulled ${pulled} employee submission(s).`;
+          }
+        } else if (
+          online &&
+          isEmployee &&
+          window.api?.sync?.previewPull &&
+          window.api?.sync?.pull &&
+          result.configured &&
+          !result.fullSyncRequired
+        ) {
+          const preview = await window.api.sync.previewPull(user.id);
+          if (preview.status === 'ok' && preview.newRecords > 0) {
+            const autoPull = await window.api.sync.pull(user.id, 'remote_wins');
+            const pulled = Number(autoPull.pulledCount || 0);
+            nextMessage += ` Auto-pulled ${pulled} assigned update(s).`;
+          } else if (preview.status === 'ok') {
+            nextMessage += ` ${preview.message || 'Assigned data is already up to date.'}`;
+          }
+        }
+        setSyncMessage(nextMessage);
       }
     } catch (error: any) {
       setSyncMessage(error?.message || 'Failed to update sync mode.');
@@ -257,13 +405,103 @@ export function SettingsPage({ user }: SettingsPageProps) {
     }
   };
 
+  useEffect(() => {
+    if (syncStatus?.mode !== 'online' || !syncStatus?.configured) {
+      setSyncRelayConnected(false);
+      return;
+    }
+    let cancelled = false;
+    void verifySyncRelayConnection().then((connected) => {
+      if (!cancelled) setSyncRelayConnected(connected);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [syncStatus?.mode, syncStatus?.configured, user.id]);
+
+  const handleViewLocalChanges = async () => {
+    if (!window.api?.sync?.viewLocalChanges) return;
+    setViewChangesBusy(true);
+    try {
+      const summary = await window.api.sync.viewLocalChanges(user.id);
+      setLocalChanges(summary);
+      if (summary.total === 0) {
+        setSyncMessage('No pending local changes.');
+      } else {
+        setSyncMessage(`Found ${summary.total} pending local change(s). Review before pushing.`);
+      }
+    } catch (error: any) {
+      setSyncMessage(error?.message || 'Unable to read local changes.');
+    } finally {
+      setViewChangesBusy(false);
+    }
+  };
+
+  const handleOpenManualSyncPanel = async () => {
+    setShowManualSyncPanel(true);
+    if (!localChanges) {
+      await handleViewLocalChanges();
+    }
+  };
+
+  const toggleCategoryStage = (categoryKey: string) => {
+    setSelectedOutboxIds([]);
+    setSelectedCategoryKeys((previous) =>
+      previous.includes(categoryKey) ? previous.filter((key) => key !== categoryKey) : [...previous, categoryKey]
+    );
+  };
+
+  const toggleOutboxStage = (outboxId: number) => {
+    setSelectedOutboxIds((previous) =>
+      previous.includes(outboxId) ? previous.filter((id) => id !== outboxId) : [...previous, outboxId]
+    );
+  };
+  const toggleExpandedCategory = (categoryKey: string) => {
+    setExpandedCategoryKeys((previous) =>
+      previous.includes(categoryKey) ? previous.filter((key) => key !== categoryKey) : [...previous, categoryKey]
+    );
+  };
+
+  const handleMarkAll = () => {
+    if (!localChanges) return;
+    setSelectedOutboxIds(localChanges.changes.map((change) => change.outboxId));
+    setSelectedCategoryKeys(localChanges.categories.map((category) => category.key));
+  };
+
+  const handleUnmarkAll = () => {
+    setSelectedOutboxIds([]);
+    setSelectedCategoryKeys([]);
+  };
+
+  const handleRequestPushConfirm = () => {
+    if (isAdmin && stagedChanges.length === 0) {
+      setSyncMessage('No staged changes selected.');
+      return;
+    }
+    setShowPushConfirm(true);
+  };
+
   const handlePushChanges = async () => {
     if (!window.api?.sync?.push) return;
     setSyncBusy('push');
+    setShowPushConfirm(false);
     try {
-      const result = await window.api.sync.push(user.id);
+      const stageOptions =
+        isAdmin && localChanges
+          ? selectedOutboxIds.length > 0
+            ? { outboxIds: selectedOutboxIds }
+            : { categories: selectedCategoryKeys }
+          : undefined;
+      const result = await window.api.sync.push(user.id, stageOptions);
       if (result.status === 'synced') {
-        setSyncMessage(`Pushed ${result.pushedCount} record(s) to sync queue.`);
+        setSyncMessage(
+          `Pushed ${result.pushedCount} record(s) to sync queue in ${result.batchCount ?? 0} batch(es), ${formatSizeFromKb(
+            result.totalSizeKb || 0
+          )}.`
+        );
+        if (isAdmin) {
+          await handleViewLocalChanges();
+        }
       } else if (result.status === 'idle') {
         setSyncMessage('No local changes to push.');
       } else if (result.status === 'full_sync_required') {
@@ -273,6 +511,36 @@ export function SettingsPage({ user }: SettingsPageProps) {
       }
     } catch (error: any) {
       setSyncMessage(error?.message || 'Push failed.');
+    } finally {
+      setSyncBusy(null);
+    }
+  };
+
+  const handleCheckRemoteChanges = async () => {
+    if (!window.api?.sync?.previewPull) return;
+    setSyncBusy('pull');
+    try {
+      const preview = await window.api.sync.previewPull(user.id);
+      if (preview.status !== 'ok') {
+        setSyncMessage(preview.error || preview.message || 'Unable to check remote updates.');
+        setRemotePreview(null);
+        return;
+      }
+
+      if (preview.newRecords === 0) {
+        setRemotePreview(null);
+        setSyncMessage(preview.message || 'No remote updates available.');
+        return;
+      }
+
+      setRemotePreview({
+        count: preview.newRecords,
+        totalSizeKb: Number(preview.totalSizeKb || 0),
+        message: preview.message
+      });
+    } catch (error: any) {
+      setRemotePreview(null);
+      setSyncMessage(error?.message || 'Unable to check remote updates.');
     } finally {
       setSyncBusy(null);
     }
@@ -292,7 +560,8 @@ export function SettingsPage({ user }: SettingsPageProps) {
         return;
       }
       if (preview.newRecords === 0) {
-        setSyncMessage('No new remote records available.');
+        setSyncMessage(preview.message || 'No new remote records available.');
+        setRemotePreview(null);
         return;
       }
 
@@ -310,8 +579,8 @@ export function SettingsPage({ user }: SettingsPageProps) {
       if (result.status === 'conflict' && result.conflictCount > 0) {
         const overwrite = window.confirm(
           isEmployee
-            ? `${result.conflictCount} conflict(s) detected in assigned updates. Overwrite your local copies with remote records?`
-            : `${result.conflictCount} conflict(s) detected. Overwrite local conflicts with remote records?`
+            ? `${result.conflictCount} conflict(s) detected in assigned updates.\n\nPress OK to Replace local data.\nPress Cancel to Skip conflicting records.`
+            : `${result.conflictCount} conflict(s) detected.\n\nPress OK to Replace local data.\nPress Cancel to Skip conflicting records.`
         );
         if (overwrite) {
           result = await window.api.sync.pull(user.id, 'remote_wins');
@@ -320,10 +589,13 @@ export function SettingsPage({ user }: SettingsPageProps) {
 
       if (result.status === 'synced') {
         setSyncMessage(isEmployee ? `Pulled ${result.pulledCount} assigned update(s).` : `Pulled ${result.pulledCount} record(s).`);
+        setRemotePreview(null);
       } else if (result.status === 'conflict') {
         setSyncMessage(`Pulled ${result.pulledCount} record(s). ${result.conflictCount} conflict(s) pending.`);
+        setRemotePreview(null);
       } else if (result.status === 'idle') {
-        setSyncMessage('No eligible remote changes to pull.');
+        setSyncMessage(result.message || 'No eligible remote changes to pull.');
+        setRemotePreview(null);
       } else if (result.status === 'full_sync_required') {
         setSyncMessage(result.error || 'Full sync required before pull is allowed.');
       } else {
@@ -448,45 +720,18 @@ export function SettingsPage({ user }: SettingsPageProps) {
       <div className="p-8">
         <div className="mb-8">
           <h1 className="font-bold text-gray-900 mb-2">Settings</h1>
-          <p className="text-gray-600">Manage your connectivity and assigned property updates.</p>
+          <p className="text-gray-600">Sync is automatic for employee accounts.</p>
         </div>
 
         <div className="bg-white rounded-xl border border-gray-200 p-6 space-y-5 max-w-3xl">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-            <div>
-              <p className="font-medium text-gray-900">Go Online / Offline</p>
-              <p className="text-sm text-gray-600">Online mode enables pull for your assigned property updates.</p>
-            </div>
-            <button
-              onClick={() => handleSyncModeChange(!syncModeOnline)}
-              disabled={syncBusy === 'mode'}
-              className={`px-4 py-2 rounded-lg border transition flex items-center gap-2 ${
-                syncModeOnline
-                  ? 'bg-emerald-50 border-emerald-200 text-emerald-700 hover:bg-emerald-100'
-                  : 'bg-gray-50 border-gray-300 text-gray-700 hover:bg-gray-100'
-              } disabled:opacity-60`}
-            >
-              {syncModeOnline ? <Wifi className="w-4 h-4" /> : <WifiOff className="w-4 h-4" />}
-              {syncModeOnline ? 'Go Offline' : 'Go Online'}
-            </button>
-          </div>
-
-          {!syncStatus?.configured && (
-            <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-3">
-              Supabase is not configured. Set `SUPABASE_URL` and `SUPABASE_ANON_KEY` (or `SUPABASE_PUBLISHABLE_KEY`).
-            </p>
-          )}
-
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div className="border border-gray-200 rounded-lg p-3">
-              <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Mode</p>
-              <p className="font-medium text-gray-900">{syncModeOnline ? 'Online' : 'Offline'}</p>
+              <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Sync Mode</p>
+              <p className="font-medium text-gray-900">Automatic</p>
             </div>
             <div className="border border-gray-200 rounded-lg p-3">
-              <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Status</p>
-              <p className={`font-medium ${syncConnectivity ? 'text-emerald-700' : 'text-gray-700'}`}>
-                {syncConnectivity ? 'Online' : 'Offline'}
-              </p>
+              <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Connectivity</p>
+              <p className={`font-medium ${networkOnline ? 'text-emerald-700' : 'text-gray-700'}`}>{networkOnline ? 'Online' : 'Offline'}</p>
             </div>
             <div className="border border-gray-200 rounded-lg p-3">
               <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Last Pull</p>
@@ -494,14 +739,9 @@ export function SettingsPage({ user }: SettingsPageProps) {
             </div>
           </div>
 
-          <button
-            onClick={handlePullChanges}
-            disabled={!syncModeOnline || !syncStatus?.configured || syncBusy !== null || fullSyncRequired}
-            className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition disabled:opacity-60 flex items-center justify-center gap-2"
-          >
-            <Download className="w-4 h-4" />
-            Pull Assigned Updates
-          </button>
+          <p className="text-sm text-gray-700 border border-gray-200 rounded-lg p-3 bg-gray-50">
+            Assigned updates are pulled automatically and return submissions are pushed automatically whenever internet is available.
+          </p>
 
           {(syncMessage || syncStatus?.fullSyncReason || syncStatus?.lastError || (syncStatus?.lastConflictCount ?? 0) > 0) && (
             <div className="space-y-2">
@@ -520,64 +760,10 @@ export function SettingsPage({ user }: SettingsPageProps) {
             </div>
           )}
 
-          {(fullSyncMessage || sessionRequest || fullSyncRequired) && (
-            <div className="border border-amber-200 rounded-lg p-4 space-y-3 bg-amber-50/40">
-              <div>
-                <p className="font-medium text-gray-900">Controlled Full Sync</p>
-                <p className="text-sm text-gray-700">
-                  If this device was offline for too long, request master approval and pull 200MB chunks until rebuild is complete.
-                </p>
-              </div>
-
-              {fullSyncMessage && <p className="text-sm text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-lg p-2">{fullSyncMessage}</p>}
-
-              {sessionRequest && (
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
-                  <div className="border border-amber-200 rounded-lg p-3 bg-white">
-                    <p className="text-gray-500">Request ID</p>
-                    <p className="font-medium text-gray-900 break-all">{sessionRequest.requestId}</p>
-                  </div>
-                  <div className="border border-amber-200 rounded-lg p-3 bg-white">
-                    <p className="text-gray-500">Status</p>
-                    <p className="font-medium text-gray-900 capitalize">{sessionRequest.status}</p>
-                  </div>
-                  <div className="border border-amber-200 rounded-lg p-3 bg-white">
-                    <p className="text-gray-500">Chunks</p>
-                    <p className="font-medium text-gray-900">
-                      {sessionRequest.ackedChunks}/{sessionRequest.totalChunks ?? '?'} acknowledged
-                    </p>
-                  </div>
-                  <div className="border border-amber-200 rounded-lg p-3 bg-white">
-                    <p className="text-gray-500">Estimated DB</p>
-                    <p className="font-medium text-gray-900">{formatBytes(sessionRequest.estimatedDbSizeBytes)}</p>
-                  </div>
-                </div>
-              )}
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <button
-                  onClick={handleRequestFullSync}
-                  disabled={fullSyncBusy !== null || !syncModeOnline || !syncStatus?.configured}
-                  className="px-4 py-2 border border-amber-300 rounded-lg hover:bg-amber-100 transition disabled:opacity-60"
-                >
-                  Request Full Sync
-                </button>
-                <button
-                  onClick={handlePullNextFullSyncChunk}
-                  disabled={
-                    fullSyncBusy !== null ||
-                    !syncModeOnline ||
-                    !syncStatus?.configured ||
-                    !sessionRequest ||
-                    !['approved', 'transferring'].includes(sessionRequest.status) ||
-                    !sessionNextChunk
-                  }
-                  className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition disabled:opacity-60"
-                >
-                  Pull Next 200MB Chunk
-                </button>
-              </div>
-            </div>
+          {fullSyncRequired && (
+            <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-3">
+              Full sync is required for this device. Contact a system administrator to run the approved full sync process.
+            </p>
           )}
         </div>
       </div>
@@ -865,20 +1051,34 @@ export function SettingsPage({ user }: SettingsPageProps) {
                     <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                       <div>
                         <p className="font-medium text-gray-900">Manual Sync Control</p>
-                        <p className="text-sm text-gray-600">Keep full offline operation and sync only when you choose.</p>
+                        <p className="text-sm text-gray-600">Git-style staging, push, and pull for admin devices only.</p>
                       </div>
-                      <button
-                        onClick={() => handleSyncModeChange(!syncModeOnline)}
-                        disabled={syncBusy === 'mode'}
-                        className={`px-4 py-2 rounded-lg border transition flex items-center gap-2 ${
-                          syncModeOnline
-                            ? 'bg-emerald-50 border-emerald-200 text-emerald-700 hover:bg-emerald-100'
-                            : 'bg-gray-50 border-gray-300 text-gray-700 hover:bg-gray-100'
-                        } disabled:opacity-60`}
-                      >
-                        {syncModeOnline ? <Wifi className="w-4 h-4" /> : <WifiOff className="w-4 h-4" />}
-                        {syncModeOnline ? 'Go Offline' : 'Go Online'}
-                      </button>
+                      <div className="flex items-center gap-3">
+                        <button
+                          onClick={handleOpenManualSyncPanel}
+                          className="px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition"
+                        >
+                          Manual Sync
+                        </button>
+                        <div className="flex items-center gap-2">
+                          <span className={`text-xs font-medium ${syncModeOnline ? 'text-gray-500' : 'text-gray-900'}`}>OFFLINE</span>
+                          <button
+                            onClick={() => handleSyncModeChange(!syncModeOnline)}
+                            disabled={syncBusy === 'mode'}
+                            className={`relative w-16 h-8 rounded-full border transition-all duration-200 ${
+                              syncModeOnline ? 'bg-emerald-100 border-emerald-300' : 'bg-gray-200 border-gray-300'
+                            } hover:scale-[1.03] disabled:opacity-60`}
+                            aria-label={syncModeOnline ? 'Switch to offline mode' : 'Switch to online mode'}
+                          >
+                            <span
+                              className={`absolute top-0.5 left-0.5 h-6 w-6 rounded-full bg-white shadow transition-transform duration-200 ${
+                                syncModeOnline ? 'translate-x-8' : 'translate-x-0'
+                              }`}
+                            />
+                          </button>
+                          <span className={`text-xs font-medium ${syncModeOnline ? 'text-emerald-700' : 'text-gray-500'}`}>ONLINE</span>
+                        </div>
+                      </div>
                     </div>
 
                     {!syncStatus?.configured && (
@@ -894,8 +1094,8 @@ export function SettingsPage({ user }: SettingsPageProps) {
                       </div>
                       <div className="border border-gray-200 rounded-lg p-3">
                         <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Connection</p>
-                        <p className={`font-medium ${syncConnectivity ? 'text-emerald-700' : 'text-gray-700'}`}>
-                          {syncConnectivity ? 'Online' : 'Offline'}
+                        <p className={`font-medium ${syncRelayConnected ? 'text-emerald-700' : 'text-red-700'}`}>
+                          {syncRelayConnected ? 'Connected' : 'Not Connected'}
                         </p>
                       </div>
                       <div className="border border-gray-200 rounded-lg p-3">
@@ -908,22 +1108,116 @@ export function SettingsPage({ user }: SettingsPageProps) {
                       </div>
                     </div>
 
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <button
+                        onClick={handleViewLocalChanges}
+                        disabled={viewChangesBusy}
+                        className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition disabled:opacity-60"
+                      >
+                        {viewChangesBusy ? 'Checking Changes...' : 'View Local Changes'}
+                      </button>
+                    </div>
+
+                    {localChanges && (
+                      <div className="border border-gray-200 rounded-lg p-3 space-y-3">
+                        <p className="text-sm font-medium text-gray-900">Local Pending Changes</p>
+                        {localChanges.total === 0 ? (
+                          <p className="text-sm text-gray-600">No pending local changes.</p>
+                        ) : (
+                          <div className="space-y-3">
+                            <div className="text-sm text-gray-700">
+                              <p>
+                                Total: {localChanges.total} change(s) | {formatKb(localChanges.totalSizeKb)}
+                              </p>
+                              <p>
+                                Safe to push: {localChanges.safeToPush ? 'YES' : 'NO'} | Estimated batches: {localChanges.recommendedBatchCount}
+                              </p>
+                            </div>
+
+                            <div className="space-y-2">
+                              <p className="text-sm font-medium text-gray-800">Stage by Category</p>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  onClick={handleMarkAll}
+                                  className="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-50"
+                                >
+                                  Mark All
+                                </button>
+                                <button
+                                  onClick={handleUnmarkAll}
+                                  className="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-50"
+                                >
+                                  Unmark All
+                                </button>
+                              </div>
+                              {localChanges.categories.map((item) => (
+                                <label key={item.key} className="flex items-center justify-between text-sm border border-gray-200 rounded-lg px-3 py-2">
+                                  <span className="flex items-center gap-2">
+                                    <input
+                                      type="checkbox"
+                                      checked={selectedCategoryKeys.includes(item.key)}
+                                      onChange={() => toggleCategoryStage(item.key)}
+                                    />
+                                    {item.count} {item.label}
+                                  </span>
+                                  <span className="text-gray-500">{formatKb(item.sizeKb)}</span>
+                                </label>
+                              ))}
+                            </div>
+
+                            <div className="space-y-2">
+                              <p className="text-sm font-medium text-gray-800">Or Stage Individual Changes</p>
+                              <div className="max-h-44 overflow-auto border border-gray-200 rounded-lg divide-y divide-gray-100">
+                                {localChanges.changes.map((change) => (
+                                  <label key={change.outboxId} className="flex items-center justify-between px-3 py-2 text-sm">
+                                    <span className="flex items-center gap-2">
+                                      <input
+                                        type="checkbox"
+                                        checked={selectedOutboxIds.includes(change.outboxId)}
+                                        onChange={() => toggleOutboxStage(change.outboxId)}
+                                      />
+                                      <span className="text-gray-900">{change.label}</span>
+                                      <span className="text-xs text-gray-500">[{change.operation}]</span>
+                                    </span>
+                                    <span className="text-gray-500">{formatKb(change.sizeKb)}</span>
+                                  </label>
+                                ))}
+                              </div>
+                            </div>
+
+                            <div className="text-sm border border-indigo-200 rounded-lg p-3 bg-indigo-50">
+                              <p className="font-medium text-indigo-900">Push Size Preview</p>
+                              <p className="text-indigo-800">
+                                Total Push Size: {formatKb(stagedTotalSizeKb)} | Safe to push: YES | Estimated batches: {stagedBatchCount}
+                              </p>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       <button
-                        onClick={handlePushChanges}
-                        disabled={!syncModeOnline || !syncStatus?.configured || syncBusy !== null || fullSyncRequired}
+                        onClick={handleRequestPushConfirm}
+                        disabled={
+                          !syncModeOnline ||
+                          !syncStatus?.configured ||
+                          syncBusy !== null ||
+                          fullSyncRequired ||
+                          (isAdmin && localChanges !== null && localChanges.total > 0 && stagedChanges.length === 0)
+                        }
                         className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition disabled:opacity-60 flex items-center justify-center gap-2"
                       >
                         <Upload className="w-4 h-4" />
                         Push Local Changes
                       </button>
                       <button
-                        onClick={handlePullChanges}
+                        onClick={handleCheckRemoteChanges}
                         disabled={!syncModeOnline || !syncStatus?.configured || syncBusy !== null || fullSyncRequired}
                         className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition disabled:opacity-60 flex items-center justify-center gap-2"
                       >
                         <Download className="w-4 h-4" />
-                        Pull Remote Changes
+                        Check Remote Changes
                       </button>
                     </div>
 
@@ -1215,6 +1509,226 @@ export function SettingsPage({ user }: SettingsPageProps) {
           </div>
         </div>
       </div>
+
+      {showManualSyncPanel && (
+        <div className="fixed inset-0 z-50 flex">
+          <button
+            onClick={() => setShowManualSyncPanel(false)}
+            className="flex-1 bg-black/30"
+            aria-label="Close manual sync panel"
+          />
+          <aside className="w-full max-w-2xl h-full bg-white border-l border-gray-200 shadow-xl overflow-y-auto p-6 space-y-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="font-bold text-gray-900">Manual Sync</h2>
+                <p className="text-sm text-gray-600">Stage local changes like Source Control and sync in safe batches.</p>
+              </div>
+              <button
+                onClick={() => setShowManualSyncPanel(false)}
+                className="px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-50"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="border border-gray-200 rounded-lg p-3">
+                <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Mode</p>
+                <p className="font-medium text-gray-900">{syncModeOnline ? 'Online' : 'Offline'}</p>
+              </div>
+              <div className="border border-gray-200 rounded-lg p-3">
+                <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Status</p>
+                <p className={`font-medium ${syncRelayConnected ? 'text-emerald-700' : 'text-red-700'}`}>
+                  {syncRelayConnected ? 'Connected' : 'Not Connected'}
+                </p>
+              </div>
+              <div className="border border-gray-200 rounded-lg p-3">
+                <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Last Sync</p>
+                <p className="font-medium text-gray-900">{formatTimestamp(lastSyncAt)}</p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between border border-gray-200 rounded-lg p-3">
+              <div>
+                <p className="font-medium text-gray-900">Online / Offline</p>
+                <p className="text-xs text-gray-600">If internet disconnects, sync returns to Offline mode.</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className={`text-xs font-medium ${syncModeOnline ? 'text-gray-500' : 'text-gray-900'}`}>OFFLINE</span>
+                <button
+                  onClick={() => handleSyncModeChange(!syncModeOnline)}
+                  disabled={syncBusy === 'mode'}
+                  className={`relative w-16 h-8 rounded-full border transition-all duration-200 ${
+                    syncModeOnline ? 'bg-emerald-100 border-emerald-300' : 'bg-gray-200 border-gray-300'
+                  } hover:scale-[1.03] disabled:opacity-60`}
+                >
+                  <span
+                    className={`absolute top-0.5 left-0.5 h-6 w-6 rounded-full bg-white shadow transition-transform duration-200 ${
+                      syncModeOnline ? 'translate-x-8' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+                <span className={`text-xs font-medium ${syncModeOnline ? 'text-emerald-700' : 'text-gray-500'}`}>ONLINE</span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleViewLocalChanges}
+                disabled={viewChangesBusy}
+                className="px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-60"
+              >
+                {viewChangesBusy ? 'Loading...' : 'View Local Changes'}
+              </button>
+              <button
+                onClick={handleCheckRemoteChanges}
+                disabled={!syncModeOnline || !syncStatus?.configured || syncBusy !== null || fullSyncRequired}
+                className="px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-60"
+              >
+                Check Remote Changes
+              </button>
+              <button onClick={handleMarkAll} className="px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-50">
+                Mark All
+              </button>
+              <button onClick={handleUnmarkAll} className="px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-50">
+                Unmark All
+              </button>
+            </div>
+
+            <div className="border border-gray-200 rounded-lg p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <p className="font-medium text-gray-900">Pending Changes</p>
+                <p className="text-sm text-gray-700">
+                  Total: {localChanges?.total ?? 0} | {formatSizeFromKb(localChanges?.totalSizeKb ?? 0)}
+                </p>
+              </div>
+              {!localChanges || localChanges.total === 0 ? (
+                <p className="text-sm text-gray-600">No pending local changes.</p>
+              ) : (
+                <div className="space-y-2">
+                  {localChanges.categories.map((category) => (
+                    <div key={category.key} className="border border-gray-200 rounded-lg">
+                      <div className="px-3 py-2 flex items-center justify-between gap-2">
+                        <label className="flex items-center gap-2 text-sm">
+                          <input
+                            type="checkbox"
+                            checked={selectedCategoryKeys.includes(category.key)}
+                            onChange={() => toggleCategoryStage(category.key)}
+                          />
+                          {category.count} {category.label}
+                        </label>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-gray-500">{formatSizeFromKb(category.sizeKb)}</span>
+                          <button
+                            onClick={() => toggleExpandedCategory(category.key)}
+                            className="text-xs px-2 py-1 border border-gray-300 rounded hover:bg-gray-50"
+                          >
+                            {expandedCategoryKeys.includes(category.key) ? 'Hide' : 'Show'}
+                          </button>
+                        </div>
+                      </div>
+                      {expandedCategoryKeys.includes(category.key) && (
+                        <div className="border-t border-gray-200 max-h-36 overflow-y-auto divide-y divide-gray-100">
+                          {localChanges.changes
+                            .filter((change) => change.categoryKey === category.key)
+                            .map((change) => (
+                              <label key={change.outboxId} className="px-3 py-2 flex items-center justify-between text-sm">
+                                <span className="flex items-center gap-2">
+                                  <input
+                                    type="checkbox"
+                                    checked={selectedOutboxIds.includes(change.outboxId)}
+                                    onChange={() => toggleOutboxStage(change.outboxId)}
+                                  />
+                                  {change.label}
+                                </span>
+                                <span className="text-xs text-gray-500">{formatSizeFromKb(change.sizeKb)}</span>
+                              </label>
+                            ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="border border-indigo-200 rounded-lg p-3 bg-indigo-50">
+              <p className="text-sm font-medium text-indigo-900">Staged Push Preview</p>
+              <p className="text-sm text-indigo-800">
+                {stagedChanges.length} record(s) | {formatSizeFromKb(stagedTotalSizeKb)} | Estimated batches: {stagedBatchCount}
+              </p>
+            </div>
+
+            {syncBusy === 'push' && (
+              <div className="space-y-2">
+                <p className="text-sm text-gray-700">Uploading staged changes...</p>
+                <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+                  <div className="h-full w-1/2 bg-indigo-600 animate-pulse" />
+                </div>
+              </div>
+            )}
+
+            <div className="flex items-center justify-end">
+              <button
+                onClick={handleRequestPushConfirm}
+                disabled={!syncModeOnline || !syncStatus?.configured || syncBusy !== null || fullSyncRequired || stagedChanges.length === 0}
+                className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition disabled:opacity-60"
+              >
+                Push Selected
+              </button>
+            </div>
+          </aside>
+        </div>
+      )}
+
+      {showPushConfirm && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+          <div className="w-full max-w-lg bg-white rounded-xl border border-gray-200 p-6 space-y-4">
+            <h3 className="font-bold text-gray-900">Confirm Push</h3>
+            <p className="text-sm text-gray-700">You are about to push the following staged changes:</p>
+            <div className="space-y-1 text-sm">
+              {stagedCategorySummary.map((item) => (
+                <p key={item.label}>
+                  {item.count} {item.label}
+                </p>
+              ))}
+            </div>
+            <p className="text-sm text-gray-900">Total Size: {formatSizeFromKb(stagedTotalSizeKb)}</p>
+            <div className="flex items-center justify-end gap-2">
+              <button onClick={() => setShowPushConfirm(false)} className="px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-50">
+                Cancel
+              </button>
+              <button onClick={handlePushChanges} className="px-3 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">
+                Confirm Push
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {remotePreview && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+          <div className="w-full max-w-lg bg-white rounded-xl border border-gray-200 p-6 space-y-4">
+            <h3 className="font-bold text-gray-900">{remotePreview.count} Remote Updates Found</h3>
+            <p className="text-sm text-gray-700">Total Size: {formatSizeFromKb(remotePreview.totalSizeKb)}</p>
+            {remotePreview.message && <p className="text-sm text-gray-600">{remotePreview.message}</p>}
+            <div className="flex items-center justify-end gap-2">
+              <button onClick={() => setRemotePreview(null)} className="px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-50">
+                Cancel
+              </button>
+              <button
+                onClick={async () => {
+                  setRemotePreview(null);
+                  await handlePullChanges();
+                }}
+                className="px-3 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700"
+              >
+                Pull
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

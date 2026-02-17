@@ -75,7 +75,9 @@ contextBridge.exposeInMainWorld('api', {
     trigger: (userId: string) => ipcRenderer.invoke('sync:trigger', userId),
     getStatus: (userId: string) => ipcRenderer.invoke('sync:get-status', userId),
     setMode: (userId: string, online: boolean) => ipcRenderer.invoke('sync:set-mode', userId, online),
-    push: (userId: string) => ipcRenderer.invoke('sync:push', userId),
+    push: (userId: string, stage?: { categories?: string[]; outboxIds?: number[] }) => ipcRenderer.invoke('sync:push', userId, stage),
+    viewLocalChanges: (userId: string) => ipcRenderer.invoke('sync:view-local-changes', userId),
+    autoPullEmployeeSubmissions: (userId: string) => ipcRenderer.invoke('sync:auto-pull-employee-submissions', userId),
     previewPull: (userId: string) => ipcRenderer.invoke('sync:preview-pull', userId),
     pull: (userId: string, conflictStrategy: 'skip' | 'remote_wins' = 'skip') =>
       ipcRenderer.invoke('sync:pull', userId, conflictStrategy),
