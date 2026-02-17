@@ -32,6 +32,7 @@ interface AppUserRow {
 
 export interface OnlineLoginResult {
   accessToken: string;
+  refreshToken: string | null;
   tokenType: string;
   expiresInSeconds: number;
   expiresAt: string | null;
@@ -255,6 +256,7 @@ export const supabaseAuth = {
 
     const payload = (await response.json()) as SupabaseSignInResponse;
     const accessToken = payload.access_token;
+    const refreshToken = payload.refresh_token || null;
     const expiresIn = Number(payload.expires_in || 0);
     const expiresAt = Number.isFinite(expiresIn) && expiresIn > 0 ? new Date(Date.now() + expiresIn * 1000).toISOString() : null;
     const userId = payload?.user?.id;
@@ -287,6 +289,7 @@ export const supabaseAuth = {
 
     return {
       accessToken,
+      refreshToken,
       tokenType: payload.token_type || 'bearer',
       expiresInSeconds: expiresIn,
       expiresAt,
@@ -296,6 +299,45 @@ export const supabaseAuth = {
       accountStatus,
       profileEmployeeId: profile?.employee_id || null,
       profileFound: Boolean(profile)
+    };
+  },
+
+  async refreshAccessToken(refreshToken: string): Promise<{ accessToken: string; refreshToken: string | null; expiresAt: string | null }> {
+    if (!isConfigured()) {
+      throw new Error(
+        'Supabase auth is not configured. Set SUPABASE_URL and SUPABASE_ANON_KEY (or SUPABASE_PUBLISHABLE_KEY).'
+      );
+    }
+
+    if (!refreshToken) {
+      throw new Error('No refresh token is available for this user session.');
+    }
+
+    const response = await authRequest('token?grant_type=refresh_token', {
+      method: 'POST',
+      body: JSON.stringify({
+        refresh_token: refreshToken
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(await parseSupabaseError(response));
+    }
+
+    const payload = (await response.json()) as SupabaseSignInResponse;
+    const accessToken = payload.access_token;
+    const nextRefreshToken = payload.refresh_token || refreshToken;
+    const expiresIn = Number(payload.expires_in || 0);
+    const expiresAt = Number.isFinite(expiresIn) && expiresIn > 0 ? new Date(Date.now() + expiresIn * 1000).toISOString() : null;
+
+    if (!accessToken) {
+      throw new Error('Supabase did not return an access token while refreshing session.');
+    }
+
+    return {
+      accessToken,
+      refreshToken: nextRefreshToken,
+      expiresAt
     };
   },
 

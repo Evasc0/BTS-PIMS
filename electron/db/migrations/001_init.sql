@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS employees (
   last_verified_at TEXT,
   verification_expires_at TEXT,
   hashed_session_token TEXT,
+  supabase_refresh_token_enc TEXT,
   created_at TEXT NOT NULL,
   location TEXT NOT NULL,
   two_factor_enabled INTEGER NOT NULL,

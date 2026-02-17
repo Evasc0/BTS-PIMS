@@ -212,23 +212,59 @@ alter table public.employee_sync_queue enable row level security;
 alter table public.full_sync_requests enable row level security;
 alter table public.full_sync_chunks enable row level security;
 
--- JWT helpers for RLS.
--- Expected claims:
--- 1) app_role: 'system_admin' for system admin users
--- 2) employee_id: local employee id (fallbacks to auth.uid()::text when absent)
+-- RLS helpers (role/employee resolution from app_users, not JWT custom claims).
+create or replace function public.sync_user_role()
+returns text
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select lower(u.role)
+  from public.app_users u
+  where u.user_id = auth.uid()
+    and u.account_status = 'active'
+  limit 1;
+$$;
+
+create or replace function public.sync_user_employee_id()
+returns text
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select u.employee_id
+  from public.app_users u
+  where u.user_id = auth.uid()
+    and u.account_status = 'active'
+  limit 1;
+$$;
+
+grant execute on function public.sync_user_role() to authenticated;
+grant execute on function public.sync_user_employee_id() to authenticated;
+
+create or replace function public.sync_auth_email()
+returns text
+language sql
+stable
+security definer
+set search_path = public, auth
+as $$
+  select lower(u.email)
+  from auth.users u
+  where u.id = auth.uid()
+  limit 1;
+$$;
+
+grant execute on function public.sync_auth_email() to authenticated;
+
 create or replace function public.sync_is_admin()
 returns boolean
 language sql
 stable
 as $$
-  select lower(
-    coalesce(
-      auth.jwt() ->> 'app_role',
-      auth.jwt() -> 'app_metadata' ->> 'app_role',
-      auth.jwt() -> 'user_metadata' ->> 'app_role',
-      ''
-    )
-  ) in ('system_admin', 'admin');
+  select coalesce(public.sync_user_role() = 'system_admin', false);
 $$;
 
 create or replace function public.sync_is_employee()
@@ -236,14 +272,7 @@ returns boolean
 language sql
 stable
 as $$
-  select lower(
-    coalesce(
-      auth.jwt() ->> 'app_role',
-      auth.jwt() -> 'app_metadata' ->> 'app_role',
-      auth.jwt() -> 'user_metadata' ->> 'app_role',
-      ''
-    )
-  ) in ('employee', 'supervisor');
+  select coalesce(public.sync_user_role() = 'employee', false);
 $$;
 
 create or replace function public.sync_employee_id()
@@ -252,9 +281,7 @@ language sql
 stable
 as $$
   select coalesce(
-    auth.jwt() ->> 'employee_id',
-    auth.jwt() -> 'app_metadata' ->> 'employee_id',
-    auth.jwt() -> 'user_metadata' ->> 'employee_id',
+    public.sync_user_employee_id(),
     auth.uid()::text
   );
 $$;
@@ -357,6 +384,35 @@ on public.app_users
 for select
 to authenticated
 using (user_id = auth.uid());
+
+create policy "app_users_user_insert_self"
+on public.app_users
+for insert
+to authenticated
+with check (
+  user_id = auth.uid()
+  and lower(email) = public.sync_auth_email()
+  and account_status in ('active', 'inactive')
+  and (
+    lower(role) = 'employee'
+    or (lower(role) = 'system_admin' and lower(email) = 'btsadmin@gmail.com')
+  )
+);
+
+create policy "app_users_user_update_self"
+on public.app_users
+for update
+to authenticated
+using (user_id = auth.uid())
+with check (
+  user_id = auth.uid()
+  and lower(email) = public.sync_auth_email()
+  and account_status in ('active', 'inactive')
+  and (
+    lower(role) = 'employee'
+    or (lower(role) = 'system_admin' and lower(email) = 'btsadmin@gmail.com')
+  )
+);
 
 create policy "full_sync_requests_admin_all"
 on public.full_sync_requests

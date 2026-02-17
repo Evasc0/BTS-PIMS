@@ -51,6 +51,7 @@ const ensureCoreSchema = (db: Database.Database): void => {
   ensureTableColumn(db, 'employees', employeesColumns, 'last_verified_at', 'TEXT');
   ensureTableColumn(db, 'employees', employeesColumns, 'verification_expires_at', 'TEXT');
   ensureTableColumn(db, 'employees', employeesColumns, 'hashed_session_token', 'TEXT');
+  ensureTableColumn(db, 'employees', employeesColumns, 'supabase_refresh_token_enc', 'TEXT');
 
   db.exec(
     "UPDATE employees SET auth_sync_status = COALESCE(NULLIF(auth_sync_status, ''), 'pending_upload') WHERE 1 = 1"

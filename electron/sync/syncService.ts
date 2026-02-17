@@ -5,6 +5,7 @@ import zlib from 'zlib';
 import { createHash, randomUUID } from 'crypto';
 import { app } from 'electron';
 import { dataStore } from '../db';
+import { authService } from '../auth/authService';
 
 const nowIso = (): string => new Date().toISOString();
 
@@ -22,6 +23,7 @@ const DAY_IN_MS = 24 * 60 * 60 * 1000;
 const getAdminQueueTable = (): string =>
   process.env.SUPABASE_ADMIN_QUEUE_TABLE || process.env.SUPABASE_SYNC_QUEUE_TABLE || 'admin_sync_queue';
 const getEmployeeQueueTable = (): string => process.env.SUPABASE_EMPLOYEE_QUEUE_TABLE || 'employee_sync_queue';
+const getAppUsersTable = (): string => process.env.SUPABASE_APP_USERS_TABLE || 'app_users';
 const getSupabaseUrl = (): string => (process.env.SUPABASE_URL || '').replace(/\/+$/u, '');
 const getSupabaseAnonKey = (): string => process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_PUBLISHABLE_KEY || '';
 const getPushBatchSize = (): number => Math.max(1, Number(process.env.SYNC_PUSH_BATCH_SIZE || 100));
@@ -202,6 +204,7 @@ const isConfigured = (): boolean => Boolean(getSupabaseUrl() && getSupabaseAnonK
 type SupabaseActorToken = { accessToken: string; expiresAtMs: number | null };
 const actorSupabaseTokens = new Map<string, SupabaseActorToken>();
 let scopedSupabaseAccessToken: string | null = null;
+let scopedActorUserId: string | null = null;
 
 const parseExpiryMs = (value?: string | null): number | null => {
   if (!value) return null;
@@ -233,12 +236,15 @@ export const clearSyncActorAccessToken = (userId: string): void => {
 };
 
 const withActorToken = async <T>(actor: SyncActor, task: () => Promise<T>): Promise<T> => {
-  const previous = scopedSupabaseAccessToken;
+  const previousToken = scopedSupabaseAccessToken;
+  const previousActor = scopedActorUserId;
   scopedSupabaseAccessToken = getActorAccessToken(actor.userId);
+  scopedActorUserId = actor.userId;
   try {
     return await task();
   } finally {
-    scopedSupabaseAccessToken = previous;
+    scopedSupabaseAccessToken = previousToken;
+    scopedActorUserId = previousActor;
   }
 };
 
@@ -842,6 +848,91 @@ const getLocalVersion = (db: Database.Database, entityType: string, recordId: st
   return readVersion(row?.version, 0);
 };
 
+const normalizeActorRole = (value: unknown): SyncRole | null => {
+  const role = String(value || '')
+    .trim()
+    .toLowerCase();
+  if (role === 'system_admin' || role === 'admin') return 'system_admin';
+  if (role === 'employee' || role === 'supervisor') return 'employee';
+  return null;
+};
+
+const normalizeActorStatus = (value: unknown): 'active' | 'inactive' => {
+  const status = String(value || '')
+    .trim()
+    .toLowerCase();
+  return status === 'inactive' ? 'inactive' : 'active';
+};
+
+const parseSupabaseError = (raw: string): { code?: string; message: string } => {
+  const text = String(raw || '').trim();
+  if (!text) return { message: '' };
+  try {
+    const parsed = JSON.parse(text) as { code?: string; message?: string; hint?: string };
+    return {
+      code: parsed?.code,
+      message: parsed?.message || parsed?.hint || text
+    };
+  } catch {
+    return { message: text };
+  }
+};
+
+const ensureScopedAccessToken = async (): Promise<string> => {
+  if (scopedSupabaseAccessToken) return scopedSupabaseAccessToken;
+  if (!scopedActorUserId) {
+    throw new Error('Supabase session is missing. Sign in online and retry.');
+  }
+
+  const refreshed = await authService.refreshSession(scopedActorUserId);
+  if (!refreshed.success) {
+    const failure = refreshed as { success: false; error: string };
+    throw new Error(
+      failure.error || 'Supabase session is missing or expired. Sign in online and retry sync.'
+    );
+  }
+
+  setSyncActorAccessToken(scopedActorUserId, refreshed.accessToken, refreshed.expiresAt);
+  scopedSupabaseAccessToken = refreshed.accessToken;
+  return refreshed.accessToken;
+};
+
+const fetchActorAppUserRow = async (supabaseUserId: string): Promise<{ role: string; account_status: string } | null> => {
+  const params = new URLSearchParams();
+  params.set('select', 'user_id,role,account_status');
+  params.set('user_id', `eq.${supabaseUserId}`);
+  params.set('limit', '1');
+  const response = await supabaseRequest(`${getAppUsersTable()}?${params.toString()}`, { method: 'GET' });
+  const rows = (await response.json()) as Array<{ role?: string | null; account_status?: string | null }>;
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  const row = rows[0] || {};
+  return {
+    role: String(row.role || ''),
+    account_status: String(row.account_status || 'active')
+  };
+};
+
+const ensureActorQueuePermission = async (actor: SyncActor, supabaseUserId: string): Promise<string | null> => {
+  const appUser = await fetchActorAppUserRow(supabaseUserId);
+  if (!appUser) {
+    return `Supabase app user profile is missing for this account (${supabaseUserId}). Insert/update ${getAppUsersTable()} with an active ${actor.role} role, then retry push.`;
+  }
+
+  const remoteRole = normalizeActorRole(appUser.role);
+  const remoteStatus = normalizeActorStatus(appUser.account_status);
+  if (remoteStatus !== 'active') {
+    return 'Supabase app user is inactive. Activate account_status in app_users before pushing.';
+  }
+
+  if (canAdminSync(actor) && remoteRole !== 'system_admin') {
+    return `Push denied: authenticated Supabase role is "${remoteRole || 'unknown'}", expected "system_admin".`;
+  }
+  if (!canAdminSync(actor) && remoteRole !== 'employee') {
+    return `Push denied: authenticated Supabase role is "${remoteRole || 'unknown'}", expected "employee".`;
+  }
+  return null;
+};
+
 const supabaseRequest = async (pathAndQuery: string, init?: RequestInit): Promise<Response> => {
   if (!isConfigured()) {
     throw new Error(
@@ -851,7 +942,7 @@ const supabaseRequest = async (pathAndQuery: string, init?: RequestInit): Promis
 
   const supabaseAnonKey = getSupabaseAnonKey();
   const supabaseUrl = getSupabaseUrl();
-  const accessToken = scopedSupabaseAccessToken || supabaseAnonKey;
+  const accessToken = await ensureScopedAccessToken();
 
   const headers: Record<string, string> = {
     apikey: supabaseAnonKey,
@@ -872,8 +963,19 @@ const supabaseRequest = async (pathAndQuery: string, init?: RequestInit): Promis
   });
 
   if (!response.ok) {
-    const message = (await response.text()) || `Supabase request failed with status ${response.status}`;
-    throw new Error(message);
+    const raw = (await response.text()) || `Supabase request failed with status ${response.status}`;
+    const parsed = parseSupabaseError(raw);
+    if (parsed.code === '42501' && pathAndQuery.startsWith(getAdminQueueTable())) {
+      throw new Error(
+        'RLS denied push to admin queue. Ensure app_users has this Supabase user as active system_admin, then retry.'
+      );
+    }
+    if (parsed.code === '42501' && pathAndQuery.startsWith(getEmployeeQueueTable())) {
+      throw new Error(
+        'RLS denied sync to employee queue. Ensure app_users role/status is active and queue policies are applied.'
+      );
+    }
+    throw new Error(parsed.message || raw);
   }
 
   return response;
@@ -888,7 +990,7 @@ const supabaseStorageRequest = async (pathAndQuery: string, init?: RequestInit):
 
   const supabaseAnonKey = getSupabaseAnonKey();
   const supabaseUrl = getSupabaseUrl();
-  const accessToken = scopedSupabaseAccessToken || supabaseAnonKey;
+  const accessToken = await ensureScopedAccessToken();
 
   const response = await fetch(`${supabaseUrl}/storage/v1/${pathAndQuery}`, {
     ...init,
@@ -900,8 +1002,9 @@ const supabaseStorageRequest = async (pathAndQuery: string, init?: RequestInit):
   });
 
   if (!response.ok) {
-    const message = (await response.text()) || `Supabase storage request failed with status ${response.status}`;
-    throw new Error(message);
+    const raw = (await response.text()) || `Supabase storage request failed with status ${response.status}`;
+    const parsed = parseSupabaseError(raw);
+    throw new Error(parsed.message || raw);
   }
 
   return response;
@@ -1973,11 +2076,27 @@ const buildEmployeeQueueRecords = (
 
 const isUuidLike = (value: string): boolean => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value);
 
+const tryReadScopedAuthUid = (): string | null => {
+  if (!scopedSupabaseAccessToken) return null;
+  const parts = scopedSupabaseAccessToken.split('.');
+  if (parts.length < 2) return null;
+  try {
+    const payloadJson = Buffer.from(parts[1].replace(/-/gu, '+').replace(/_/gu, '/'), 'base64').toString('utf8');
+    const payload = JSON.parse(payloadJson) as { sub?: unknown };
+    const sub = typeof payload?.sub === 'string' ? payload.sub : '';
+    return isUuidLike(sub) ? sub : null;
+  } catch {
+    return null;
+  }
+};
+
 const resolveOriginUserId = (db: Database.Database, actor: SyncActor): string | null => {
+  const tokenUserId = tryReadScopedAuthUid();
+  if (tokenUserId) return tokenUserId;
   const row = db
     .prepare('SELECT supabase_user_id FROM employees WHERE id = ?')
     .get(actor.userId) as { supabase_user_id?: string | null } | undefined;
-  if (row?.supabase_user_id) return row.supabase_user_id;
+  if (row?.supabase_user_id && isUuidLike(row.supabase_user_id)) return row.supabase_user_id;
   return isUuidLike(actor.userId) ? actor.userId : null;
 };
 
@@ -2214,6 +2333,26 @@ export async function pushLocalChanges(actor: SyncActor, stage?: PushStageOption
 
     const originDeviceId = getLocalDeviceId(db);
     const originUserId = resolveOriginUserId(db, actor);
+    if (!originUserId) {
+      const message = 'Unable to resolve authenticated Supabase user id for sync payload (origin_user_id).';
+      writeSyncState(db, actor, { last_status: 'error', last_error: message });
+      logSyncEvent(db, { eventType: 'push', message: `Push blocked: ${message}` });
+      return { status: 'error', pushedCount: 0, error: message };
+    }
+
+    try {
+      const permissionError = await ensureActorQueuePermission(actor, originUserId);
+      if (permissionError) {
+        writeSyncState(db, actor, { last_status: 'error', last_error: permissionError });
+        logSyncEvent(db, { eventType: 'push', message: `Push blocked: ${permissionError}` });
+        return { status: 'error', pushedCount: 0, error: permissionError };
+      }
+    } catch (error: any) {
+      const message = error?.message || 'Unable to verify Supabase app user role for push.';
+      writeSyncState(db, actor, { last_status: 'error', last_error: message });
+      logSyncEvent(db, { eventType: 'push', message: `Push blocked: ${message}` });
+      return { status: 'error', pushedCount: 0, error: message };
+    }
 
     const adminPayloadRecords = canAdminSync(actor)
       ? prepared.map((entry) => ({

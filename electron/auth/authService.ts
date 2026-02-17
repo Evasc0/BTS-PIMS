@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'crypto';
 import type Database from 'better-sqlite3';
 import type { EmployeeRole, EmployeeStatus } from '../shared/types';
 import { dataStore } from '../db';
-import { hashSessionToken } from './localSecrets';
+import { decryptLocalSecret, encryptLocalSecret, hashSessionToken } from './localSecrets';
 import { supabaseAuth } from './supabaseAuth';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -33,6 +33,10 @@ export type InstantUserCreateResult =
   | { success: true; employeeId: string }
   | { success: false; error: string; requiresInternet?: boolean };
 
+export type RefreshSessionResult =
+  | { success: true; refreshed: boolean; accessToken: string; expiresAt: string | null }
+  | { success: false; error: string; requiresInternet?: boolean };
+
 interface EmployeeRow {
   id: string;
   full_name: string;
@@ -49,11 +53,13 @@ interface EmployeeRow {
   last_verified_at: string | null;
   verification_expires_at: string | null;
   hashed_session_token: string | null;
+  supabase_refresh_token_enc: string | null;
 }
 
 interface CachedSupabaseSession {
   accessToken: string;
   expiresAtMs: number | null;
+  refreshToken: string | null;
 }
 
 const sessionCache = new Map<string, CachedSupabaseSession>();
@@ -149,11 +155,18 @@ const getEmployeeBySupabaseUserId = (db: Database.Database, supabaseUserId: stri
     .prepare('SELECT * FROM employees WHERE supabase_user_id = ? AND deleted_at IS NULL')
     .get(supabaseUserId) as EmployeeRow | undefined;
 
-const setCachedSession = (userId: string, accessToken: string, expiresAt?: string | null): void => {
+const setCachedSession = (
+  userId: string,
+  accessToken: string,
+  expiresAt?: string | null,
+  refreshToken?: string | null
+): void => {
   if (!userId || !accessToken) return;
+  const existing = sessionCache.get(userId);
   sessionCache.set(userId, {
     accessToken,
-    expiresAtMs: parseExpiryMs(expiresAt)
+    expiresAtMs: parseExpiryMs(expiresAt),
+    refreshToken: refreshToken ?? existing?.refreshToken ?? null
   });
 };
 
@@ -161,10 +174,62 @@ const getCachedSessionToken = (userId: string): string | null => {
   const cached = sessionCache.get(userId);
   if (!cached) return null;
   if (cached.expiresAtMs != null && cached.expiresAtMs <= Date.now()) {
-    sessionCache.delete(userId);
+    if (!cached.refreshToken) {
+      sessionCache.delete(userId);
+    }
     return null;
   }
   return cached.accessToken;
+};
+
+const getStoredRefreshToken = (db: Database.Database, userId: string): string | null => {
+  const row = db
+    .prepare('SELECT supabase_refresh_token_enc FROM employees WHERE id = ? AND deleted_at IS NULL')
+    .get(userId) as { supabase_refresh_token_enc?: string | null } | undefined;
+  return decryptLocalSecret(row?.supabase_refresh_token_enc ?? null);
+};
+
+const setStoredRefreshToken = (db: Database.Database, userId: string, refreshToken: string | null): void => {
+  db.prepare('UPDATE employees SET supabase_refresh_token_enc = ? WHERE id = ?').run(
+    refreshToken ? encryptLocalSecret(refreshToken) : null,
+    userId
+  );
+};
+
+const refreshCachedSessionToken = async (userId: string): Promise<RefreshSessionResult> => {
+  const db = dataStore.getDb();
+  const cached = sessionCache.get(userId);
+  const refreshToken = cached?.refreshToken || getStoredRefreshToken(db, userId);
+  if (!refreshToken) {
+    return { success: false, error: 'No refresh token available. Sign in online once on this device.' };
+  }
+
+  try {
+    const refreshed = await supabaseAuth.refreshAccessToken(refreshToken);
+    const nextRefreshToken = refreshed.refreshToken || refreshToken;
+    setCachedSession(userId, refreshed.accessToken, refreshed.expiresAt, nextRefreshToken);
+    setStoredRefreshToken(db, userId, nextRefreshToken);
+    return {
+      success: true,
+      refreshed: true,
+      accessToken: refreshed.accessToken,
+      expiresAt: refreshed.expiresAt
+    };
+  } catch (error: unknown) {
+    const message = normalizeLoginError(error);
+    if (isConnectivityError(message)) {
+      return {
+        success: false,
+        error: 'Internet connection required to refresh your session.',
+        requiresInternet: true
+      };
+    }
+    if (message.toLowerCase().includes('refresh token') || message.toLowerCase().includes('invalid grant')) {
+      setStoredRefreshToken(db, userId, null);
+      sessionCache.delete(userId);
+    }
+    return { success: false, error: message };
+  }
 };
 
 const deriveFullName = (email: string): string => {
@@ -404,6 +469,7 @@ const applyOnlineLogin = async (
   online: Awaited<ReturnType<typeof supabaseAuth.onlineLogin>>
 ): Promise<OfflineFirstLoginResult> => {
   const remoteStatus = normalizeStatus(online.accountStatus || employee.status);
+  const resolvedRole = normalizeRole(online.role || employee.role);
   if (remoteStatus === 'inactive') {
     updateAuthVerificationCache(db, {
       employeeId: employee.id,
@@ -416,12 +482,27 @@ const applyOnlineLogin = async (
     return { success: false, error: 'Your account has been deactivated. Contact administrator.' };
   }
 
+  let profileWarning: string | undefined;
+  try {
+    await supabaseAuth.upsertAppUserStatus({
+      adminAccessToken: online.accessToken,
+      supabaseUserId: online.supabaseUserId,
+      employeeId: employee.id,
+      email: (online.email || employee.email || '').trim().toLowerCase(),
+      role: resolvedRole,
+      status: remoteStatus
+    });
+  } catch (error: unknown) {
+    const message = normalizeLoginError(error);
+    profileWarning = `Supabase app_users sync warning: ${message}`;
+  }
+
   const verifiedAt = nowIso();
   const expiresAt = new Date(Date.now() + AUTH_VERIFICATION_DAYS * DAY_MS).toISOString();
   updateAuthVerificationCache(db, {
     employeeId: employee.id,
     supabaseUserId: online.supabaseUserId,
-    role: normalizeRole(online.role || employee.role),
+    role: resolvedRole,
     status: remoteStatus,
     authSyncStatus: 'synced',
     authLastError: null,
@@ -432,13 +513,15 @@ const applyOnlineLogin = async (
     hashedSessionToken: hashSessionToken(online.accessToken)
   });
 
-  setCachedSession(employee.id, online.accessToken, online.expiresAt);
+  setCachedSession(employee.id, online.accessToken, online.expiresAt, online.refreshToken);
+  setStoredRefreshToken(db, employee.id, online.refreshToken);
 
   return {
     success: true,
     userId: employee.id,
     verifiedOnline: true,
     verificationExpiresAt: expiresAt,
+    warning: profileWarning,
     sessionAccessToken: online.accessToken,
     sessionAccessTokenExpiresAt: online.expiresAt
   };
@@ -599,13 +682,18 @@ export const authService = {
       return { success: false, error: 'Only active system admin accounts can create users.' };
     }
 
-    const adminAccessToken = getCachedSessionToken(input.adminUserId);
+    let adminAccessToken = getCachedSessionToken(input.adminUserId);
     if (!adminAccessToken) {
-      return {
-        success: false,
-        error: 'Internet connection required to create user.',
-        requiresInternet: true
-      };
+      const refreshed = await refreshCachedSessionToken(input.adminUserId);
+      if (!refreshed.success) {
+        const failure = refreshed as Extract<RefreshSessionResult, { success: false }>;
+        return {
+          success: false,
+          error: failure.error || 'Internet connection required to create user.',
+          requiresInternet: failure.requiresInternet ?? true
+        };
+      }
+      adminAccessToken = refreshed.accessToken;
     }
 
     if (!supabaseAuth.isConfigured()) {
@@ -675,12 +763,42 @@ export const authService = {
     return emptyProvisioningSummary();
   },
 
+  async refreshSession(userId: string): Promise<RefreshSessionResult> {
+    const db = dataStore.getDb();
+    const employee = getEmployeeById(db, userId);
+    if (!employee) {
+      return { success: false, error: 'User profile not found locally.' };
+    }
+    if (normalizeStatus(employee.status) !== 'active') {
+      return { success: false, error: 'Account is inactive. Contact administrator.' };
+    }
+    if (!supabaseAuth.isConfigured()) {
+      return {
+        success: false,
+        error: 'Supabase auth is not configured. Set SUPABASE_URL and SUPABASE_ANON_KEY (or SUPABASE_PUBLISHABLE_KEY).'
+      };
+    }
+
+    const cachedToken = getCachedSessionToken(userId);
+    if (cachedToken) {
+      return {
+        success: true,
+        refreshed: false,
+        accessToken: cachedToken,
+        expiresAt: null
+      };
+    }
+
+    return refreshCachedSessionToken(userId);
+  },
+
   clearLocalSessionCache(userId: string): void {
     const db = dataStore.getDb();
     updateAuthVerificationCache(db, {
       employeeId: userId,
       hashedSessionToken: null
     });
+    setStoredRefreshToken(db, userId, null);
     sessionCache.delete(userId);
   }
 };
