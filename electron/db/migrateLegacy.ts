@@ -16,13 +16,15 @@ const normalizeSync = (record: any) => {
   const lastSyncedAt = record?.lastSyncedAt ?? record?.last_synced_at ?? null;
   const deletedAt = record?.deletedAt ?? record?.deleted_at ?? null;
   const syncStatus = record?.syncStatus ?? record?.sync_status ?? (isDirty ? 'pending' : 'synced');
+  const version = Math.max(1, Number(record?.version ?? 1));
 
   return {
     sync_status: syncStatus,
     is_dirty: isDirty ? 1 : 0,
     last_modified: lastModified,
     last_synced_at: lastSyncedAt,
-    deleted_at: deletedAt
+    deleted_at: deletedAt,
+    version
   };
 };
 
@@ -34,11 +36,11 @@ export function importLegacyDump(db: Database.Database, dump: LegacyDump): void 
     INSERT INTO employees (
       id, full_name, email, phone, department, role, status, password_hash, password_salt,
       created_at, location, two_factor_enabled, email_notifications, low_stock_alerts, language,
-      sync_status, is_dirty, last_modified, last_synced_at, deleted_at
+      sync_status, is_dirty, last_modified, last_synced_at, deleted_at, version
     ) VALUES (
       @id, @full_name, @email, @phone, @department, @role, @status, @password_hash, @password_salt,
       @created_at, @location, @two_factor_enabled, @email_notifications, @low_stock_alerts, @language,
-      @sync_status, @is_dirty, @last_modified, @last_synced_at, @deleted_at
+      @sync_status, @is_dirty, @last_modified, @last_synced_at, @deleted_at, @version
     )
   `
   );
@@ -48,11 +50,13 @@ export function importLegacyDump(db: Database.Database, dump: LegacyDump): void 
     INSERT INTO products (
       id, value_category, article, date, description, par_control_number, property_number,
       unit, unit_value, balance_per_card, on_hand_per_count, total, remarks, location,
-      assigned_to_employee_id, status, sync_status, is_dirty, last_modified, last_synced_at, deleted_at
+      assigned_to_employee_id, assigned_at, assignment_status, status,
+      sync_status, is_dirty, last_modified, last_synced_at, deleted_at, version
     ) VALUES (
       @id, @value_category, @article, @date, @description, @par_control_number, @property_number,
       @unit, @unit_value, @balance_per_card, @on_hand_per_count, @total, @remarks, @location,
-      @assigned_to_employee_id, @status, @sync_status, @is_dirty, @last_modified, @last_synced_at, @deleted_at
+      @assigned_to_employee_id, @assigned_at, @assignment_status, @status,
+      @sync_status, @is_dirty, @last_modified, @last_synced_at, @deleted_at, @version
     )
   `
   );
@@ -63,12 +67,12 @@ export function importLegacyDump(db: Database.Database, dump: LegacyDump): void 
       id, rrsp_number, product_id, return_date, quantity, condition, remarks,
       returned_by_employee_id, returned_by_position, received_date, location,
       created_at, status, processed_by_employee_id, processed_date, processing_notes,
-      sync_status, is_dirty, last_modified, last_synced_at, deleted_at
+      sync_status, is_dirty, last_modified, last_synced_at, deleted_at, version
     ) VALUES (
       @id, @rrsp_number, @product_id, @return_date, @quantity, @condition, @remarks,
       @returned_by_employee_id, @returned_by_position, @received_date, @location,
       @created_at, @status, @processed_by_employee_id, @processed_date, @processing_notes,
-      @sync_status, @is_dirty, @last_modified, @last_synced_at, @deleted_at
+      @sync_status, @is_dirty, @last_modified, @last_synced_at, @deleted_at, @version
     )
   `
   );
@@ -87,10 +91,10 @@ export function importLegacyDump(db: Database.Database, dump: LegacyDump): void 
     `
     INSERT INTO activity_logs (
       id, action, entity_type, entity_id, performed_by_employee_id, timestamp,
-      details, status, ip_address, sync_status, is_dirty, last_modified, last_synced_at, deleted_at
+      details, status, ip_address, sync_status, is_dirty, last_modified, last_synced_at, deleted_at, version
     ) VALUES (
       @id, @action, @entity_type, @entity_id, @performed_by_employee_id, @timestamp,
-      @details, @status, @ip_address, @sync_status, @is_dirty, @last_modified, @last_synced_at, @deleted_at
+      @details, @status, @ip_address, @sync_status, @is_dirty, @last_modified, @last_synced_at, @deleted_at, @version
     )
   `
   );
@@ -114,6 +118,7 @@ export function importLegacyDump(db: Database.Database, dump: LegacyDump): void 
   );
 
   const tx = db.transaction(() => {
+    const now = new Date().toISOString();
     db.exec('PRAGMA foreign_keys = OFF');
     db.exec('DELETE FROM return_receivers');
     db.exec('DELETE FROM returns');
@@ -122,6 +127,39 @@ export function importLegacyDump(db: Database.Database, dump: LegacyDump): void 
     db.exec('DELETE FROM activity_logs');
     db.exec('DELETE FROM settings');
     db.exec('DELETE FROM sync_outbox');
+    db.exec('DELETE FROM sync_events');
+    db.prepare(
+      `
+      INSERT INTO sync_state (
+        id, online_mode, last_push_at, last_pull_at, last_push_count, last_pull_count,
+        last_conflict_count, last_status, last_error, updated_at
+      ) VALUES (
+        @id, @online_mode, @last_push_at, @last_pull_at, @last_push_count, @last_pull_count,
+        @last_conflict_count, @last_status, @last_error, @updated_at
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        online_mode = excluded.online_mode,
+        last_push_at = excluded.last_push_at,
+        last_pull_at = excluded.last_pull_at,
+        last_push_count = excluded.last_push_count,
+        last_pull_count = excluded.last_pull_count,
+        last_conflict_count = excluded.last_conflict_count,
+        last_status = excluded.last_status,
+        last_error = excluded.last_error,
+        updated_at = excluded.updated_at
+      `
+    ).run({
+      id: 'default',
+      online_mode: 0,
+      last_push_at: null,
+      last_pull_at: null,
+      last_push_count: 0,
+      last_pull_count: 0,
+      last_conflict_count: 0,
+      last_status: 'offline',
+      last_error: null,
+      updated_at: now
+    });
 
     for (const employee of dump.employees || []) {
       const sync = normalizeSync(employee);
@@ -163,6 +201,8 @@ export function importLegacyDump(db: Database.Database, dump: LegacyDump): void 
         remarks: product.remarks,
         location: product.location ?? '',
         assigned_to_employee_id: product.assignedToEmployeeId ?? null,
+        assigned_at: product.assignedAt ?? (product.assignedToEmployeeId ? sync.last_modified : null),
+        assignment_status: product.assignmentStatus ?? (product.assignedToEmployeeId ? 'active' : 'returned'),
         status: product.status,
         ...sync
       });

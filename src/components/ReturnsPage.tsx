@@ -1,10 +1,10 @@
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { RotateCcw, Plus, Search, Check, X, Clock, AlertCircle, UserPlus } from 'lucide-react';
 import { useLiveQuery } from '../lib/useLiveQuery';
 import type { Employee, EmployeeRole, Product, ReturnCondition, ReturnRecord, ReturnStatus } from '../lib/types';
 import { db } from '../lib/db';
-import { createId, formatDate, nowIso, toNumber } from '../lib/utils';
+import { createId, formatDate, nowIso } from '../lib/utils';
 import { logActivity } from '../lib/activity';
 
 interface ReturnsPageProps {
@@ -12,8 +12,8 @@ interface ReturnsPageProps {
 }
 
 interface ReceiverFormState {
-  employeeId: string;
-  position: EmployeeRole;
+  receiverName: string;
+  position: string;
   receivedDate: string;
   location: string;
 }
@@ -21,16 +21,16 @@ interface ReceiverFormState {
 interface ReturnFormState {
   rrspNumber: string;
   productId: string;
+  selectedProductIds: string[];
   returnDate: string;
-  quantity: string;
   condition: ReturnCondition | '';
   remarks: string;
   receivers: ReceiverFormState[];
 }
 
 const emptyReceiver: ReceiverFormState = {
-  employeeId: '',
-  position: 'employee',
+  receiverName: '',
+  position: '',
   receivedDate: '',
   location: ''
 };
@@ -38,8 +38,8 @@ const emptyReceiver: ReceiverFormState = {
 const emptyReturnForm: ReturnFormState = {
   rrspNumber: '',
   productId: '',
+  selectedProductIds: [],
   returnDate: '',
-  quantity: '',
   condition: '',
   remarks: '',
   receivers: [{ ...emptyReceiver }]
@@ -53,7 +53,7 @@ const conditionOptions: { value: ReturnCondition; label: string }[] = [
   { value: 'damaged', label: 'Damaged' }
 ];
 
-const roleOptions: EmployeeRole[] = ['employee', 'supervisor', 'admin'];
+const roleOptions: EmployeeRole[] = ['employee', 'system_admin'];
 
 export function ReturnsPage({ user }: ReturnsPageProps) {
   const [searchTerm, setSearchTerm] = useState('');
@@ -63,6 +63,9 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
   const [formState, setFormState] = useState<ReturnFormState>(emptyReturnForm);
   const [formError, setFormError] = useState<string | null>(null);
   const [processingNotes, setProcessingNotes] = useState('');
+  const [submitSyncMessage, setSubmitSyncMessage] = useState<string | null>(null);
+  const [propertySearch, setPropertySearch] = useState('');
+  const [debouncedPropertySearch, setDebouncedPropertySearch] = useState('');
 
   const returns = useLiveQuery(() => db.returns.toArray(), []);
   const products = useLiveQuery(() => db.products.toArray(), []);
@@ -81,14 +84,61 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
   }, [employees]);
 
   const canSubmit = true;
-  const canProcess = user.role === 'admin' || user.role === 'supervisor';
+  const isAdmin = user.role === 'system_admin';
+  const isEmployee = user.role === 'employee';
+  const canProcess = user.role === 'system_admin';
+
+  const adminEmployees = useMemo(
+    () => (employees || []).filter((employee) => employee.role === 'system_admin' && employee.status === 'active'),
+    [employees]
+  );
+
+  const employeesByName = useMemo(() => {
+    const map = new Map<string, Employee>();
+    (employees || []).forEach((employee) => {
+      const key = employee.fullName.trim().toLowerCase();
+      if (key) map.set(key, employee);
+    });
+    return map;
+  }, [employees]);
 
   const availableProducts = useMemo(() => {
-    if (user.role === 'employee') {
+    if (isEmployee) {
       return (products || []).filter((product) => product.assignedToEmployeeId === user.id);
     }
     return products || [];
-  }, [products, user]);
+  }, [products, isEmployee, user.id]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedPropertySearch(propertySearch.trim().toLowerCase());
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [propertySearch]);
+
+  const selectedAdminProducts = useMemo(() => {
+    if (!isAdmin) return [] as Product[];
+    return formState.selectedProductIds
+      .map((id) => productMap.get(id))
+      .filter((product): product is Product => Boolean(product));
+  }, [isAdmin, formState.selectedProductIds, productMap]);
+
+  const searchableAdminProducts = useMemo(() => {
+    if (!isAdmin) return [] as Product[];
+    const selected = new Set(formState.selectedProductIds);
+    return (products || [])
+      .filter((product) => !selected.has(product.id))
+      .filter((product) => {
+        if (!debouncedPropertySearch) return true;
+        return (
+          product.propertyNumber.toLowerCase().includes(debouncedPropertySearch) ||
+          product.article.toLowerCase().includes(debouncedPropertySearch) ||
+          product.description.toLowerCase().includes(debouncedPropertySearch)
+        );
+      })
+      .sort((a, b) => a.propertyNumber.localeCompare(b.propertyNumber))
+      .slice(0, 50);
+  }, [isAdmin, products, formState.selectedProductIds, debouncedPropertySearch]);
 
   const filteredReturns = useMemo(() => {
     return (returns || []).filter((ret) => {
@@ -132,11 +182,40 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
   };
 
   const resetForm = () => {
-    setFormState(emptyReturnForm);
+    const defaultAdmin = adminEmployees[0];
+    setFormState({
+      ...emptyReturnForm,
+      productId: isEmployee && availableProducts.length === 1 ? availableProducts[0].id : '',
+      receivers: [
+        {
+          receiverName: isEmployee ? defaultAdmin?.fullName || '' : '',
+          position: isEmployee ? 'system_admin' : '',
+          receivedDate: '',
+          location: ''
+        }
+      ]
+    });
     setFormError(null);
+    setPropertySearch('');
+    setDebouncedPropertySearch('');
+  };
+
+  const addSelectedAdminProperty = (productId: string) => {
+    setFormState((prev) => {
+      if (prev.selectedProductIds.includes(productId)) return prev;
+      return { ...prev, selectedProductIds: [productId, ...prev.selectedProductIds] };
+    });
+  };
+
+  const removeSelectedAdminProperty = (productId: string) => {
+    setFormState((prev) => ({
+      ...prev,
+      selectedProductIds: prev.selectedProductIds.filter((id) => id !== productId)
+    }));
   };
 
   const addReceiver = () => {
+    if (isEmployee) return;
     setFormState((prev) => ({
       ...prev,
       receivers: [...prev.receivers, { ...emptyReceiver }]
@@ -158,97 +237,166 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
     setFormState((prev) => {
       const updated = [...prev.receivers];
       const current = { ...updated[index] };
-      if (field === 'employeeId') {
-        const employee = employeeMap.get(value);
-        current.employeeId = value;
-        current.position = employee?.role || current.position;
-      } else if (field === 'position') {
-        current.position = value as EmployeeRole;
-      } else if (field === 'receivedDate') {
-        current.receivedDate = value;
-      } else if (field === 'location') {
-        current.location = value;
-      }
+      current[field] = value;
       updated[index] = current;
       return { ...prev, receivers: updated };
     });
+  };
+
+  const normalizeEmployeeRole = (value: string): EmployeeRole | null => {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'system_admin' || normalized === 'employee') {
+      return normalized;
+    }
+    if (normalized === 'admin') return 'system_admin';
+    return null;
   };
 
   const handleSubmitReturn = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!canSubmit) return;
     setFormError(null);
+    setSubmitSyncMessage(null);
 
-    if (!formState.rrspNumber.trim() || !formState.productId || !formState.returnDate || !formState.condition) {
-      setFormError('RRSP number, product, return date, and condition are required.');
+    if (!formState.returnDate || !formState.condition) {
+      setFormError('Return date and condition are required.');
       return;
     }
 
-    const quantity = toNumber(formState.quantity);
-    if (quantity <= 0) {
-      setFormError('Quantity must be greater than zero.');
+    if (isAdmin && !formState.rrspNumber.trim()) {
+      setFormError('RRSP number is required for system admin submissions.');
+      return;
+    }
+
+    if (isEmployee && !formState.productId) {
+      setFormError('Select an assigned property to return.');
+      return;
+    }
+
+    if (isAdmin && formState.selectedProductIds.length === 0) {
+      setFormError('Select at least one property number.');
       return;
     }
 
     const validReceivers = formState.receivers.filter(
-      (receiver) => receiver.employeeId && receiver.receivedDate && receiver.location
+      (receiver) => receiver.receiverName.trim() && receiver.position.trim() && receiver.receivedDate && receiver.location.trim()
     );
     if (validReceivers.length === 0) {
-      setFormError('At least one receiver with date and location is required.');
+      setFormError('Receiver name, position, date, and location are required.');
       return;
     }
 
-    const returnId = createId();
-    const receiverEntries = validReceivers.map((receiver) => ({
-      employeeId: receiver.employeeId,
-      position: receiver.position,
-      receivedDate: receiver.receivedDate,
-      location: receiver.location
-    }));
+    if (isEmployee && adminEmployees.length === 0) {
+      setFormError('No active system admin account found for receiver validation.');
+      return;
+    }
+
+    const receiverEntries: Array<{
+      employeeId: string;
+      position: EmployeeRole;
+      receivedDate: string;
+      location: string;
+    }> = [];
+
+    for (const receiver of validReceivers) {
+      const role = normalizeEmployeeRole(receiver.position);
+      if (!role) {
+        setFormError(`Receiver position must be one of: ${roleOptions.join(', ')}.`);
+        return;
+      }
+
+      const receiverNameKey = receiver.receiverName.trim().toLowerCase();
+      const resolvedEmployee = isEmployee
+        ? adminEmployees.find((employee) => employee.fullName.trim().toLowerCase() === receiverNameKey)
+        : employeesByName.get(receiverNameKey);
+
+      if (!resolvedEmployee) {
+        setFormError(
+          isEmployee
+            ? 'Receiver must match an active system admin full name.'
+            : 'Receiver name must match an existing employee full name.'
+        );
+        return;
+      }
+
+      if (isEmployee && resolvedEmployee.role !== 'system_admin') {
+        setFormError('Employees can only return to system admin accounts.');
+        return;
+      }
+
+      receiverEntries.push({
+        employeeId: resolvedEmployee.id,
+        position: isEmployee ? 'system_admin' : role,
+        receivedDate: receiver.receivedDate,
+        location: receiver.location.trim()
+      });
+    }
 
     const primaryReceiver = receiverEntries[0];
+    const rrspNumber = isAdmin
+      ? formState.rrspNumber.trim()
+      : `EMP-${new Date().getTime()}-${user.id.slice(0, 6).toUpperCase()}`;
 
-    await db.returns.add({
-      id: returnId,
-      rrspNumber: formState.rrspNumber.trim(),
-      productId: formState.productId,
-      returnDate: formState.returnDate,
-      quantity,
-      condition: formState.condition as ReturnCondition,
-      remarks: formState.remarks.trim(),
-      returnedByEmployeeId: user.id,
-      returnedByPosition: user.role,
-      receivedDate: primaryReceiver.receivedDate,
-      location: primaryReceiver.location,
-      receivedByEmployeeIds: receiverEntries.map((entry) => entry.employeeId),
-      receivedByEntries: receiverEntries,
-      createdAt: nowIso(),
-      status: 'pending'
-    });
+    const targetProductIds = isAdmin ? formState.selectedProductIds : [formState.productId];
+    const targetProducts = targetProductIds
+      .map((productId) => productMap.get(productId))
+      .filter((product): product is Product => Boolean(product));
 
-    const product = productMap.get(formState.productId);
-    if (product) {
-      const updatedOnHand = product.onHandPerCount + quantity;
-      const updatedBalance = product.balancePerCard + quantity;
-      const assignedToEmployeeId = product.assignedToEmployeeId === user.id ? undefined : product.assignedToEmployeeId;
-      const status = product.assignedToEmployeeId === user.id ? 'returned' : product.status;
+    if (!targetProducts.length) {
+      setFormError('Selected properties were not found locally.');
+      return;
+    }
 
+    if (isEmployee) {
+      const invalidSelection = targetProducts.some((product) => product.assignedToEmployeeId !== user.id);
+      if (invalidSelection) {
+        setFormError('You can only return properties currently assigned to your account.');
+        return;
+      }
+    }
+
+    for (const product of targetProducts) {
+      const returnId = createId();
+      await db.returns.add({
+        id: returnId,
+        rrspNumber,
+        productId: product.id,
+        returnDate: formState.returnDate,
+        quantity: 1,
+        condition: formState.condition as ReturnCondition,
+        remarks: formState.remarks.trim(),
+        returnedByEmployeeId: user.id,
+        returnedByPosition: user.role,
+        receivedDate: primaryReceiver.receivedDate,
+        location: primaryReceiver.location,
+        receivedByEmployeeIds: receiverEntries.map((entry) => entry.employeeId),
+        receivedByEntries: receiverEntries,
+        createdAt: nowIso(),
+        status: 'pending'
+      });
+
+      const updatedOnHand = product.onHandPerCount + 1;
+      const updatedBalance = product.balancePerCard + 1;
       await db.products.update(product.id, {
         onHandPerCount: updatedOnHand,
         balancePerCard: updatedBalance,
         total: product.unitValue * updatedOnHand,
-        assignedToEmployeeId,
-        status
+        assignedToEmployeeId: undefined,
+        status: 'returned'
+      });
+
+      await logActivity({
+        action: 'SUBMIT',
+        entityType: 'return',
+        entityId: returnId,
+        performedByEmployeeId: user.id,
+        details: `Return submitted: ${rrspNumber} (${product.propertyNumber})`
       });
     }
 
-    await logActivity({
-      action: 'SUBMIT',
-      entityType: 'return',
-      entityId: returnId,
-      performedByEmployeeId: user.id,
-      details: `Return submitted: ${formState.rrspNumber.trim()}`
-    });
+    if (user.role === 'employee') {
+      setSubmitSyncMessage('Return submitted locally. A system admin must push operational changes when online.');
+    }
 
     setShowSubmitModal(false);
     resetForm();
@@ -316,6 +464,12 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
             </button>
           )}
         </div>
+
+        {submitSyncMessage && (
+          <div className="mb-4 rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-3">
+            <p className="text-sm text-indigo-800">{submitSyncMessage}</p>
+          </div>
+        )}
 
         <div className="flex gap-4">
           <div className="flex-1 relative">
@@ -496,17 +650,19 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
                 <h3 className="font-medium text-gray-900 mb-4">Return Information</h3>
                 <div className="space-y-4">
                   <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-2">RRSP No. *</label>
-                      <input
-                        type="text"
-                        value={formState.rrspNumber}
-                        onChange={(e) => setFormState({ ...formState, rrspNumber: e.target.value })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
-                        required
-                      />
-                    </div>
-                    <div>
+                    {isAdmin && (
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">RRSP No. *</label>
+                        <input
+                          type="text"
+                          value={formState.rrspNumber}
+                          onChange={(e) => setFormState({ ...formState, rrspNumber: e.target.value })}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
+                          required
+                        />
+                      </div>
+                    )}
+                    <div className={isAdmin ? '' : 'col-span-2'}>
                       <label className="block text-sm font-medium text-gray-700 mb-2">Return Date *</label>
                       <input
                         type="date"
@@ -518,34 +674,81 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
                     </div>
                   </div>
 
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">Product *</label>
-                    <select
-                      value={formState.productId}
-                      onChange={(e) => setFormState({ ...formState, productId: e.target.value })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
-                      required
-                    >
-                      <option value="">Select product</option>
-                      {availableProducts.map((product) => (
-                        <option key={product.id} value={product.id}>
-                          {product.article}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
+                  {isEmployee && (
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Assigned Property *</label>
+                      <select
+                        value={formState.productId}
+                        onChange={(e) => setFormState({ ...formState, productId: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
+                        required
+                      >
+                        <option value="">Select assigned property</option>
+                        {availableProducts.map((product) => (
+                          <option key={product.id} value={product.id}>
+                            {product.propertyNumber} - {product.article}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
 
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">Quantity *</label>
-                    <input
-                      type="number"
-                      min="1"
-                      value={formState.quantity}
-                      onChange={(e) => setFormState({ ...formState, quantity: e.target.value })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
-                      required
-                    />
-                  </div>
+                  {isAdmin && (
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Search Property Number *</label>
+                      <input
+                        type="text"
+                        value={propertySearch}
+                        onChange={(e) => setPropertySearch(e.target.value)}
+                        placeholder="Type property number, article, or description..."
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
+                      />
+
+                      <div className="mt-3 border border-gray-200 rounded-lg max-h-72 overflow-y-auto divide-y divide-gray-100">
+                        {selectedAdminProducts.length > 0 && (
+                          <div>
+                            <p className="px-3 py-2 text-xs font-semibold text-gray-500 bg-gray-50 uppercase tracking-wide">Selected</p>
+                            {selectedAdminProducts.map((product) => (
+                              <div key={`selected-${product.id}`} className="px-3 py-2 flex items-center justify-between gap-3">
+                                <div>
+                                  <p className="text-sm font-medium text-gray-900">{product.propertyNumber}</p>
+                                  <p className="text-xs text-gray-600">{product.article}</p>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => removeSelectedAdminProperty(product.id)}
+                                  className="text-red-600 hover:text-red-700 text-xs"
+                                >
+                                  Remove
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        <div>
+                          <p className="px-3 py-2 text-xs font-semibold text-gray-500 bg-gray-50 uppercase tracking-wide">Search Results</p>
+                          {searchableAdminProducts.length === 0 ? (
+                            <p className="px-3 py-3 text-sm text-gray-500">No properties found.</p>
+                          ) : (
+                            searchableAdminProducts.map((product) => (
+                              <button
+                                key={`result-${product.id}`}
+                                type="button"
+                                onClick={() => addSelectedAdminProperty(product.id)}
+                                className="w-full px-3 py-2 text-left hover:bg-indigo-50 transition"
+                              >
+                                <p className="text-sm font-medium text-gray-900">{product.propertyNumber}</p>
+                                <p className="text-xs text-gray-600">
+                                  {product.article} | {product.description}
+                                </p>
+                              </button>
+                            ))
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">Condition *</label>
@@ -608,21 +811,28 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
               <div className="pt-4 border-t border-gray-200">
                 <div className="flex items-center justify-between mb-4">
                   <h3 className="font-medium text-gray-900">Receiver Information</h3>
-                  <button
-                    type="button"
-                    onClick={addReceiver}
-                    className="px-3 py-1.5 text-sm bg-indigo-50 text-indigo-600 rounded-lg hover:bg-indigo-100 transition flex items-center gap-2"
-                  >
-                    <UserPlus className="w-4 h-4" />
-                    Add Another Receiver
-                  </button>
+                  {!isEmployee && (
+                    <button
+                      type="button"
+                      onClick={addReceiver}
+                      className="px-3 py-1.5 text-sm bg-indigo-50 text-indigo-600 rounded-lg hover:bg-indigo-100 transition flex items-center gap-2"
+                    >
+                      <UserPlus className="w-4 h-4" />
+                      Add Another Receiver
+                    </button>
+                  )}
                 </div>
+                {isEmployee && (
+                  <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
+                    Employee returns can only be received by a system admin account.
+                  </p>
+                )}
                 <div className="space-y-4">
                   {formState.receivers.map((receiver, index) => (
                     <div key={index} className="p-4 border border-gray-200 rounded-lg">
                       <div className="flex items-center justify-between mb-3">
                         <p className="text-sm font-medium text-gray-700">Receiver {index + 1}</p>
-                        {formState.receivers.length > 1 && (
+                        {!isEmployee && formState.receivers.length > 1 && (
                           <button
                             type="button"
                             onClick={() => removeReceiver(index)}
@@ -635,34 +845,26 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
                       <div className="grid grid-cols-2 gap-4">
                         <div>
                           <label className="block text-sm font-medium text-gray-700 mb-2">Name *</label>
-                          <select
-                            value={receiver.employeeId}
-                            onChange={(e) => handleReceiverChange(index, 'employeeId', e.target.value)}
+                          <input
+                            type="text"
+                            value={receiver.receiverName}
+                            onChange={(e) => handleReceiverChange(index, 'receiverName', e.target.value)}
+                            placeholder={isEmployee ? 'Type system admin full name' : 'Type employee full name'}
+                            list={isEmployee ? 'receiver-admin-names' : 'receiver-employee-names'}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
                             required
-                          >
-                            <option value="">Select employee</option>
-                            {(employees || []).map((employee) => (
-                              <option key={employee.id} value={employee.id}>
-                                {employee.fullName}
-                              </option>
-                            ))}
-                          </select>
+                          />
                         </div>
                         <div>
                           <label className="block text-sm font-medium text-gray-700 mb-2">Position *</label>
-                          <select
+                          <input
+                            type="text"
                             value={receiver.position}
                             onChange={(e) => handleReceiverChange(index, 'position', e.target.value)}
+                            placeholder="system_admin | employee"
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
                             required
-                          >
-                            {roleOptions.map((role) => (
-                              <option key={role} value={role}>
-                                {role}
-                              </option>
-                            ))}
-                          </select>
+                          />
                         </div>
                         <div>
                           <label className="block text-sm font-medium text-gray-700 mb-2">Received Date *</label>
@@ -688,6 +890,16 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
                     </div>
                   ))}
                 </div>
+                <datalist id="receiver-employee-names">
+                  {(employees || []).map((employee) => (
+                    <option key={`all-${employee.id}`} value={employee.fullName} />
+                  ))}
+                </datalist>
+                <datalist id="receiver-admin-names">
+                  {adminEmployees.map((employee) => (
+                    <option key={`admin-${employee.id}`} value={employee.fullName} />
+                  ))}
+                </datalist>
               </div>
 
               {formError && <p className="text-sm text-red-600">{formError}</p>}

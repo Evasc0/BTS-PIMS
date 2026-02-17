@@ -7,7 +7,8 @@ import {
   TrendingUp,
   TrendingDown,
   CheckCircle,
-  Clock
+  Clock,
+  X
 } from 'lucide-react';
 import { useLiveQuery } from '../lib/useLiveQuery';
 import type { Employee } from '../lib/types';
@@ -16,15 +17,17 @@ import { formatDate } from '../lib/utils';
 
 interface DashboardProps {
   user: Employee;
+  syncNotice?: string | null;
+  onDismissSyncNotice?: () => void;
 }
 
-export function Dashboard({ user }: DashboardProps) {
+export function Dashboard({ user, syncNotice, onDismissSyncNotice }: DashboardProps) {
   const products = useLiveQuery(() => db.products.toArray(), []);
   const employees = useLiveQuery(() => db.employees.toArray(), []);
   const returns = useLiveQuery(() => db.returns.toArray(), []);
   const activityLogs = useLiveQuery(() => db.activityLogs.toArray(), []);
 
-  const isAdmin = user.role === 'admin';
+  const isAdmin = user.role === 'system_admin';
   const isEmployee = user.role === 'employee';
 
   const assignedProducts = useMemo(
@@ -70,9 +73,17 @@ export function Dashboard({ user }: DashboardProps) {
         <p className="text-gray-600">
           {isAdmin && 'You have full system control and oversight'}
           {isEmployee && 'View your assigned products and submit returns'}
-          {!isAdmin && !isEmployee && 'Manage inventory workflows and return approvals'}
         </p>
       </div>
+
+      {isEmployee && syncNotice && (
+        <div className="mb-6 rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-3 flex items-start justify-between gap-3">
+          <p className="text-sm text-indigo-800">{syncNotice}</p>
+          <button onClick={onDismissSyncNotice} className="text-indigo-700 hover:text-indigo-900 transition">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
         <div className="bg-white p-6 rounded-xl border border-gray-200">

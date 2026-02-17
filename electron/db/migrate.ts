@@ -13,7 +13,9 @@ export function runMigrations(db: Database.Database): void {
   `);
 
   const applied = new Set<number>(
-    db.prepare('SELECT version FROM schema_migrations ORDER BY version').all().map((row) => row.version as number)
+    (db.prepare('SELECT version FROM schema_migrations ORDER BY version').all() as Array<{ version: number }>).map(
+      (row) => row.version
+    )
   );
 
   const migrationsDir = path.join(__dirname, 'migrations');

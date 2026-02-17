@@ -13,19 +13,19 @@ import { useAuth } from './lib/auth';
 import type { EmployeeRole } from './lib/types';
 
 export default function App() {
-  const { currentUser, loading, initError, logout } = useAuth();
+  const { currentUser, loading, initError, logout, syncNotice, clearSyncNotice } = useAuth();
   const [currentPage, setCurrentPage] = useState('dashboard');
 
   const pagePermissions = useMemo<Record<string, EmployeeRole[]>>(
     () => ({
-      dashboard: ['admin', 'supervisor', 'employee'],
-      products: ['admin', 'supervisor', 'employee'],
-      employees: ['admin'],
-      returns: ['admin', 'supervisor', 'employee'],
-      reports: ['admin'],
-      'activity-logs': ['admin'],
-      settings: ['admin'],
-      profile: ['admin', 'supervisor', 'employee']
+      dashboard: ['system_admin', 'employee'],
+      products: ['system_admin', 'employee'],
+      employees: ['system_admin'],
+      returns: ['system_admin', 'employee'],
+      reports: ['system_admin'],
+      'activity-logs': ['system_admin'],
+      settings: ['system_admin'],
+      profile: ['system_admin', 'employee']
     }),
     []
   );
@@ -53,7 +53,7 @@ export default function App() {
   const renderPage = () => {
     switch (currentPage) {
       case 'dashboard':
-        return <Dashboard user={currentUser} />;
+        return <Dashboard user={currentUser} syncNotice={syncNotice} onDismissSyncNotice={clearSyncNotice} />;
       case 'products':
         return <ProductsPage user={currentUser} />;
       case 'employees':

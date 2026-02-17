@@ -92,7 +92,7 @@ export function LoginPage({ initError }: LoginPageProps) {
           </form>
 
           <div className="mt-8 pt-8 border-t border-gray-200">
-            <p className="text-sm text-gray-600 text-center mb-4">First Run Admin Credentials</p>
+            <p className="text-sm text-gray-600 text-center mb-4">First Run System Admin Credentials</p>
             <div className="space-y-3 text-sm text-gray-700">
               <div className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2">
                 <span>Email</span>
@@ -108,7 +108,7 @@ export function LoginPage({ initError }: LoginPageProps) {
                 className="w-full px-4 py-2 bg-indigo-50 text-indigo-700 rounded-lg hover:bg-indigo-100 transition font-medium text-sm flex items-center justify-center gap-2"
               >
                 <Shield className="w-4 h-4" />
-                Use Default Admin
+                Use Default System Admin
               </button>
               <div className="flex items-center gap-2 text-xs text-gray-500">
                 <UserCircle className="w-4 h-4" />

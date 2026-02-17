@@ -1,5 +1,6 @@
-export type EmployeeRole = 'admin' | 'supervisor' | 'employee';
+export type EmployeeRole = 'system_admin' | 'employee';
 export type EmployeeStatus = 'active' | 'inactive';
+export type EmployeeAuthSyncStatus = 'pending_upload' | 'synced' | 'failed' | 'not_required';
 
 export interface Employee {
   id: string;
@@ -11,16 +12,27 @@ export interface Employee {
   status: EmployeeStatus;
   passwordHash: string;
   passwordSalt: string;
+  supabaseUserId?: string;
+  authSyncStatus?: EmployeeAuthSyncStatus;
+  authLastError?: string;
+  pendingPasswordEncrypted?: string;
+  pendingPasswordPlain?: string;
+  provisionedAt?: string;
+  lastVerifiedAt?: string;
+  verificationExpiresAt?: string;
+  hashedSessionToken?: string;
   createdAt: string;
   location: string;
   twoFactorEnabled: boolean;
   emailNotifications: boolean;
   lowStockAlerts: boolean;
   language: string;
+  version?: number;
 }
 
 export type ValueCategory = 'LV' | 'MV' | 'HV';
 export type ProductStatus = 'available' | 'assigned' | 'returned';
+export type AssignmentStatus = 'active' | 'returned';
 
 export interface Product {
   id: string;
@@ -38,7 +50,10 @@ export interface Product {
   remarks: string;
   location: string;
   assignedToEmployeeId?: string;
+  assignedAt?: string;
+  assignmentStatus?: AssignmentStatus;
   status: ProductStatus;
+  version?: number;
 }
 
 export type ReturnCondition =
@@ -76,6 +91,7 @@ export interface ReturnRecord {
   processedByEmployeeId?: string;
   processedDate?: string;
   processingNotes?: string;
+  version?: number;
 }
 
 export type ActivityEntityType = 'employee' | 'product' | 'return' | 'sync';
@@ -90,6 +106,7 @@ export interface ActivityLog {
   details: string;
   status: 'success' | 'warning' | 'error';
   ipAddress: string;
+  version?: number;
 }
 
 export type PasswordPolicy = 'strong' | 'medium' | 'basic';

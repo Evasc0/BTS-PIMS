@@ -1,10 +1,8 @@
 import React, { useMemo, useState } from 'react';
-import { Users, Plus, Search, Edit, Trash2, Mail, Phone, X, Shield, UserCog } from 'lucide-react';
+import { Users, Plus, Search, Edit, Trash2, Mail, Phone, X, Shield } from 'lucide-react';
 import { useLiveQuery } from '../lib/useLiveQuery';
 import type { Employee, EmployeeRole } from '../lib/types';
 import { db } from '../lib/db';
-import { createPasswordHash } from '../lib/security';
-import { createId, nowIso } from '../lib/utils';
 import { logActivity } from '../lib/activity';
 
 interface EmployeesPageProps {
@@ -50,7 +48,7 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
     return map;
   }, [products]);
 
-  const canManageEmployees = user.role === 'admin';
+  const canManageEmployees = user.role === 'system_admin';
 
   const filteredEmployees = (employees || []).filter((employee) => {
     const term = searchTerm.trim().toLowerCase();
@@ -64,10 +62,8 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
 
   const getRoleBadge = (role: EmployeeRole) => {
     switch (role) {
-      case 'admin':
-        return { color: 'bg-purple-100 text-purple-700', icon: Shield, label: 'admin' };
-      case 'supervisor':
-        return { color: 'bg-blue-100 text-blue-700', icon: UserCog, label: 'supervisor' };
+      case 'system_admin':
+        return { color: 'bg-purple-100 text-purple-700', icon: Shield, label: 'system_admin' };
       default:
         return { color: 'bg-green-100 text-green-700', icon: Users, label: 'employee' };
     }
@@ -114,30 +110,36 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
       return;
     }
 
-    const { hash, salt } = await createPasswordHash(formState.password);
-    const employeeId = createId();
-    await db.employees.add({
-      id: employeeId,
+    if (!navigator.onLine) {
+      setFormError('Internet connection required to create user.');
+      return;
+    }
+
+    if (!window.api?.auth?.createUser) {
+      setFormError('Secure user creation API is unavailable.');
+      return;
+    }
+
+    const createResult = await window.api.auth.createUser({
+      adminUserId: user.id,
       fullName: formState.fullName.trim(),
       email: normalizedEmail,
       phone: formState.phone.trim(),
       department: formState.department.trim(),
       role: formState.role,
       status: formState.status,
-      passwordHash: hash,
-      passwordSalt: salt,
-      createdAt: nowIso(),
-      location: '',
-      twoFactorEnabled: false,
-      emailNotifications: false,
-      lowStockAlerts: false,
-      language: 'English'
+      password: formState.password
     });
+
+    if (!createResult.success || !createResult.employeeId) {
+      setFormError(createResult.error || 'Unable to create user.');
+      return;
+    }
 
     await logActivity({
       action: 'CREATE',
       entityType: 'employee',
-      entityId: employeeId,
+      entityId: createResult.employeeId,
       performedByEmployeeId: user.id,
       details: `Employee created: ${formState.fullName.trim()}`
     });
@@ -185,10 +187,10 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
 
   const handleDeleteEmployee = async (employeeId: string, employeeName: string) => {
     if (!canManageEmployees) return;
-    const adminCount = (employees || []).filter((emp) => emp.role === 'admin').length;
+    const adminCount = (employees || []).filter((emp) => emp.role === 'system_admin').length;
     const target = (employees || []).find((emp) => emp.id === employeeId);
-    if (target?.role === 'admin' && adminCount <= 1) {
-      setFormError('At least one admin account must remain active.');
+    if (target?.role === 'system_admin' && adminCount <= 1) {
+      setFormError('At least one system admin account must remain active.');
       return;
     }
     const confirmed = window.confirm(`Remove ${employeeName}? This cannot be undone.`);
@@ -210,7 +212,7 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
           <div>
             <h1 className="font-bold text-gray-900 mb-2">Employees</h1>
             <p className="text-gray-600">
-              {user.role === 'admin' ? 'Manage all employee records' : 'View your team members'}
+              {user.role === 'system_admin' ? 'Manage all employee records' : 'View your team members'}
             </p>
           </div>
           {canManageEmployees && (
@@ -378,8 +380,7 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
                   >
                     <option value="employee">Employee</option>
-                    <option value="supervisor">Supervisor</option>
-                    <option value="admin">Admin</option>
+                    <option value="system_admin">System Admin</option>
                   </select>
                 </div>
                 <div>
@@ -485,8 +486,7 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
                   >
                     <option value="employee">Employee</option>
-                    <option value="supervisor">Supervisor</option>
-                    <option value="admin">Admin</option>
+                    <option value="system_admin">System Admin</option>
                   </select>
                 </div>
                 <div>

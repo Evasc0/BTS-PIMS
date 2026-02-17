@@ -1,9 +1,10 @@
 import crypto from 'crypto';
 import type Database from 'better-sqlite3';
+import { encryptLocalSecret } from '../auth/localSecrets';
 
 export const DEFAULT_ADMIN_CREDENTIALS = {
-  email: 'admin@local',
-  password: 'admin123'
+  email: 'btsadmin@gmail.com',
+  password: 'btsadmin123'
 };
 
 const encodeBase64 = (data: Uint8Array): string => Buffer.from(data).toString('base64');
@@ -45,12 +46,16 @@ export function seedIfNeeded(db: Database.Database): void {
       `
       INSERT INTO employees (
         id, full_name, email, phone, department, role, status, password_hash, password_salt,
+        supabase_user_id, auth_sync_status, auth_last_error, pending_password_enc, provisioned_at,
+        last_verified_at, verification_expires_at, hashed_session_token,
         created_at, location, two_factor_enabled, email_notifications, low_stock_alerts, language,
-        sync_status, is_dirty, last_modified, last_synced_at, deleted_at
+        sync_status, is_dirty, last_modified, last_synced_at, deleted_at, version
       ) VALUES (
         @id, @full_name, @email, @phone, @department, @role, @status, @password_hash, @password_salt,
+        @supabase_user_id, @auth_sync_status, @auth_last_error, @pending_password_enc, @provisioned_at,
+        @last_verified_at, @verification_expires_at, @hashed_session_token,
         @created_at, @location, @two_factor_enabled, @email_notifications, @low_stock_alerts, @language,
-        @sync_status, @is_dirty, @last_modified, @last_synced_at, @deleted_at
+        @sync_status, @is_dirty, @last_modified, @last_synced_at, @deleted_at, @version
       )
     `
     ).run({
@@ -59,10 +64,18 @@ export function seedIfNeeded(db: Database.Database): void {
       email: DEFAULT_ADMIN_CREDENTIALS.email,
       phone: '',
       department: 'Administration',
-      role: 'admin',
+      role: 'system_admin',
       status: 'active',
       password_hash: hash,
       password_salt: salt,
+      supabase_user_id: null,
+      auth_sync_status: 'pending_upload',
+      auth_last_error: null,
+      pending_password_enc: encryptLocalSecret(DEFAULT_ADMIN_CREDENTIALS.password),
+      provisioned_at: null,
+      last_verified_at: null,
+      verification_expires_at: null,
+      hashed_session_token: null,
       created_at: now,
       location: '',
       two_factor_enabled: 0,
@@ -73,17 +86,18 @@ export function seedIfNeeded(db: Database.Database): void {
       is_dirty: 1,
       last_modified: now,
       last_synced_at: null,
-      deleted_at: null
+      deleted_at: null,
+      version: 1
     });
 
     db.prepare(
       `
       INSERT INTO activity_logs (
         id, action, entity_type, entity_id, performed_by_employee_id, timestamp,
-        details, status, ip_address, sync_status, is_dirty, last_modified, last_synced_at, deleted_at
+        details, status, ip_address, sync_status, is_dirty, last_modified, last_synced_at, deleted_at, version
       ) VALUES (
         @id, @action, @entity_type, @entity_id, @performed_by_employee_id, @timestamp,
-        @details, @status, @ip_address, @sync_status, @is_dirty, @last_modified, @last_synced_at, @deleted_at
+        @details, @status, @ip_address, @sync_status, @is_dirty, @last_modified, @last_synced_at, @deleted_at, @version
       )
     `
     ).run({
@@ -96,11 +110,12 @@ export function seedIfNeeded(db: Database.Database): void {
       details: 'Initial admin account created',
       status: 'success',
       ip_address: 'offline',
-      sync_status: 'pending',
-      is_dirty: 1,
+      sync_status: 'local_only',
+      is_dirty: 0,
       last_modified: now,
-      last_synced_at: null,
-      deleted_at: null
+      last_synced_at: now,
+      deleted_at: null,
+      version: 1
     });
   }
 

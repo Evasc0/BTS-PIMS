@@ -2,6 +2,9 @@ import { app, BrowserWindow } from 'electron';
 import path from 'path';
 import { registerIpc } from './ipc';
 import { setupAutoUpdate } from './update/updater';
+import { loadLocalEnv } from './env';
+
+loadLocalEnv();
 
 const createMainWindow = () => {
   const mainWindow = new BrowserWindow({

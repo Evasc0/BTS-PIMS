@@ -10,8 +10,7 @@ import {
   Settings,
   UserCircle,
   LogOut,
-  Shield,
-  UserCog
+  Shield
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -23,21 +22,19 @@ interface SidebarProps {
 
 export function Sidebar({ user, currentPage, onNavigate, onLogout }: SidebarProps) {
   const menuItems = [
-    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: ['admin', 'supervisor', 'employee'] },
-    { id: 'products', label: 'Products', icon: Package, roles: ['admin', 'supervisor', 'employee'] },
-    { id: 'employees', label: 'Employees', icon: Users, roles: ['admin'] },
-    { id: 'returns', label: 'Returns', icon: RotateCcw, roles: ['admin', 'supervisor', 'employee'] },
-    { id: 'reports', label: 'Reports', icon: FileText, roles: ['admin'] },
-    { id: 'activity-logs', label: 'Activity Logs', icon: History, roles: ['admin'] },
-    { id: 'settings', label: 'Settings', icon: Settings, roles: ['admin'] },
+    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: ['system_admin', 'employee'] },
+    { id: 'products', label: 'Products', icon: Package, roles: ['system_admin', 'employee'] },
+    { id: 'employees', label: 'Employees', icon: Users, roles: ['system_admin'] },
+    { id: 'returns', label: 'Returns', icon: RotateCcw, roles: ['system_admin', 'employee'] },
+    { id: 'reports', label: 'Reports', icon: FileText, roles: ['system_admin'] },
+    { id: 'activity-logs', label: 'Activity Logs', icon: History, roles: ['system_admin'] },
+    { id: 'settings', label: 'Settings', icon: Settings, roles: ['system_admin'] },
   ];
 
   const getRoleColor = () => {
     switch (user.role) {
-      case 'admin':
+      case 'system_admin':
         return 'bg-purple-100 text-purple-700 border-purple-200';
-      case 'supervisor':
-        return 'bg-blue-100 text-blue-700 border-blue-200';
       case 'employee':
         return 'bg-green-100 text-green-700 border-green-200';
     }
@@ -45,10 +42,8 @@ export function Sidebar({ user, currentPage, onNavigate, onLogout }: SidebarProp
 
   const getRoleIcon = () => {
     switch (user.role) {
-      case 'admin':
+      case 'system_admin':
         return <Shield className="w-4 h-4" />;
-      case 'supervisor':
-        return <UserCog className="w-4 h-4" />;
       case 'employee':
         return <UserCircle className="w-4 h-4" />;
     }

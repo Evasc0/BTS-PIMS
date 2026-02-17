@@ -106,7 +106,7 @@ export function ReportsPage({ user }: ReportsPageProps) {
     });
   }, [returns, rangeStart, rangeEnd]);
 
-  const canExportData = user.role === 'admin';
+  const canExportData = user.role === 'system_admin';
 
   const toggleExpand = (id: string) => {
     const newExpanded = new Set(expandedItems);

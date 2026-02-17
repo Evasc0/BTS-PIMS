@@ -53,11 +53,13 @@ const emptyFormState: ProductFormState = {
 };
 
 const valueOptions: ValueCategory[] = ['HV', 'MV', 'LV'];
+const articleOptions = ['Desktop', 'Chair', 'Table'];
 const unitOptions = ['pcs', 'set', 'box', 'unit', 'pack'];
 
 export function ProductsPage({ user }: ProductsPageProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<ProductStatus | 'all'>('all');
+  const [articleFilter, setArticleFilter] = useState<'all' | string>('all');
   const [showAddModal, setShowAddModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
@@ -73,7 +75,16 @@ export function ProductsPage({ user }: ProductsPageProps) {
     return map;
   }, [employees]);
 
-  const canManageProduct = user.role === 'admin' || user.role === 'supervisor';
+  const canManageProduct = user.role === 'system_admin';
+
+  const editArticleOptions = useMemo(() => {
+    const options = [...articleOptions];
+    const current = formState.article.trim();
+    if (current && !options.some((option) => option.toLowerCase() === current.toLowerCase())) {
+      options.unshift(current);
+    }
+    return options;
+  }, [formState.article]);
 
   const filteredProducts = (products || [])
     .filter((product: Product) => {
@@ -82,6 +93,9 @@ export function ProductsPage({ user }: ProductsPageProps) {
       }
       return true;
     })
+    .filter((product: Product) =>
+      articleFilter === 'all' ? true : product.article.toLowerCase() === articleFilter.toLowerCase()
+    )
     .filter((product: Product) => (statusFilter === 'all' ? true : product.status === statusFilter))
     .filter((product: Product) => {
       const term = searchTerm.trim().toLowerCase();
@@ -345,6 +359,18 @@ export function ProductsPage({ user }: ProductsPageProps) {
               className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
             />
           </div>
+          <select
+            value={articleFilter}
+            onChange={(e) => setArticleFilter(e.target.value)}
+            className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
+          >
+            <option value="all">All Articles</option>
+            {articleOptions.map((article) => (
+              <option key={article} value={article}>
+                {article}
+              </option>
+            ))}
+          </select>
           <button
             onClick={cycleStatusFilter}
             title={`Filter: ${statusFilter}`}
@@ -486,13 +512,19 @@ export function ProductsPage({ user }: ProductsPageProps) {
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">Article *</label>
-                  <input
-                    type="text"
+                  <select
                     value={formState.article}
                     onChange={(e) => setFormState({ ...formState, article: e.target.value })}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
                     required
-                  />
+                  >
+                    <option value="">Select article</option>
+                    {articleOptions.map((article) => (
+                      <option key={article} value={article}>
+                        {article}
+                      </option>
+                    ))}
+                  </select>
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">Date *</label>
@@ -685,13 +717,19 @@ export function ProductsPage({ user }: ProductsPageProps) {
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">Article *</label>
-                  <input
-                    type="text"
+                  <select
                     value={formState.article}
                     onChange={(e) => setFormState({ ...formState, article: e.target.value })}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
                     required
-                  />
+                  >
+                    <option value="">Select article</option>
+                    {editArticleOptions.map((article) => (
+                      <option key={article} value={article}>
+                        {article}
+                      </option>
+                    ))}
+                  </select>
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">Date *</label>

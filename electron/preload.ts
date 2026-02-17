@@ -50,11 +50,43 @@ const dbApi = {
 
 contextBridge.exposeInMainWorld('api', {
   db: dbApi,
+  auth: {
+    login: (payload: { email: string; password: string; preferOnline: boolean }) => ipcRenderer.invoke('auth:login', payload),
+    provisionPending: (adminUserId: string, adminAccessToken: string) =>
+      ipcRenderer.invoke('auth:provision-pending', adminUserId, adminAccessToken),
+    createUser: (payload: {
+      adminUserId: string;
+      fullName: string;
+      email: string;
+      phone?: string;
+      department?: string;
+      role: 'system_admin' | 'employee';
+      status: 'active' | 'inactive';
+      password: string;
+      location?: string;
+      language?: string;
+    }) => ipcRenderer.invoke('auth:create-user', payload),
+    logout: (userId: string) => ipcRenderer.invoke('auth:logout', userId)
+  },
   migration: {
     importLegacyDump: (dump: unknown) => ipcRenderer.invoke('migration:import', dump)
   },
   sync: {
-    trigger: () => ipcRenderer.invoke('sync:trigger')
+    trigger: (userId: string) => ipcRenderer.invoke('sync:trigger', userId),
+    getStatus: (userId: string) => ipcRenderer.invoke('sync:get-status', userId),
+    setMode: (userId: string, online: boolean) => ipcRenderer.invoke('sync:set-mode', userId, online),
+    push: (userId: string) => ipcRenderer.invoke('sync:push', userId),
+    previewPull: (userId: string) => ipcRenderer.invoke('sync:preview-pull', userId),
+    pull: (userId: string, conflictStrategy: 'skip' | 'remote_wins' = 'skip') =>
+      ipcRenderer.invoke('sync:pull', userId, conflictStrategy),
+    fullSyncRequest: (userId: string) => ipcRenderer.invoke('sync:full:request', userId),
+    fullSyncSession: (userId: string) => ipcRenderer.invoke('sync:full:session', userId),
+    fullSyncPullNext: (userId: string) => ipcRenderer.invoke('sync:full:pull-next', userId),
+    fullSyncAdminList: (userId: string) => ipcRenderer.invoke('sync:full:admin:list', userId),
+    fullSyncAdminReview: (userId: string, requestId: string, decision: 'approve' | 'reject', reason?: string) =>
+      ipcRenderer.invoke('sync:full:admin:review', userId, requestId, decision, reason),
+    fullSyncAdminUploadNext: (userId: string, requestId: string) =>
+      ipcRenderer.invoke('sync:full:admin:upload-next', userId, requestId)
   },
   update: {
     check: () => ipcRenderer.invoke('update:check'),

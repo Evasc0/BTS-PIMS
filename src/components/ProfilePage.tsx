@@ -114,7 +114,12 @@ export function ProfilePage({ user }: ProfilePageProps) {
       return;
     }
     const { hash, salt } = await createPasswordHash(newPassword);
-    await db.employees.update(user.id, { passwordHash: hash, passwordSalt: salt });
+    await db.employees.update(user.id, {
+      passwordHash: hash,
+      passwordSalt: salt,
+      authSyncStatus: 'pending_upload',
+      pendingPasswordPlain: newPassword
+    });
     await logActivity({
       action: 'UPDATE',
       entityType: 'employee',

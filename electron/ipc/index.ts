@@ -1,9 +1,38 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
 import { dataStore } from '../db';
-import { syncNow } from '../sync/syncService';
+import { authService } from '../auth/authService';
+import {
+  clearSyncActorAccessToken,
+  getFullSyncSession,
+  getSyncStatus,
+  listFullSyncRequests,
+  previewRemoteChanges,
+  pullNextFullSyncChunk,
+  pullRemoteChanges,
+  pushLocalChanges,
+  requestFullSync,
+  reviewFullSyncRequest,
+  setSyncActorAccessToken,
+  setOnlineMode,
+  syncNow,
+  uploadNextFullSyncChunk
+} from '../sync/syncService';
 import { checkForUpdates, installUpdate } from '../update/updater';
 
 export function registerIpc(mainWindow: BrowserWindow): void {
+  const resolveSyncActor = (userId: string) => {
+    if (!userId) {
+      throw new Error('Missing user id for sync operation.');
+    }
+
+    const user = dataStore.employees.get(userId);
+    if (!user || user.status !== 'active') {
+      throw new Error('Invalid or inactive user for sync operation.');
+    }
+
+    return { userId: user.id, role: user.role as 'system_admin' | 'employee' };
+  };
+
   const notify = (table: string, ids: string[]) => {
     if (mainWindow.isDestroyed()) return;
     mainWindow.webContents.send('db:changed', { table, ids });
@@ -97,7 +126,134 @@ export function registerIpc(mainWindow: BrowserWindow): void {
     notify('migration', []);
   });
 
-  ipcMain.handle('sync:trigger', () => syncNow());
+  ipcMain.handle(
+    'auth:login',
+    async (
+      _evt,
+      payload: {
+        email: string;
+        password: string;
+        preferOnline: boolean;
+      }
+    ) => {
+      const result = await authService.loginOfflineFirst(payload);
+      if (result.success && result.verifiedOnline && result.sessionAccessToken) {
+        setSyncActorAccessToken(result.userId, result.sessionAccessToken, result.sessionAccessTokenExpiresAt || null);
+      }
+      if (result.success && Object.prototype.hasOwnProperty.call(result, 'sessionAccessToken')) {
+        delete (result as any).sessionAccessToken;
+      }
+      if (result.success && Object.prototype.hasOwnProperty.call(result, 'sessionAccessTokenExpiresAt')) {
+        delete (result as any).sessionAccessTokenExpiresAt;
+      }
+      return result;
+    }
+  );
+
+  ipcMain.handle('auth:provision-pending', async (_evt, adminUserId: string, adminAccessToken: string) => {
+    return authService.provisionPendingEmployees({ adminUserId, adminAccessToken });
+  });
+
+  ipcMain.handle(
+    'auth:create-user',
+    async (
+      _evt,
+      payload: {
+        adminUserId: string;
+        fullName: string;
+        email: string;
+        phone?: string;
+        department?: string;
+        role: 'system_admin' | 'employee';
+        status: 'active' | 'inactive';
+        password: string;
+        location?: string;
+        language?: string;
+      }
+    ) => {
+      const result = await authService.createUserInstant(payload);
+      if (result.success && result.employeeId) {
+        notify('employees', [result.employeeId]);
+      }
+      return result;
+    }
+  );
+
+  ipcMain.handle('auth:logout', (_evt, userId: string) => {
+    if (userId) {
+      authService.clearLocalSessionCache(userId);
+      clearSyncActorAccessToken(userId);
+    }
+    return true;
+  });
+
+  ipcMain.handle('sync:trigger', async (_evt, userId: string) => {
+    const actor = resolveSyncActor(userId);
+    const result = await syncNow(actor);
+    notify('sync_state', [`sync:${actor.userId}`]);
+    return result;
+  });
+  ipcMain.handle('sync:get-status', (_evt, userId: string) => {
+    const actor = resolveSyncActor(userId);
+    return getSyncStatus(actor);
+  });
+  ipcMain.handle('sync:set-mode', (_evt, userId: string, online: boolean) => {
+    const actor = resolveSyncActor(userId);
+    const result = setOnlineMode(actor, Boolean(online));
+    notify('sync_state', [`sync:${actor.userId}`]);
+    return result;
+  });
+  ipcMain.handle('sync:push', async (_evt, userId: string) => {
+    const actor = resolveSyncActor(userId);
+    const result = await pushLocalChanges(actor);
+    notify('sync_state', [`sync:${actor.userId}`]);
+    return result;
+  });
+  ipcMain.handle('sync:preview-pull', async (_evt, userId: string) => {
+    const actor = resolveSyncActor(userId);
+    return previewRemoteChanges(actor);
+  });
+  ipcMain.handle('sync:pull', async (_evt, userId: string, conflictStrategy: 'skip' | 'remote_wins' = 'skip') => {
+    const actor = resolveSyncActor(userId);
+    const result = await pullRemoteChanges(actor, conflictStrategy);
+    notify('sync_state', [`sync:${actor.userId}`]);
+    return result;
+  });
+  ipcMain.handle('sync:full:request', async (_evt, userId: string) => {
+    const actor = resolveSyncActor(userId);
+    const result = await requestFullSync(actor);
+    notify('sync_state', [`sync:${actor.userId}`]);
+    return result;
+  });
+  ipcMain.handle('sync:full:session', async (_evt, userId: string) => {
+    const actor = resolveSyncActor(userId);
+    return getFullSyncSession(actor);
+  });
+  ipcMain.handle('sync:full:pull-next', async (_evt, userId: string) => {
+    const actor = resolveSyncActor(userId);
+    const result = await pullNextFullSyncChunk(actor);
+    notify('sync_state', [`sync:${actor.userId}`]);
+    return result;
+  });
+  ipcMain.handle('sync:full:admin:list', async (_evt, userId: string) => {
+    const actor = resolveSyncActor(userId);
+    return listFullSyncRequests(actor);
+  });
+  ipcMain.handle(
+    'sync:full:admin:review',
+    async (_evt, userId: string, requestId: string, decision: 'approve' | 'reject', reason?: string) => {
+      const actor = resolveSyncActor(userId);
+      const result = await reviewFullSyncRequest(actor, requestId, decision, reason);
+      notify('sync_state', [`sync:${actor.userId}`]);
+      return result;
+    }
+  );
+  ipcMain.handle('sync:full:admin:upload-next', async (_evt, userId: string, requestId: string) => {
+    const actor = resolveSyncActor(userId);
+    const result = await uploadNextFullSyncChunk(actor, requestId);
+    notify('sync_state', [`sync:${actor.userId}`]);
+    return result;
+  });
 
   ipcMain.handle('update:check', () => checkForUpdates());
   ipcMain.handle('update:install', () => installUpdate());
