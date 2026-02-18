@@ -2,12 +2,18 @@ PRAGMA foreign_keys = OFF;
 
 BEGIN TRANSACTION;
 
+<<<<<<< HEAD
 ALTER TABLE products ADD COLUMN IF NOT EXISTS assigned_at TEXT;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS assignment_status TEXT NOT NULL DEFAULT 'returned';
 ALTER TABLE products ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE returns ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE return_receivers ADD COLUMN IF NOT EXISTS receiver_name TEXT NOT NULL DEFAULT '';
 ALTER TABLE activity_logs ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+=======
+-- Rebuild local tables without FK constraints for offline-first sync safety.
+-- Do not use `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` here because older
+-- SQLite builds bundled with some better-sqlite3 versions reject it.
+>>>>>>> f49b1685fd29dba334c92b30ab26043f0eef3dcf
 
 CREATE TABLE products_new (
   id TEXT PRIMARY KEY,
