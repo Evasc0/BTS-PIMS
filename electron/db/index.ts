@@ -630,6 +630,7 @@ export const dataStore = {
         ...product,
         assignedAt: product.assignedToEmployeeId ? product.assignedAt ?? now : undefined,
         assignmentStatus: product.assignedToEmployeeId ? 'active' : 'returned',
+        lastModified: now,
         version: 1
       });
     },
@@ -708,6 +709,7 @@ export const dataStore = {
       });
       enqueueOutbox(db, 'products', id, 'update', {
         ...updated,
+        lastModified: now,
         _meta: {
           previousAssignedToEmployeeId: existing.assignedToEmployeeId ?? null,
           assignmentChanged
@@ -794,7 +796,7 @@ export const dataStore = {
         version: 1
       });
       insertOrUpdateReturnReceivers(db, record.id, record.returnedByEmployeeId, record.receivedByEntries || []);
-      enqueueOutbox(db, 'returns', record.id, 'insert', { ...record, version: 1 });
+      enqueueOutbox(db, 'returns', record.id, 'insert', { ...record, lastModified: now, version: 1 });
     },
     update: (id: string, changes: Partial<ReturnRecord>): void => {
       const db = ensureDb();
@@ -850,7 +852,7 @@ export const dataStore = {
         version: nextVersion
       });
       insertOrUpdateReturnReceivers(db, id, updated.returnedByEmployeeId, updated.receivedByEntries || []);
-      enqueueOutbox(db, 'returns', id, 'update', updated);
+      enqueueOutbox(db, 'returns', id, 'update', { ...updated, lastModified: now });
     },
     remove: (id: string): void => {
       const db = ensureDb();

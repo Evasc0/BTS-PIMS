@@ -181,10 +181,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      await window.api.sync.push(user.id);
-      await window.api.sync.pull(user.id, 'remote_wins');
+      let lastStepError: string | null = null;
+
+      try {
+        await window.api.sync.push(user.id);
+      } catch (error: any) {
+        lastStepError = error?.message || 'Automatic admin push failed.';
+      }
+
+      try {
+        await window.api.sync.pull(user.id, 'remote_wins');
+      } catch (error: any) {
+        lastStepError = error?.message || 'Automatic admin pull failed.';
+      }
+
       if (window.api.sync.autoPullEmployeeSubmissions) {
-        await window.api.sync.autoPullEmployeeSubmissions(user.id);
+        try {
+          await window.api.sync.autoPullEmployeeSubmissions(user.id);
+        } catch (error: any) {
+          lastStepError = error?.message || 'Automatic employee-submission pull failed.';
+        }
+      }
+
+      if (!silent && lastStepError) {
+        setSyncNotice(lastStepError);
       }
     } catch (error: any) {
       if (!silent) {
@@ -341,7 +361,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const idleForMs = Date.now() - lastActivityAtRef.current;
       const isIdle = idleForMs >= IDLE_SYNC_AFTER_MS;
       idleSyncRef.current = isIdle;
-      const intervalMs = isIdle ? IDLE_SYNC_POLL_MS : REALTIME_SYNC_POLL_MS;
+      const intervalMs =
+        currentUser.role === 'system_admin'
+          ? REALTIME_SYNC_POLL_MS
+          : isIdle
+            ? IDLE_SYNC_POLL_MS
+            : REALTIME_SYNC_POLL_MS;
 
       if (!navigator.onLine) {
         schedule(intervalMs);

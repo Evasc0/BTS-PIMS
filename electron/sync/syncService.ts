@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import zlib from 'zlib';
 import { createHash, randomUUID } from 'crypto';
@@ -428,6 +429,14 @@ const ensureDir = (dirPath: string): void => {
   if (!fs.existsSync(dirPath)) fs.mkdirSync(dirPath, { recursive: true });
 };
 
+const buildDeviceFingerprint = (): string => {
+  const hostname = String(os.hostname() || '').trim().toLowerCase();
+  const userHint = String(process.env.USERNAME || process.env.USER || '').trim().toLowerCase();
+  const homeHint = path.basename(String(app.getPath('home') || '')).trim().toLowerCase();
+  const raw = [process.platform, process.arch, hostname, userHint || homeHint].join('|');
+  return createHash('sha256').update(raw).digest('hex');
+};
+
 let syncSchemaEnsured = false;
 let lastRetentionCleanupAtMs = 0;
 
@@ -480,6 +489,7 @@ const ensureSyncSchema = (db: Database.Database): void => {
       CREATE TABLE IF NOT EXISTS sync_device (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         device_id TEXT NOT NULL,
+        fingerprint TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -602,17 +612,42 @@ const ensureSyncSchema = (db: Database.Database): void => {
     `
   ).run({ now: nowIso() });
 
+  const syncDeviceColumns = getTableColumns(db, 'sync_device');
+  if (!syncDeviceColumns.has('fingerprint')) {
+    db.exec('ALTER TABLE sync_device ADD COLUMN fingerprint TEXT');
+  }
+
   syncSchemaEnsured = true;
 };
 
 const getLocalDeviceId = (db: Database.Database): string => {
   ensureSyncSchema(db);
-  const existing = db.prepare('SELECT device_id FROM sync_device WHERE id = 1').get() as { device_id?: string } | undefined;
-  if (existing?.device_id) return existing.device_id;
+  const runtimeFingerprint = buildDeviceFingerprint();
+  const existing = db.prepare('SELECT device_id, fingerprint FROM sync_device WHERE id = 1').get() as
+    | { device_id?: string; fingerprint?: string | null }
+    | undefined;
+  if (existing?.device_id) {
+    const storedFingerprint = String(existing.fingerprint || '').trim();
+    const now = nowIso();
+    if (!storedFingerprint) {
+      db.prepare('UPDATE sync_device SET fingerprint = ?, updated_at = ? WHERE id = 1').run(runtimeFingerprint, now);
+      return existing.device_id;
+    }
+    if (storedFingerprint !== runtimeFingerprint) {
+      const rotatedDeviceId = randomUUID();
+      db
+        .prepare('UPDATE sync_device SET device_id = ?, fingerprint = ?, updated_at = ? WHERE id = 1')
+        .run(rotatedDeviceId, runtimeFingerprint, now);
+      return rotatedDeviceId;
+    }
+    return existing.device_id;
+  }
 
   const next = randomUUID();
   const now = nowIso();
-  db.prepare('INSERT OR REPLACE INTO sync_device (id, device_id, created_at, updated_at) VALUES (1, ?, ?, ?)').run(next, now, now);
+  db
+    .prepare('INSERT OR REPLACE INTO sync_device (id, device_id, fingerprint, created_at, updated_at) VALUES (1, ?, ?, ?, ?)')
+    .run(next, runtimeFingerprint, now, now);
   return next;
 };
 
@@ -2536,6 +2571,60 @@ const applyRemoteDelete = (
   });
 };
 
+const localRowExistsById = (db: Database.Database, tableName: string, id: string | null | undefined): boolean => {
+  const value = String(id || '').trim();
+  if (!value) return false;
+  const row = db.prepare(`SELECT id FROM ${tableName} WHERE id = ? LIMIT 1`).get(value) as { id?: string } | undefined;
+  return Boolean(row?.id);
+};
+
+const localEmployeeExists = (db: Database.Database, employeeId: string | null | undefined): boolean =>
+  localRowExistsById(db, 'employees', employeeId);
+
+const normalizeEmployeeSubmissionPayloadForAdmin = (
+  db: Database.Database,
+  row: RemoteQueueRow,
+  entityType: string,
+  payload: any
+): any => {
+  const normalized = { ...(payload || {}) };
+  const rowEmployeeId = String(row.employee_id || '').trim();
+
+  if (entityType === 'products') {
+    const assignedCandidate = normalized.assignedToEmployeeId ?? normalized.assigned_to_employee_id ?? null;
+    const assignedEmployeeId = assignedCandidate ? String(assignedCandidate).trim() : '';
+    if (assignedEmployeeId && !localEmployeeExists(db, assignedEmployeeId)) {
+      const fallbackEmployeeId = rowEmployeeId && localEmployeeExists(db, rowEmployeeId) ? rowEmployeeId : '';
+      normalized.assignedToEmployeeId = fallbackEmployeeId || null;
+      if (!fallbackEmployeeId) {
+        normalized.assignmentStatus = 'returned';
+        normalized.assignedAt = null;
+      }
+    } else {
+      normalized.assignedToEmployeeId = assignedEmployeeId || null;
+    }
+    return normalized;
+  }
+
+  if (entityType === 'returns') {
+    const productCandidate = normalized.productId ?? normalized.product_id ?? null;
+    normalized.productId = productCandidate ? String(productCandidate).trim() : null;
+
+    const returnedByCandidate = normalized.returnedByEmployeeId ?? normalized.returned_by_employee_id ?? null;
+    let returnedByEmployeeId = returnedByCandidate ? String(returnedByCandidate).trim() : '';
+    if (!returnedByEmployeeId && rowEmployeeId) {
+      returnedByEmployeeId = rowEmployeeId;
+    }
+    if (returnedByEmployeeId && !localEmployeeExists(db, returnedByEmployeeId) && rowEmployeeId && localEmployeeExists(db, rowEmployeeId)) {
+      returnedByEmployeeId = rowEmployeeId;
+    }
+    normalized.returnedByEmployeeId = returnedByEmployeeId;
+    return normalized;
+  }
+
+  return normalized;
+};
+
 const applyRemoteUpsert = (db: Database.Database, entityType: string, payload: any, version: number): void => {
   switch (entityType) {
     case 'employees':
@@ -3342,8 +3431,11 @@ const pullAdminChanges = async (
       }
 
       if (localVersion > remoteVersion && conflictStrategy === 'skip') {
-        conflicts.push(createConflictRecord({ ...row, table_name: entityType, record_id: recordId }, entityType, localVersion, remoteVersion));
-        markEntityConflict(db, entityType, recordId);
+        // Admin-local version is newer than employee submission: keep local truth and clear stale remote row.
+        remoteIdsToDelete.push(row.id);
+        if (!latestAppliedTimestamp || rowCreatedAt > latestAppliedTimestamp) {
+          latestAppliedTimestamp = rowCreatedAt;
+        }
         continue;
       }
 
@@ -3603,13 +3695,31 @@ const pullEmployeeSubmissionsForAdmin = async (
     };
   }
 
+  const rowsOrdered = [...rows].sort((left, right) => {
+    const leftEntity = normalizeEntityType(readRemoteTableName(left) || '');
+    const rightEntity = normalizeEntityType(readRemoteTableName(right) || '');
+    const priority = (entity: string | null): number => {
+      if (entity === 'products') return 0;
+      if (entity === 'returns') return 1;
+      return 2;
+    };
+    const byPriority = priority(leftEntity) - priority(rightEntity);
+    if (byPriority !== 0) return byPriority;
+    const leftCreated = Date.parse(readRemoteTimestamp(left));
+    const rightCreated = Date.parse(readRemoteTimestamp(right));
+    if (Number.isFinite(leftCreated) && Number.isFinite(rightCreated) && leftCreated !== rightCreated) {
+      return leftCreated - rightCreated;
+    }
+    return String(left.id || '').localeCompare(String(right.id || ''));
+  });
+
   const conflicts: ConflictRecord[] = [];
   const remoteIdsToDelete: string[] = [];
   let pulledCount = 0;
   let latestAppliedTimestamp: string | null = null;
 
   const applyTx = db.transaction(() => {
-    for (const row of rows) {
+    for (const row of rowsOrdered) {
       const entityType = normalizeEntityType(readRemoteTableName(row) || '');
       const rowCreatedAt = readRemoteTimestamp(row);
       if (!entityType || entityType === 'activity_logs') {
@@ -3653,15 +3763,28 @@ const pullEmployeeSubmissionsForAdmin = async (
         localVersion > remoteVersion && conflictStrategy === 'remote_wins' ? localVersion + 1 : remoteVersion;
 
       const payload = {
-        ...(remoteData || {}),
+        ...normalizeEmployeeSubmissionPayloadForAdmin(db, row, entityType, remoteData || {}),
         id: recordId,
         version: resolvedVersion
       };
 
-      if (operation === 'delete') {
-        applyRemoteDelete(db, entityType, recordId, payload.deletedAt || rowCreatedAt || nowIso(), resolvedVersion);
-      } else {
-        applyRemoteUpsert(db, entityType, payload, resolvedVersion);
+      try {
+        if (operation === 'delete') {
+          applyRemoteDelete(db, entityType, recordId, payload.deletedAt || rowCreatedAt || nowIso(), resolvedVersion);
+        } else {
+          applyRemoteUpsert(db, entityType, payload, resolvedVersion);
+        }
+      } catch (error: any) {
+        const message = String(error?.message || '');
+        if (message.toLowerCase().includes('foreign key constraint failed')) {
+          conflicts.push(createConflictRecord({ ...row, table_name: entityType, record_id: recordId }, entityType, localVersion, remoteVersion));
+          logSyncEvent(db, {
+            eventType: 'auto_pull_employee_submissions',
+            message: `Deferred employee submission ${row.id} (${entityType}:${recordId}) due to missing local dependency.`
+          });
+          continue;
+        }
+        throw error;
       }
 
       remoteIdsToDelete.push(row.id);
@@ -3827,7 +3950,7 @@ export async function autoPullEmployeeSubmissions(actor: SyncActor) {
     try {
       await cleanupQueueRetention(actor);
       const currentDeviceId = getLocalDeviceId(db);
-      const result = await pullEmployeeSubmissionsForAdmin(db, actor, 'remote_wins', currentDeviceId);
+      const result = await pullEmployeeSubmissionsForAdmin(db, actor, 'skip', currentDeviceId);
       if (result.status === 'synced' || result.status === 'idle' || result.status === 'conflict') {
         await touchActorPresence(db, actor);
         const relayUsage = await fetchRelayUsageStats();
