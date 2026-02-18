@@ -124,8 +124,12 @@ const ensureDb = (): Database.Database => {
   const dbPath = path.join(app.getPath('userData'), 'bts-inventory.db');
   const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
+  // Offline-first sync can apply rows out-of-order across devices.
+  // Keep FK definitions for documentation, but disable enforcement locally
+  // to prevent sync deadlocks on transient missing references.
+  db.pragma('foreign_keys = OFF');
   runMigrations(db);
+  db.pragma('foreign_keys = OFF');
   ensureCoreSchema(db);
   seedIfNeeded(db);
   dbInstance = db;
