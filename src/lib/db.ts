@@ -54,7 +54,11 @@ const makeTable = <T>(tableApi: TableApi<T>): TableWrapper<T> => ({
 export const db = {
   employees: makeTable<Employee>(ensureApi().employees),
   products: makeTable<Product>(ensureApi().products),
-  returns: makeTable<ReturnRecord>(ensureApi().returns),
+  returns: {
+    ...makeTable<ReturnRecord>(ensureApi().returns),
+    process: (payload: { id: string; adminUserId: string; decision: 'approve' | 'reject'; reason?: string }) =>
+      ensureApi().returns.process(payload)
+  },
   activityLogs: makeTable<ActivityLog>(ensureApi().activityLogs),
   settings: makeTable<SystemSettings>(ensureApi().settings),
   isOpen: () => isOpen,

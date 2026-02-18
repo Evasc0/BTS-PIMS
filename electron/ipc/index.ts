@@ -90,6 +90,20 @@ export function registerIpc(mainWindow: BrowserWindow): void {
     dataStore.returns.update(id, changes);
     notify('returns', [id]);
   });
+  ipcMain.handle(
+    'db:returns:process',
+    (
+      _evt,
+      payload: { id: string; adminUserId: string; decision: 'approve' | 'reject'; reason?: string }
+    ) => {
+      const result = dataStore.returns.processDecision(payload);
+      notify('returns', [payload.id]);
+      if (result?.product?.id) {
+        notify('products', [result.product.id]);
+      }
+      return result;
+    }
+  );
   ipcMain.handle('db:returns:delete', (_evt, id) => {
     dataStore.returns.remove(id);
     notify('returns', [id]);

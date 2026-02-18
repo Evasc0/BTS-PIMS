@@ -329,7 +329,7 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
 
       const localChanges = await window.api.sync.viewLocalChanges(user.id);
       const returnOutboxIds = (localChanges?.changes || [])
-        .filter((change: any) => change.entityType === 'returns')
+        .filter((change: any) => change.entityType === 'returns' || change.entityType === 'products')
         .map((change: any) => Number(change.outboxId))
         .filter((id: number) => Number.isFinite(id));
 
@@ -337,7 +337,15 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
 
       const result = await window.api.sync.push(user.id, { outboxIds: returnOutboxIds });
       if (result.status === 'synced') {
-        return `Synced ${result.pushedCount} return update(s).`;
+        try {
+          await window.api.sync.pull(user.id, 'skip');
+          if (window.api.sync.autoPullEmployeeSubmissions) {
+            await window.api.sync.autoPullEmployeeSubmissions(user.id);
+          }
+        } catch {
+          // Push already succeeded; pull follow-up is best effort.
+        }
+        return `Synced ${result.pushedCount} return/inventory update(s).`;
       }
 
       if (result.status === 'error') {
@@ -548,46 +556,43 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
       return;
     }
 
-    await db.returns.update(selectedReturn.id, {
-      status: 'approved',
-      processedByEmployeeId: user.id,
-      processedDate: nowIso(),
-      processingNotes: processingNotes.trim()
-    });
-
-    if (product) {
-      await db.products.update(product.id, {
-        onHandPerCount: quantityAfter,
-        assignedToEmployeeId: undefined,
-        assignmentStatus: 'returned',
-        status: 'returned'
+    try {
+      await db.returns.process({
+        id: selectedReturn.id,
+        adminUserId: user.id,
+        decision: 'approve',
+        reason: processingNotes.trim() || undefined
       });
-    }
 
-    await logActivity({
-      action: 'UPDATE',
-      entityType: 'return',
-      entityId: selectedReturn.id,
-      performedByEmployeeId: user.id,
-      details: serializeReturnAudit({
-        action: 'approved',
-        returnId: selectedReturn.id,
-        rrspNumber: selectedReturn.rrspNumber,
-        productId: selectedReturn.productId,
-        productNumber: product?.propertyNumber,
-        submittedBy: selectedReturn.returnedByEmployeeId,
-        approvedBy: user.id,
-        quantity,
-        quantityBefore,
-        quantityAfter,
-        status: 'approved',
-        note: processingNotes.trim()
-      })
-    });
-    const adminSyncMessage = await autoPushAdminReturnUpdates();
-    if (adminSyncMessage) setSubmitSyncMessage(adminSyncMessage);
-    setSelectedReturn(null);
-    setProcessingNotes('');
+      await logActivity({
+        action: 'UPDATE',
+        entityType: 'return',
+        entityId: selectedReturn.id,
+        performedByEmployeeId: user.id,
+        details: serializeReturnAudit({
+          action: 'approved',
+          returnId: selectedReturn.id,
+          rrspNumber: selectedReturn.rrspNumber,
+          productId: selectedReturn.productId,
+          productNumber: product?.propertyNumber,
+          submittedBy: selectedReturn.returnedByEmployeeId,
+          approvedBy: user.id,
+          quantity,
+          quantityBefore,
+          quantityAfter,
+          status: 'approved',
+          note: processingNotes.trim()
+        })
+      });
+
+      const adminSyncMessage = await autoPushAdminReturnUpdates();
+      if (adminSyncMessage) setSubmitSyncMessage(adminSyncMessage);
+      setSelectedReturn(null);
+      setProcessingNotes('');
+      setFormError(null);
+    } catch (error: any) {
+      setFormError(error?.message || 'Failed to approve return.');
+    }
   };
 
   const handleReject = async (returnItem: ReturnRecord) => {
@@ -599,43 +604,40 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
     const quantity = Math.max(1, Number(returnItem.quantity || 1));
     const quantityBefore = Number(product?.onHandPerCount || 0);
 
-    await db.returns.update(returnItem.id, {
-      status: 'rejected',
-      processedByEmployeeId: user.id,
-      processedDate: nowIso(),
-      processingNotes: rejectionNote
-    });
-
-    if (product) {
-      await db.products.update(product.id, {
-        assignedToEmployeeId: returnItem.returnedByEmployeeId,
-        assignmentStatus: 'active',
-        status: 'assigned'
+    try {
+      await db.returns.process({
+        id: returnItem.id,
+        adminUserId: user.id,
+        decision: 'reject',
+        reason: rejectionNote
       });
-    }
 
-    await logActivity({
-      action: 'UPDATE',
-      entityType: 'return',
-      entityId: returnItem.id,
-      performedByEmployeeId: user.id,
-      details: serializeReturnAudit({
-        action: 'rejected',
-        returnId: returnItem.id,
-        rrspNumber: returnItem.rrspNumber,
-        productId: returnItem.productId,
-        productNumber: product?.propertyNumber,
-        submittedBy: returnItem.returnedByEmployeeId,
-        rejectedBy: user.id,
-        quantity,
-        quantityBefore,
-        quantityAfter: quantityBefore,
-        status: 'rejected',
-        note: rejectionNote
-      })
-    });
-    const adminSyncMessage = await autoPushAdminReturnUpdates();
-    if (adminSyncMessage) setSubmitSyncMessage(adminSyncMessage);
+      await logActivity({
+        action: 'UPDATE',
+        entityType: 'return',
+        entityId: returnItem.id,
+        performedByEmployeeId: user.id,
+        details: serializeReturnAudit({
+          action: 'rejected',
+          returnId: returnItem.id,
+          rrspNumber: returnItem.rrspNumber,
+          productId: returnItem.productId,
+          productNumber: product?.propertyNumber,
+          submittedBy: returnItem.returnedByEmployeeId,
+          rejectedBy: user.id,
+          quantity,
+          quantityBefore,
+          quantityAfter: quantityBefore,
+          status: 'rejected',
+          note: rejectionNote
+        })
+      });
+      const adminSyncMessage = await autoPushAdminReturnUpdates();
+      if (adminSyncMessage) setSubmitSyncMessage(adminSyncMessage);
+      setFormError(null);
+    } catch (error: any) {
+      setFormError(error?.message || 'Failed to reject return.');
+    }
   };
 
   return (

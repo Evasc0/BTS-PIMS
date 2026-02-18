@@ -29,6 +29,8 @@ const dbApi = {
     get: (id: string) => ipcRenderer.invoke('db:returns:get', id),
     add: (record: unknown) => ipcRenderer.invoke('db:returns:add', record),
     update: (id: string, changes: unknown) => ipcRenderer.invoke('db:returns:update', id, changes),
+    process: (payload: { id: string; adminUserId: string; decision: 'approve' | 'reject'; reason?: string }) =>
+      ipcRenderer.invoke('db:returns:process', payload),
     delete: (id: string) => ipcRenderer.invoke('db:returns:delete', id),
     findBy: (field: string, value: unknown) => ipcRenderer.invoke('db:returns:findBy', field, value)
   },

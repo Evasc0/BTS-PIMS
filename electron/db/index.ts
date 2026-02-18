@@ -854,6 +854,177 @@ export const dataStore = {
       insertOrUpdateReturnReceivers(db, id, updated.returnedByEmployeeId, updated.receivedByEntries || []);
       enqueueOutbox(db, 'returns', id, 'update', { ...updated, lastModified: now });
     },
+    processDecision: (input: {
+      id: string;
+      adminUserId: string;
+      decision: 'approve' | 'reject';
+      reason?: string;
+    }): { returnRecord: ReturnRecord; product: Product } => {
+      const db = ensureDb();
+      const returnId = String(input.id || '').trim();
+      const adminUserId = String(input.adminUserId || '').trim();
+      const decision: 'approve' | 'reject' = input.decision === 'reject' ? 'reject' : 'approve';
+      const reason = String(input.reason || '').trim();
+
+      if (!returnId) throw new Error('Return id is required.');
+      if (!adminUserId) throw new Error('Admin user id is required.');
+
+      const admin = dataStore.employees.get(adminUserId);
+      if (!admin || admin.status !== 'active' || admin.role !== 'system_admin') {
+        throw new Error('Only active system admin accounts can process return requests.');
+      }
+
+      const tx = db.transaction(() => {
+        const returnRow = db
+          .prepare('SELECT * FROM returns WHERE id = ? AND deleted_at IS NULL')
+          .get(returnId) as any | undefined;
+        if (!returnRow) throw new Error('Return record not found.');
+
+        const currentStatus = String(returnRow.status || '')
+          .trim()
+          .toLowerCase();
+        if (currentStatus !== 'pending') {
+          throw new Error(`Return is already ${currentStatus || 'processed'}.`);
+        }
+
+        const quantity = Number(returnRow.quantity ?? 0);
+        if (!Number.isFinite(quantity) || quantity <= 0) {
+          throw new Error('Returned quantity must be greater than zero.');
+        }
+        // Per-property assignment model: one assigned item per product record.
+        if (quantity > 1) {
+          throw new Error('Returned quantity exceeds assigned quantity for this property.');
+        }
+
+        const productRow = db
+          .prepare('SELECT * FROM products WHERE id = ? AND deleted_at IS NULL')
+          .get(returnRow.product_id) as any | undefined;
+        if (!productRow) {
+          throw new Error('Related product record not found.');
+        }
+
+        const returnedByEmployeeId = String(returnRow.returned_by_employee_id || '').trim();
+        if (!returnedByEmployeeId) {
+          throw new Error('Return record is missing returning employee.');
+        }
+
+        if (decision === 'reject') {
+          const employeeExists = db
+            .prepare('SELECT id FROM employees WHERE id = ? AND deleted_at IS NULL')
+            .get(returnedByEmployeeId) as { id?: string } | undefined;
+          if (!employeeExists?.id) {
+            throw new Error('Cannot reject return because returning employee was not found locally.');
+          }
+        }
+
+        const now = nowIso();
+        const nextReturnVersion = (Number(returnRow.version) || 1) + 1;
+        const nextReturnStatus = decision === 'approve' ? 'approved' : 'rejected';
+        const processingNotes =
+          reason || (decision === 'approve' ? 'Approved by system admin.' : 'Your return request was rejected. Please review remarks.');
+
+        db.prepare(
+          `
+            UPDATE returns
+            SET
+              status = @status,
+              processed_by_employee_id = @processed_by_employee_id,
+              processed_date = @processed_date,
+              processing_notes = @processing_notes,
+              sync_status = 'pending',
+              is_dirty = 1,
+              last_modified = @last_modified,
+              version = @version
+            WHERE id = @id
+          `
+        ).run({
+          id: returnId,
+          status: nextReturnStatus,
+          processed_by_employee_id: adminUserId,
+          processed_date: now,
+          processing_notes: processingNotes,
+          last_modified: now,
+          version: nextReturnVersion
+        });
+
+        const updatedReturnRow = db.prepare('SELECT * FROM returns WHERE id = ?').get(returnId);
+        const updatedReturn = mapReturn(updatedReturnRow, fetchReturnReceivers(db, returnId));
+        enqueueOutbox(db, 'returns', returnId, 'update', { ...updatedReturn, lastModified: now });
+
+        const previousAssignedToEmployeeId = productRow.assigned_to_employee_id ?? null;
+        const nextProductVersion = (Number(productRow.version) || 1) + 1;
+
+        if (decision === 'approve') {
+          const quantityBefore = Number(productRow.on_hand_per_count ?? 0);
+          const quantityAfter = quantityBefore + quantity;
+          if (!Number.isFinite(quantityAfter) || quantityAfter < 0) {
+            throw new Error('Inventory cannot become negative.');
+          }
+
+          db.prepare(
+            `
+              UPDATE products
+              SET
+                on_hand_per_count = @on_hand_per_count,
+                assigned_to_employee_id = NULL,
+                assigned_at = NULL,
+                assignment_status = 'returned',
+                status = 'returned',
+                sync_status = 'pending',
+                is_dirty = 1,
+                last_modified = @last_modified,
+                version = @version
+              WHERE id = @id
+            `
+          ).run({
+            id: productRow.id,
+            on_hand_per_count: quantityAfter,
+            last_modified: now,
+            version: nextProductVersion
+          });
+        } else {
+          db.prepare(
+            `
+              UPDATE products
+              SET
+                assigned_to_employee_id = @assigned_to_employee_id,
+                assigned_at = @assigned_at,
+                assignment_status = 'active',
+                status = 'assigned',
+                sync_status = 'pending',
+                is_dirty = 1,
+                last_modified = @last_modified,
+                version = @version
+              WHERE id = @id
+            `
+          ).run({
+            id: productRow.id,
+            assigned_to_employee_id: returnedByEmployeeId,
+            assigned_at: now,
+            last_modified: now,
+            version: nextProductVersion
+          });
+        }
+
+        const updatedProductRow = db.prepare('SELECT * FROM products WHERE id = ?').get(productRow.id);
+        const updatedProduct = mapProduct(updatedProductRow);
+        enqueueOutbox(db, 'products', updatedProduct.id, 'update', {
+          ...updatedProduct,
+          lastModified: now,
+          _meta: {
+            previousAssignedToEmployeeId: previousAssignedToEmployeeId ?? null,
+            assignmentChanged: true
+          }
+        });
+
+        return {
+          returnRecord: updatedReturn,
+          product: updatedProduct
+        };
+      });
+
+      return tx();
+    },
     remove: (id: string): void => {
       const db = ensureDb();
       const now = nowIso();

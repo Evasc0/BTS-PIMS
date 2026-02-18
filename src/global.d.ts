@@ -165,6 +165,12 @@ declare global {
           get: (id: string) => Promise<ReturnRecord | undefined>;
           add: (record: ReturnRecord) => Promise<void>;
           update: (id: string, changes: Partial<ReturnRecord>) => Promise<void>;
+          process: (payload: {
+            id: string;
+            adminUserId: string;
+            decision: 'approve' | 'reject';
+            reason?: string;
+          }) => Promise<{ returnRecord: ReturnRecord; product: Product }>;
           delete: (id: string) => Promise<void>;
           findBy: (field: string, value: unknown) => Promise<ReturnRecord | undefined>;
         };
