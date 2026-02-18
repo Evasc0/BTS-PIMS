@@ -2405,6 +2405,26 @@ const applyRemoteProduct = (db: Database.Database, payload: any, version: number
 
 const applyRemoteReturn = (db: Database.Database, payload: any, version: number): void => {
   const now = nowIso();
+  const sanitizeEmployeeId = (value: unknown): string | null => {
+    const id = String(value ?? '').trim();
+    if (!id) return null;
+    return localEmployeeExists(db, id) ? id : null;
+  };
+
+  const returnedByEmployeeId =
+    sanitizeEmployeeId(payload.returnedByEmployeeId ?? payload.returned_by_employee_id ?? null) ??
+    sanitizeEmployeeId(
+      (db.prepare('SELECT returned_by_employee_id FROM returns WHERE id = ? LIMIT 1').get(payload.id) as
+        | { returned_by_employee_id?: string | null }
+        | undefined)?.returned_by_employee_id
+    );
+
+  if (!returnedByEmployeeId) {
+    throw new Error(`FOREIGN KEY constraint failed: missing returning employee for return ${String(payload.id || '')}`);
+  }
+
+  const processedByEmployeeId = sanitizeEmployeeId(payload.processedByEmployeeId ?? payload.processed_by_employee_id ?? null);
+
   db.prepare(
     `
       INSERT INTO returns (
@@ -2443,26 +2463,26 @@ const applyRemoteReturn = (db: Database.Database, payload: any, version: number)
     `
   ).run({
     id: payload.id,
-    rrsp_number: payload.rrspNumber,
-    product_id: payload.productId,
-    return_date: payload.returnDate,
+    rrsp_number: payload.rrspNumber ?? payload.rrsp_number,
+    product_id: payload.productId ?? payload.product_id,
+    return_date: payload.returnDate ?? payload.return_date,
     quantity: payload.quantity,
     condition: payload.condition,
     remarks: payload.remarks,
-    returned_by_employee_id: payload.returnedByEmployeeId,
-    returned_by_position: payload.returnedByPosition,
-    received_date: payload.receivedDate,
+    returned_by_employee_id: returnedByEmployeeId,
+    returned_by_position: payload.returnedByPosition ?? payload.returned_by_position,
+    received_date: payload.receivedDate ?? payload.received_date,
     location: payload.location,
-    created_at: payload.createdAt ?? now,
+    created_at: payload.createdAt ?? payload.created_at ?? now,
     status: payload.status,
-    processed_by_employee_id: payload.processedByEmployeeId ?? null,
-    processed_date: payload.processedDate ?? null,
-    processing_notes: payload.processingNotes ?? null,
+    processed_by_employee_id: processedByEmployeeId,
+    processed_date: payload.processedDate ?? payload.processed_date ?? null,
+    processing_notes: payload.processingNotes ?? payload.processing_notes ?? null,
     sync_status: 'synced',
     is_dirty: 0,
-    last_modified: payload.lastModified ?? now,
+    last_modified: payload.lastModified ?? payload.last_modified ?? now,
     last_synced_at: now,
-    deleted_at: payload.deletedAt ?? null,
+    deleted_at: payload.deletedAt ?? payload.deleted_at ?? null,
     version
   });
 
@@ -2478,12 +2498,13 @@ const applyRemoteReturn = (db: Database.Database, payload: any, version: number)
 
     const tx = db.transaction((entries: any[]) => {
       for (const entry of entries) {
+        const receiverEmployeeId = sanitizeEmployeeId(entry.employeeId ?? entry.employee_id ?? returnedByEmployeeId);
         insertReceiver.run({
           return_id: payload.id,
-          employee_id: entry.employeeId || payload.returnedByEmployeeId,
-          receiver_name: entry.receiverName || '',
+          employee_id: receiverEmployeeId,
+          receiver_name: entry.receiverName || entry.receiver_name || '',
           position: entry.position,
-          received_date: entry.receivedDate,
+          received_date: entry.receivedDate || entry.received_date,
           location: entry.location
         });
       }
@@ -2619,6 +2640,65 @@ const normalizeEmployeeSubmissionPayloadForAdmin = (
       returnedByEmployeeId = rowEmployeeId;
     }
     normalized.returnedByEmployeeId = returnedByEmployeeId;
+    return normalized;
+  }
+
+  return normalized;
+};
+
+const normalizeAdminQueuePayloadForEmployee = (
+  db: Database.Database,
+  row: RemoteQueueRow,
+  entityType: string,
+  payload: any,
+  actorUserId: string
+): any => {
+  const normalized = { ...(payload || {}) };
+  const rowEmployeeId = String(row.employee_id || '').trim();
+  const actorEmployeeId = String(actorUserId || '').trim();
+
+  if (entityType === 'products') {
+    const assignedCandidate = normalized.assignedToEmployeeId ?? normalized.assigned_to_employee_id ?? null;
+    normalized.assignedToEmployeeId = assignedCandidate ? String(assignedCandidate).trim() : null;
+    return normalized;
+  }
+
+  if (entityType === 'returns') {
+    const productCandidate = normalized.productId ?? normalized.product_id ?? null;
+    normalized.productId = productCandidate ? String(productCandidate).trim() : null;
+
+    const returnedCandidates = [
+      normalized.returnedByEmployeeId ?? normalized.returned_by_employee_id ?? null,
+      rowEmployeeId || null,
+      actorEmployeeId || null
+    ];
+
+    let returnedByEmployeeId = '';
+    for (const candidate of returnedCandidates) {
+      const value = candidate ? String(candidate).trim() : '';
+      if (value && localEmployeeExists(db, value)) {
+        returnedByEmployeeId = value;
+        break;
+      }
+    }
+    normalized.returnedByEmployeeId = returnedByEmployeeId;
+
+    const processedCandidate = normalized.processedByEmployeeId ?? normalized.processed_by_employee_id ?? null;
+    const processedByEmployeeId = processedCandidate ? String(processedCandidate).trim() : '';
+    normalized.processedByEmployeeId =
+      processedByEmployeeId && localEmployeeExists(db, processedByEmployeeId) ? processedByEmployeeId : null;
+
+    if (Array.isArray(normalized.receivedByEntries)) {
+      normalized.receivedByEntries = normalized.receivedByEntries.map((entry: any) => {
+        const employeeCandidate = entry?.employeeId ?? entry?.employee_id ?? null;
+        const employeeId = employeeCandidate ? String(employeeCandidate).trim() : '';
+        return {
+          ...entry,
+          employeeId: employeeId && localEmployeeExists(db, employeeId) ? employeeId : null
+        };
+      });
+    }
+
     return normalized;
   }
 
@@ -3544,9 +3624,26 @@ const pullEmployeeAssignedChanges = async (
   const remoteIdsToDelete: string[] = [];
   let pulledCount = 0;
   let latestAppliedTimestamp: string | null = null;
+  const rowsOrdered = [...rows].sort((left, right) => {
+    const leftEntity = normalizeEntityType(readRemoteTableName(left) || '');
+    const rightEntity = normalizeEntityType(readRemoteTableName(right) || '');
+    const priority = (entity: string | null): number => {
+      if (entity === 'products') return 0;
+      if (entity === 'returns') return 1;
+      return 2;
+    };
+    const byPriority = priority(leftEntity) - priority(rightEntity);
+    if (byPriority !== 0) return byPriority;
+    const leftCreated = Date.parse(readRemoteTimestamp(left));
+    const rightCreated = Date.parse(readRemoteTimestamp(right));
+    if (Number.isFinite(leftCreated) && Number.isFinite(rightCreated) && leftCreated !== rightCreated) {
+      return leftCreated - rightCreated;
+    }
+    return String(left.id || '').localeCompare(String(right.id || ''));
+  });
 
   const applyTx = db.transaction(() => {
-    for (const row of rows) {
+    for (const row of rowsOrdered) {
       const entityType = normalizeEntityType(readRemoteTableName(row) || '');
       const rowCreatedAt = readRemoteTimestamp(row);
       if (entityType !== 'products' && entityType !== 'returns') {
@@ -3590,30 +3687,55 @@ const pullEmployeeAssignedChanges = async (
         localVersion > remoteVersion && conflictStrategy === 'remote_wins' ? localVersion + 1 : remoteVersion;
 
       const payload = {
-        ...(remoteData || {}),
+        ...normalizeAdminQueuePayloadForEmployee(db, row, entityType, remoteData || {}, actor.userId),
         id: recordId,
         version: resolvedVersion
       };
 
-      if (entityType === 'products') {
-        const assignedToEmployeeId = payload.assignedToEmployeeId ? String(payload.assignedToEmployeeId) : null;
-        const shouldDeleteLocal =
-          operation === 'delete' ||
-          !assignedToEmployeeId ||
-          assignedToEmployeeId !== actor.userId ||
-          payload.assignmentStatus === 'returned';
+      try {
+        if (entityType === 'products') {
+          const assignedToCandidate = payload.assignedToEmployeeId ?? payload.assigned_to_employee_id ?? null;
+          const assignedToEmployeeId = assignedToCandidate ? String(assignedToCandidate).trim() : null;
+          const assignmentStatus = String(payload.assignmentStatus ?? payload.assignment_status ?? '').toLowerCase();
+          const deletedAt = payload.deletedAt ?? payload.deleted_at ?? rowCreatedAt ?? nowIso();
+          const shouldDeleteLocal =
+            operation === 'delete' || !assignedToEmployeeId || assignedToEmployeeId !== actor.userId || assignmentStatus === 'returned';
 
-        if (shouldDeleteLocal) {
-          applyRemoteDelete(db, 'products', recordId, payload.deletedAt || rowCreatedAt || nowIso(), resolvedVersion);
+          if (shouldDeleteLocal) {
+            applyRemoteDelete(db, 'products', recordId, deletedAt, resolvedVersion);
+          } else {
+            applyRemoteProduct(db, payload, resolvedVersion);
+          }
         } else {
-          applyRemoteProduct(db, payload, resolvedVersion);
+          if (operation === 'delete') {
+            const deletedAt = payload.deletedAt ?? payload.deleted_at ?? rowCreatedAt ?? nowIso();
+            applyRemoteDelete(db, 'returns', recordId, deletedAt, resolvedVersion);
+          } else {
+            const returnedByEmployeeId = String(payload.returnedByEmployeeId || '').trim();
+            if (!returnedByEmployeeId) {
+              conflicts.push(createConflictRecord({ ...row, table_name: entityType, record_id: recordId }, entityType, localVersion, remoteVersion));
+              markEntityConflict(db, entityType, recordId);
+              logSyncEvent(db, {
+                eventType: 'pull',
+                message: `Deferred admin return ${row.id} (${entityType}:${recordId}) because returning employee is unavailable locally.`
+              });
+              continue;
+            }
+            applyRemoteReturn(db, payload, resolvedVersion);
+          }
         }
-      } else {
-        if (operation === 'delete') {
-          applyRemoteDelete(db, 'returns', recordId, payload.deletedAt || rowCreatedAt || nowIso(), resolvedVersion);
-        } else {
-          applyRemoteReturn(db, payload, resolvedVersion);
+      } catch (error: any) {
+        const message = String(error?.message || '');
+        if (message.toLowerCase().includes('foreign key constraint failed')) {
+          conflicts.push(createConflictRecord({ ...row, table_name: entityType, record_id: recordId }, entityType, localVersion, remoteVersion));
+          markEntityConflict(db, entityType, recordId);
+          logSyncEvent(db, {
+            eventType: 'pull',
+            message: `Deferred admin queue record ${row.id} (${entityType}:${recordId}) due to missing local dependency.`
+          });
+          continue;
         }
+        throw error;
       }
 
       remoteIdsToDelete.push(row.id);

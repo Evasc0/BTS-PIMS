@@ -63,6 +63,7 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
   const [formState, setFormState] = useState<ReturnFormState>(emptyReturnForm);
   const [formError, setFormError] = useState<string | null>(null);
   const [processingNotes, setProcessingNotes] = useState('');
+  const [processingAction, setProcessingAction] = useState<'approve' | 'reject'>('approve');
   const [submitSyncMessage, setSubmitSyncMessage] = useState<string | null>(null);
   const [propertySearch, setPropertySearch] = useState('');
   const [debouncedPropertySearch, setDebouncedPropertySearch] = useState('');
@@ -485,14 +486,7 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
       });
 
       if (isAdmin) {
-        const quantityAfter = quantityBefore + returnQuantity;
-        if (quantityAfter < 0) {
-          setFormError('Inventory cannot become negative.');
-          return;
-        }
-
         await db.products.update(product.id, {
-          onHandPerCount: quantityAfter,
           assignedToEmployeeId: undefined,
           assignmentStatus: 'returned',
           status: 'returned'
@@ -520,7 +514,7 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
           approvedBy: isAdmin ? user.id : undefined,
           quantity: returnQuantity,
           quantityBefore,
-          quantityAfter: isAdmin ? quantityBefore + returnQuantity : quantityBefore,
+          quantityAfter: quantityBefore,
           status: nextStatus,
           note: isAdmin ? 'Auto-approved system admin return.' : 'Pending system admin approval.'
         })
@@ -550,11 +544,7 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
     const product = productMap.get(selectedReturn.productId);
     const quantity = Math.max(1, Number(selectedReturn.quantity || 1));
     const quantityBefore = Number(product?.onHandPerCount || 0);
-    const quantityAfter = quantityBefore + quantity;
-    if (quantityAfter < 0) {
-      setFormError('Inventory cannot become negative.');
-      return;
-    }
+    const quantityAfter = quantityBefore;
 
     try {
       await db.returns.process({
@@ -589,24 +579,31 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
       if (adminSyncMessage) setSubmitSyncMessage(adminSyncMessage);
       setSelectedReturn(null);
       setProcessingNotes('');
+      setProcessingAction('approve');
       setFormError(null);
     } catch (error: any) {
       setFormError(error?.message || 'Failed to approve return.');
     }
   };
 
-  const handleReject = async (returnItem: ReturnRecord) => {
+  const handleReject = async () => {
     if (!canProcess) return;
-    if (returnItem.status !== 'pending') return;
-    const notes = window.prompt('Add rejection notes (optional):') || '';
-    const rejectionNote = notes.trim() || 'Your return request was rejected. Please review remarks.';
-    const product = productMap.get(returnItem.productId);
-    const quantity = Math.max(1, Number(returnItem.quantity || 1));
+    if (!selectedReturn) return;
+    if (selectedReturn.status !== 'pending') {
+      setSelectedReturn(null);
+      setProcessingNotes('');
+      setProcessingAction('approve');
+      return;
+    }
+
+    const rejectionNote = processingNotes.trim() || 'Your return request was rejected. Please review remarks.';
+    const product = productMap.get(selectedReturn.productId);
+    const quantity = Math.max(1, Number(selectedReturn.quantity || 1));
     const quantityBefore = Number(product?.onHandPerCount || 0);
 
     try {
       await db.returns.process({
-        id: returnItem.id,
+        id: selectedReturn.id,
         adminUserId: user.id,
         decision: 'reject',
         reason: rejectionNote
@@ -615,15 +612,15 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
       await logActivity({
         action: 'UPDATE',
         entityType: 'return',
-        entityId: returnItem.id,
+        entityId: selectedReturn.id,
         performedByEmployeeId: user.id,
         details: serializeReturnAudit({
           action: 'rejected',
-          returnId: returnItem.id,
-          rrspNumber: returnItem.rrspNumber,
-          productId: returnItem.productId,
+          returnId: selectedReturn.id,
+          rrspNumber: selectedReturn.rrspNumber,
+          productId: selectedReturn.productId,
           productNumber: product?.propertyNumber,
-          submittedBy: returnItem.returnedByEmployeeId,
+          submittedBy: selectedReturn.returnedByEmployeeId,
           rejectedBy: user.id,
           quantity,
           quantityBefore,
@@ -634,6 +631,9 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
       });
       const adminSyncMessage = await autoPushAdminReturnUpdates();
       if (adminSyncMessage) setSubmitSyncMessage(adminSyncMessage);
+      setSelectedReturn(null);
+      setProcessingNotes('');
+      setProcessingAction('approve');
       setFormError(null);
     } catch (error: any) {
       setFormError(error?.message || 'Failed to reject return.');
@@ -823,6 +823,7 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
                     onClick={() => {
                       setSelectedReturn(returnItem);
                       setProcessingNotes('');
+                      setProcessingAction('approve');
                     }}
                     className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition flex items-center justify-center gap-2"
                   >
@@ -830,7 +831,11 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
                     Approve
                   </button>
                   <button
-                    onClick={() => handleReject(returnItem)}
+                    onClick={() => {
+                      setSelectedReturn(returnItem);
+                      setProcessingNotes('');
+                      setProcessingAction('reject');
+                    }}
                     className="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition flex items-center justify-center gap-2"
                   >
                     <X className="w-4 h-4" />
@@ -1130,8 +1135,15 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-xl max-w-lg w-full p-6">
             <div className="flex items-center justify-between mb-6">
-              <h2 className="font-bold text-gray-900">Approve Return</h2>
-              <button onClick={() => setSelectedReturn(null)} className="p-2 hover:bg-gray-100 rounded-lg">
+              <h2 className="font-bold text-gray-900">{processingAction === 'approve' ? 'Approve Return' : 'Reject Return'}</h2>
+              <button
+                onClick={() => {
+                  setSelectedReturn(null);
+                  setProcessingNotes('');
+                  setProcessingAction('approve');
+                }}
+                className="p-2 hover:bg-gray-100 rounded-lg"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
@@ -1157,23 +1169,33 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
                   value={processingNotes}
                   onChange={(e) => setProcessingNotes(e.target.value)}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
-                  placeholder="Add notes about the approval..."
+                  placeholder={
+                    processingAction === 'approve'
+                      ? 'Add notes about the approval...'
+                      : 'Add notes about the rejection (optional)...'
+                  }
                 />
               </div>
               <div className="flex justify-end gap-3 pt-4">
                 <button
                   type="button"
-                  onClick={() => setSelectedReturn(null)}
+                  onClick={() => {
+                    setSelectedReturn(null);
+                    setProcessingNotes('');
+                    setProcessingAction('approve');
+                  }}
                   className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition"
                 >
                   Cancel
                 </button>
                 <button
                   type="button"
-                  onClick={handleApprove}
-                  className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition"
+                  onClick={processingAction === 'approve' ? handleApprove : handleReject}
+                  className={`px-4 py-2 text-white rounded-lg transition ${
+                    processingAction === 'approve' ? 'bg-green-600 hover:bg-green-700' : 'bg-red-600 hover:bg-red-700'
+                  }`}
                 >
-                  Confirm Approval
+                  {processingAction === 'approve' ? 'Confirm Approval' : 'Confirm Rejection'}
                 </button>
               </div>
             </form>

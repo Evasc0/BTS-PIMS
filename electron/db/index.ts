@@ -955,17 +955,10 @@ export const dataStore = {
         const nextProductVersion = (Number(productRow.version) || 1) + 1;
 
         if (decision === 'approve') {
-          const quantityBefore = Number(productRow.on_hand_per_count ?? 0);
-          const quantityAfter = quantityBefore + quantity;
-          if (!Number.isFinite(quantityAfter) || quantityAfter < 0) {
-            throw new Error('Inventory cannot become negative.');
-          }
-
           db.prepare(
             `
               UPDATE products
               SET
-                on_hand_per_count = @on_hand_per_count,
                 assigned_to_employee_id = NULL,
                 assigned_at = NULL,
                 assignment_status = 'returned',
@@ -978,7 +971,6 @@ export const dataStore = {
             `
           ).run({
             id: productRow.id,
-            on_hand_per_count: quantityAfter,
             last_modified: now,
             version: nextProductVersion
           });
