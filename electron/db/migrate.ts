@@ -35,7 +35,12 @@ export function runMigrations(db: Database.Database): void {
   for (const migration of files) {
     if (applied.has(migration.version)) continue;
     const sql = fs.readFileSync(path.join(migrationsDir, migration.file), 'utf8');
-    db.exec(sql);
+    try {
+      db.exec(sql);
+    } catch (error: any) {
+      const detail = error instanceof Error ? error.message : String(error || 'Unknown SQLite migration error');
+      throw new Error(`Migration failed (${migration.file}): ${detail}`);
+    }
     db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(
       migration.version,
       new Date().toISOString()
