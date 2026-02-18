@@ -298,7 +298,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     if (currentUser.role === 'employee') {
       setSyncNotice('Refreshing assigned updates...');
-      await autoPushEmployeeSubmissions(currentUser);
       await autoPullAssignedUpdates(currentUser);
       await refreshUser();
       return;

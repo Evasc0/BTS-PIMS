@@ -27,10 +27,11 @@ export function Dashboard({ user, syncNotice, onRefreshAssignedUpdates, onDismis
   const employees = useLiveQuery(() => db.employees.toArray(), []);
   const returns = useLiveQuery(() => db.returns.toArray(), []);
   const activityLogs = useLiveQuery(() => db.activityLogs.toArray(), []);
-  const [refreshingAssigned, setRefreshingAssigned] = useState(false);
+  const [refreshingSync, setRefreshingSync] = useState(false);
 
   const isAdmin = user.role === 'system_admin';
   const isEmployee = user.role === 'employee';
+  const canRefreshPendingReturns = Boolean(onRefreshAssignedUpdates);
 
   const assignedProducts = useMemo(
     () => (products || []).filter((product) => product.assignedToEmployeeId === user.id),
@@ -68,13 +69,13 @@ export function Dashboard({ user, syncNotice, onRefreshAssignedUpdates, onDismis
     return 'info';
   };
 
-  const handleRefreshAssigned = async () => {
-    if (!isEmployee || !onRefreshAssignedUpdates || refreshingAssigned) return;
-    setRefreshingAssigned(true);
+  const handleRefreshSync = async () => {
+    if (!onRefreshAssignedUpdates || refreshingSync) return;
+    setRefreshingSync(true);
     try {
       await onRefreshAssignedUpdates();
     } finally {
-      setRefreshingAssigned(false);
+      setRefreshingSync(false);
     }
   };
 
@@ -91,29 +92,8 @@ export function Dashboard({ user, syncNotice, onRefreshAssignedUpdates, onDismis
       {isEmployee && syncNotice && (
         <div className="mb-6 rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-3 flex items-start justify-between gap-3">
           <p className="text-sm text-indigo-800 flex-1">{syncNotice}</p>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={handleRefreshAssigned}
-              disabled={refreshingAssigned}
-              className="px-3 py-1 text-xs border border-indigo-300 text-indigo-700 rounded hover:bg-indigo-100 transition disabled:opacity-60"
-            >
-              {refreshingAssigned ? 'Refreshing...' : 'Refresh Updates'}
-            </button>
-            <button onClick={onDismissSyncNotice} className="text-indigo-700 hover:text-indigo-900 transition">
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-      )}
-
-      {isEmployee && !syncNotice && (
-        <div className="mb-6 flex justify-end">
-          <button
-            onClick={handleRefreshAssigned}
-            disabled={refreshingAssigned}
-            className="px-3 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 transition disabled:opacity-60"
-          >
-            {refreshingAssigned ? 'Refreshing assigned updates...' : 'Refresh Assigned Updates'}
+          <button onClick={onDismissSyncNotice} className="text-indigo-700 hover:text-indigo-900 transition">
+            <X className="w-4 h-4" />
           </button>
         </div>
       )}
@@ -167,12 +147,24 @@ export function Dashboard({ user, syncNotice, onRefreshAssignedUpdates, onDismis
 
         <div className="bg-white p-6 rounded-xl border border-gray-200">
           <div className="flex items-start justify-between mb-4">
-            <div className="w-12 h-12 bg-green-100 rounded-lg flex items-center justify-center">
-              <RotateCcw className="w-6 h-6 text-green-600" />
-            </div>
+            {canRefreshPendingReturns ? (
+              <button
+                onClick={handleRefreshSync}
+                disabled={refreshingSync}
+                className="w-12 h-12 bg-green-100 rounded-lg flex items-center justify-center hover:bg-green-200 transition disabled:opacity-60"
+                title={isAdmin ? 'Refresh employee submissions' : 'Refresh assigned updates'}
+                aria-label={isAdmin ? 'Refresh employee submissions' : 'Refresh assigned updates'}
+              >
+                <RotateCcw className={`w-6 h-6 text-green-600 ${refreshingSync ? 'animate-spin' : ''}`} />
+              </button>
+            ) : (
+              <div className="w-12 h-12 bg-green-100 rounded-lg flex items-center justify-center">
+                <RotateCcw className="w-6 h-6 text-green-600" />
+              </div>
+            )}
             <span className="text-sm text-orange-600 flex items-center gap-1">
               <Clock className="w-4 h-4" />
-              Pending
+              {refreshingSync ? 'Refreshing' : 'Pending'}
             </span>
           </div>
           <p className="text-gray-600 text-sm mb-1">Pending Returns</p>
