@@ -31,7 +31,7 @@ export interface Employee {
 }
 
 export type ValueCategory = 'LV' | 'MV' | 'HV';
-export type ProductStatus = 'available' | 'assigned' | 'returned';
+export type ProductStatus = 'available' | 'assigned' | 'pending_return' | 'returned';
 export type AssignmentStatus = 'active' | 'returned';
 
 export interface Product {
@@ -66,8 +66,9 @@ export type ReturnCondition =
 export type ReturnStatus = 'pending' | 'approved' | 'rejected';
 
 export interface ReturnReceiverEntry {
-  employeeId: string;
-  position: EmployeeRole;
+  employeeId?: string;
+  receiverName: string;
+  position: string;
   receivedDate: string;
   location: string;
 }

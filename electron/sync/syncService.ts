@@ -1206,7 +1206,9 @@ const readInventorySnapshot = (db: Database.Database) => {
   const products = db.prepare('SELECT * FROM products WHERE deleted_at IS NULL ORDER BY rowid ASC').all();
   const returns = db.prepare('SELECT * FROM returns WHERE deleted_at IS NULL ORDER BY created_at ASC').all();
   const returnReceivers = db
-    .prepare('SELECT return_id, employee_id, position, received_date, location FROM return_receivers ORDER BY id ASC')
+    .prepare(
+      'SELECT return_id, employee_id, receiver_name, position, received_date, location FROM return_receivers ORDER BY id ASC'
+    )
     .all();
 
   return {
@@ -1580,8 +1582,8 @@ const rebuildLocalInventoryFromDataset = (db: Database.Database, dataset: any): 
 
     const insertReceiver = db.prepare(
       `
-        INSERT INTO return_receivers (return_id, employee_id, position, received_date, location)
-        VALUES (@return_id, @employee_id, @position, @received_date, @location)
+        INSERT INTO return_receivers (return_id, employee_id, receiver_name, position, received_date, location)
+        VALUES (@return_id, @employee_id, @receiver_name, @position, @received_date, @location)
       `
     );
 
@@ -1589,6 +1591,7 @@ const rebuildLocalInventoryFromDataset = (db: Database.Database, dataset: any): 
       insertReceiver.run({
         return_id: row.return_id ?? row.returnId ?? '',
         employee_id: row.employee_id ?? row.employeeId ?? '',
+        receiver_name: row.receiver_name ?? row.receiverName ?? '',
         position: row.position ?? 'employee',
         received_date: row.received_date ?? row.receivedDate ?? '',
         location: row.location ?? ''
@@ -1848,8 +1851,8 @@ const applyRemoteReturn = (db: Database.Database, payload: any, version: number)
 
     const insertReceiver = db.prepare(
       `
-        INSERT INTO return_receivers (return_id, employee_id, position, received_date, location)
-        VALUES (@return_id, @employee_id, @position, @received_date, @location)
+        INSERT INTO return_receivers (return_id, employee_id, receiver_name, position, received_date, location)
+        VALUES (@return_id, @employee_id, @receiver_name, @position, @received_date, @location)
       `
     );
 
@@ -1857,7 +1860,8 @@ const applyRemoteReturn = (db: Database.Database, payload: any, version: number)
       for (const entry of entries) {
         insertReceiver.run({
           return_id: payload.id,
-          employee_id: entry.employeeId,
+          employee_id: entry.employeeId || payload.returnedByEmployeeId,
+          receiver_name: entry.receiverName || '',
           position: entry.position,
           received_date: entry.receivedDate,
           location: entry.location

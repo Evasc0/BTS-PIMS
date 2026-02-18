@@ -93,7 +93,8 @@ CREATE TABLE IF NOT EXISTS returns (
 CREATE TABLE IF NOT EXISTS return_receivers (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   return_id TEXT NOT NULL,
-  employee_id TEXT NOT NULL,
+  employee_id TEXT,
+  receiver_name TEXT NOT NULL DEFAULT '',
   position TEXT NOT NULL,
   received_date TEXT NOT NULL,
   location TEXT NOT NULL,

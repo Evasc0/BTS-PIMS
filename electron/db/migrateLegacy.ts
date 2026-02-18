@@ -80,9 +80,9 @@ export function importLegacyDump(db: Database.Database, dump: LegacyDump): void 
   const insertReturnReceiver = db.prepare(
     `
     INSERT INTO return_receivers (
-      return_id, employee_id, position, received_date, location
+      return_id, employee_id, receiver_name, position, received_date, location
     ) VALUES (
-      @return_id, @employee_id, @position, @received_date, @location
+      @return_id, @employee_id, @receiver_name, @position, @received_date, @location
     )
   `
   );
@@ -234,7 +234,8 @@ export function importLegacyDump(db: Database.Database, dump: LegacyDump): void 
       for (const entry of entries) {
         insertReturnReceiver.run({
           return_id: record.id,
-          employee_id: entry.employeeId,
+          employee_id: entry.employeeId || record.returnedByEmployeeId,
+          receiver_name: entry.receiverName || '',
           position: entry.position,
           received_date: entry.receivedDate,
           location: entry.location

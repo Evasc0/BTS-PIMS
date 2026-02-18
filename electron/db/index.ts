@@ -95,6 +95,9 @@ const ensureCoreSchema = (db: Database.Database): void => {
   const returnsColumns = getTableColumns(db, 'returns');
   ensureTableColumn(db, 'returns', returnsColumns, 'version', 'INTEGER NOT NULL DEFAULT 1');
 
+  const returnReceiversColumns = getTableColumns(db, 'return_receivers');
+  ensureTableColumn(db, 'return_receivers', returnReceiversColumns, 'receiver_name', "TEXT NOT NULL DEFAULT ''");
+
   const activityColumns = getTableColumns(db, 'activity_logs');
   ensureTableColumn(db, 'activity_logs', activityColumns, 'version', 'INTEGER NOT NULL DEFAULT 1');
   db.exec(
@@ -277,7 +280,7 @@ const mapReturn = (row: any, receivers: ReturnReceiverEntry[]): ReturnRecord => 
   returnedByPosition: row.returned_by_position,
   receivedDate: row.received_date,
   location: row.location,
-  receivedByEmployeeIds: receivers.map((entry) => entry.employeeId),
+  receivedByEmployeeIds: receivers.map((entry) => entry.employeeId).filter((value): value is string => Boolean(value)),
   receivedByEntries: receivers,
   createdAt: row.created_at,
   status: row.status,
@@ -289,10 +292,11 @@ const mapReturn = (row: any, receivers: ReturnReceiverEntry[]): ReturnRecord => 
 
 const fetchReturnReceivers = (db: Database.Database, returnId: string): ReturnReceiverEntry[] => {
   const rows = db
-    .prepare('SELECT employee_id, position, received_date, location FROM return_receivers WHERE return_id = ?')
+    .prepare('SELECT employee_id, receiver_name, position, received_date, location FROM return_receivers WHERE return_id = ?')
     .all(returnId);
   return rows.map((row: any) => ({
-    employeeId: row.employee_id,
+    employeeId: row.employee_id ?? undefined,
+    receiverName: row.receiver_name || '',
     position: row.position,
     receivedDate: row.received_date,
     location: row.location
@@ -302,21 +306,23 @@ const fetchReturnReceivers = (db: Database.Database, returnId: string): ReturnRe
 const insertOrUpdateReturnReceivers = (
   db: Database.Database,
   returnId: string,
+  fallbackEmployeeId: string,
   receivers: ReturnReceiverEntry[] = []
 ) => {
   db.prepare('DELETE FROM return_receivers WHERE return_id = ?').run(returnId);
   if (!receivers.length) return;
   const insertReceiver = db.prepare(
     `
-      INSERT INTO return_receivers (return_id, employee_id, position, received_date, location)
-      VALUES (@return_id, @employee_id, @position, @received_date, @location)
+      INSERT INTO return_receivers (return_id, employee_id, receiver_name, position, received_date, location)
+      VALUES (@return_id, @employee_id, @receiver_name, @position, @received_date, @location)
     `
   );
   const tx = db.transaction((entries: ReturnReceiverEntry[]) => {
     for (const entry of entries) {
       insertReceiver.run({
         return_id: returnId,
-        employee_id: entry.employeeId,
+        employee_id: entry.employeeId || fallbackEmployeeId,
+        receiver_name: entry.receiverName || '',
         position: entry.position,
         received_date: entry.receivedDate,
         location: entry.location
@@ -771,7 +777,7 @@ export const dataStore = {
         deleted_at: null,
         version: 1
       });
-      insertOrUpdateReturnReceivers(db, record.id, record.receivedByEntries || []);
+      insertOrUpdateReturnReceivers(db, record.id, record.returnedByEmployeeId, record.receivedByEntries || []);
       enqueueOutbox(db, 'returns', record.id, 'insert', { ...record, version: 1 });
     },
     update: (id: string, changes: Partial<ReturnRecord>): void => {
@@ -827,7 +833,7 @@ export const dataStore = {
         last_modified: now,
         version: nextVersion
       });
-      insertOrUpdateReturnReceivers(db, id, updated.receivedByEntries || []);
+      insertOrUpdateReturnReceivers(db, id, updated.returnedByEmployeeId, updated.receivedByEntries || []);
       enqueueOutbox(db, 'returns', id, 'update', updated);
     },
     remove: (id: string): void => {

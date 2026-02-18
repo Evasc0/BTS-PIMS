@@ -243,14 +243,37 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
     });
   };
 
-  const normalizeEmployeeRole = (value: string): EmployeeRole | null => {
-    const normalized = value.trim().toLowerCase();
-    if (normalized === 'system_admin' || normalized === 'employee') {
-      return normalized;
-    }
-    if (normalized === 'admin') return 'system_admin';
-    return null;
-  };
+  const serializeReturnAudit = (input: {
+    action: 'submitted' | 'approved' | 'rejected';
+    returnId: string;
+    rrspNumber: string;
+    productId: string;
+    productNumber?: string;
+    submittedBy: string;
+    approvedBy?: string;
+    rejectedBy?: string;
+    quantity: number;
+    quantityBefore: number;
+    quantityAfter: number;
+    status: ReturnStatus;
+    note?: string;
+  }) =>
+    JSON.stringify({
+      action: input.action,
+      return_id: input.returnId,
+      rrsp_number: input.rrspNumber,
+      product_id: input.productId,
+      property_number: input.productNumber || null,
+      submitted_by: input.submittedBy,
+      approved_by: input.approvedBy || null,
+      rejected_by: input.rejectedBy || null,
+      status: input.status,
+      quantity: input.quantity,
+      quantity_before: input.quantityBefore,
+      quantity_after: input.quantityAfter,
+      timestamp: nowIso(),
+      note: input.note || null
+    });
 
   const autoPushEmployeeSubmission = async (): Promise<string> => {
     if (user.role !== 'employee' || !window.api?.sync) return '';
@@ -328,44 +351,37 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
       return;
     }
 
-    const receiverEntries: Array<{
-      employeeId: string;
-      position: EmployeeRole;
-      receivedDate: string;
-      location: string;
-    }> = [];
-
-    for (const receiver of validReceivers) {
-      const role = normalizeEmployeeRole(receiver.position);
-      if (!role) {
-        setFormError(`Receiver position must be one of: ${roleOptions.join(', ')}.`);
-        return;
-      }
-
-      const receiverNameKey = receiver.receiverName.trim().toLowerCase();
-      const resolvedEmployee = isEmployee
-        ? adminEmployees.find((employee) => employee.fullName.trim().toLowerCase() === receiverNameKey)
-        : employeesByName.get(receiverNameKey);
-
-      if (!resolvedEmployee) {
-        setFormError(
-          isEmployee
-            ? 'Receiver must match an active system admin full name.'
-            : 'Receiver name must match an existing employee full name.'
-        );
-        return;
-      }
-
-      if (isEmployee && resolvedEmployee.role !== 'system_admin') {
-        setFormError('Employees can only return to system admin accounts.');
-        return;
-      }
-
-      receiverEntries.push({
-        employeeId: resolvedEmployee.id,
-        position: isEmployee ? 'system_admin' : role,
+    const receiverEntries = validReceivers.map((receiver) => {
+      const receiverName = receiver.receiverName.trim();
+      const matchedEmployee = employeesByName.get(receiverName.toLowerCase());
+      return {
+        employeeId: matchedEmployee?.id,
+        receiverName,
+        position: receiver.position.trim(),
         receivedDate: receiver.receivedDate,
         location: receiver.location.trim()
+      };
+    });
+
+    if (isEmployee) {
+      const primaryAdmin = adminEmployees[0];
+      if (!primaryAdmin) {
+        setFormError('No active system admin account found for receiver routing.');
+        return;
+      }
+
+      const firstReceiver = receiverEntries[0];
+      if (!firstReceiver || !firstReceiver.receivedDate || !firstReceiver.location) {
+        setFormError('Received date and location are required.');
+        return;
+      }
+
+      receiverEntries.splice(0, receiverEntries.length, {
+        employeeId: primaryAdmin.id,
+        receiverName: primaryAdmin.fullName,
+        position: 'system_admin',
+        receivedDate: firstReceiver.receivedDate,
+        location: firstReceiver.location
       });
     }
 
@@ -390,44 +406,80 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
         setFormError('You can only return properties currently assigned to your account.');
         return;
       }
+      const alreadyPending = targetProducts.some((product) => product.status === 'pending_return');
+      if (alreadyPending) {
+        setFormError('One or more selected properties already have a pending return request.');
+        return;
+      }
     }
 
     for (const product of targetProducts) {
       const returnId = createId();
+      const returnQuantity = 1;
+      const quantityBefore = product.onHandPerCount;
+      const nextStatus: ReturnStatus = isAdmin ? 'approved' : 'pending';
+
       await db.returns.add({
         id: returnId,
         rrspNumber,
         productId: product.id,
         returnDate: formState.returnDate,
-        quantity: 1,
+        quantity: returnQuantity,
         condition: formState.condition as ReturnCondition,
         remarks: formState.remarks.trim(),
         returnedByEmployeeId: user.id,
         returnedByPosition: user.role,
         receivedDate: primaryReceiver.receivedDate,
         location: primaryReceiver.location,
-        receivedByEmployeeIds: receiverEntries.map((entry) => entry.employeeId),
+        receivedByEmployeeIds: receiverEntries.map((entry) => entry.employeeId).filter((value): value is string => Boolean(value)),
         receivedByEntries: receiverEntries,
         createdAt: nowIso(),
-        status: 'pending'
+        status: nextStatus,
+        processedByEmployeeId: isAdmin ? user.id : undefined,
+        processedDate: isAdmin ? nowIso() : undefined,
+        processingNotes: isAdmin ? 'Auto-approved system admin return.' : undefined
       });
 
-      const updatedOnHand = product.onHandPerCount + 1;
-      const updatedBalance = product.balancePerCard + 1;
-      await db.products.update(product.id, {
-        onHandPerCount: updatedOnHand,
-        balancePerCard: updatedBalance,
-        total: product.unitValue * updatedOnHand,
-        assignedToEmployeeId: undefined,
-        status: 'returned'
-      });
+      if (isAdmin) {
+        const quantityAfter = quantityBefore + returnQuantity;
+        if (quantityAfter < 0) {
+          setFormError('Inventory cannot become negative.');
+          return;
+        }
+
+        await db.products.update(product.id, {
+          onHandPerCount: quantityAfter,
+          assignedToEmployeeId: undefined,
+          assignmentStatus: 'returned',
+          status: 'returned'
+        });
+      } else {
+        await db.products.update(product.id, {
+          assignedToEmployeeId: undefined,
+          assignmentStatus: 'returned',
+          status: 'pending_return'
+        });
+      }
 
       await logActivity({
         action: 'SUBMIT',
         entityType: 'return',
         entityId: returnId,
         performedByEmployeeId: user.id,
-        details: `Return submitted: ${rrspNumber} (${product.propertyNumber})`
+        details: serializeReturnAudit({
+          action: 'submitted',
+          returnId,
+          rrspNumber,
+          productId: product.id,
+          productNumber: product.propertyNumber,
+          submittedBy: user.id,
+          approvedBy: isAdmin ? user.id : undefined,
+          quantity: returnQuantity,
+          quantityBefore,
+          quantityAfter: isAdmin ? quantityBefore + returnQuantity : quantityBefore,
+          status: nextStatus,
+          note: isAdmin ? 'Auto-approved system admin return.' : 'Pending system admin approval.'
+        })
       });
     }
 
@@ -442,18 +494,56 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
 
   const handleApprove = async () => {
     if (!selectedReturn) return;
+    if (selectedReturn.status !== 'pending') {
+      setSelectedReturn(null);
+      setProcessingNotes('');
+      return;
+    }
+
+    const product = productMap.get(selectedReturn.productId);
+    const quantity = Math.max(1, Number(selectedReturn.quantity || 1));
+    const quantityBefore = Number(product?.onHandPerCount || 0);
+    const quantityAfter = quantityBefore + quantity;
+    if (quantityAfter < 0) {
+      setFormError('Inventory cannot become negative.');
+      return;
+    }
+
     await db.returns.update(selectedReturn.id, {
       status: 'approved',
       processedByEmployeeId: user.id,
       processedDate: nowIso(),
       processingNotes: processingNotes.trim()
     });
+
+    if (product) {
+      await db.products.update(product.id, {
+        onHandPerCount: quantityAfter,
+        assignedToEmployeeId: undefined,
+        assignmentStatus: 'returned',
+        status: 'returned'
+      });
+    }
+
     await logActivity({
       action: 'UPDATE',
       entityType: 'return',
       entityId: selectedReturn.id,
       performedByEmployeeId: user.id,
-      details: `Return approved: ${selectedReturn.rrspNumber}`
+      details: serializeReturnAudit({
+        action: 'approved',
+        returnId: selectedReturn.id,
+        rrspNumber: selectedReturn.rrspNumber,
+        productId: selectedReturn.productId,
+        productNumber: product?.propertyNumber,
+        submittedBy: selectedReturn.returnedByEmployeeId,
+        approvedBy: user.id,
+        quantity,
+        quantityBefore,
+        quantityAfter,
+        status: 'approved',
+        note: processingNotes.trim()
+      })
     });
     setSelectedReturn(null);
     setProcessingNotes('');
@@ -461,19 +551,47 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
 
   const handleReject = async (returnItem: ReturnRecord) => {
     if (!canProcess) return;
+    if (returnItem.status !== 'pending') return;
     const notes = window.prompt('Add rejection notes (optional):') || '';
+    const rejectionNote = notes.trim() || 'Your return request was rejected. Please review remarks.';
+    const product = productMap.get(returnItem.productId);
+    const quantity = Math.max(1, Number(returnItem.quantity || 1));
+    const quantityBefore = Number(product?.onHandPerCount || 0);
+
     await db.returns.update(returnItem.id, {
       status: 'rejected',
       processedByEmployeeId: user.id,
       processedDate: nowIso(),
-      processingNotes: notes.trim()
+      processingNotes: rejectionNote
     });
+
+    if (product) {
+      await db.products.update(product.id, {
+        assignedToEmployeeId: returnItem.returnedByEmployeeId,
+        assignmentStatus: 'active',
+        status: 'assigned'
+      });
+    }
+
     await logActivity({
       action: 'UPDATE',
       entityType: 'return',
       entityId: returnItem.id,
       performedByEmployeeId: user.id,
-      details: `Return rejected: ${returnItem.rrspNumber}`
+      details: serializeReturnAudit({
+        action: 'rejected',
+        returnId: returnItem.id,
+        rrspNumber: returnItem.rrspNumber,
+        productId: returnItem.productId,
+        productNumber: product?.propertyNumber,
+        submittedBy: returnItem.returnedByEmployeeId,
+        rejectedBy: user.id,
+        quantity,
+        quantityBefore,
+        quantityAfter: quantityBefore,
+        status: 'rejected',
+        note: rejectionNote
+      })
     });
   };
 
@@ -603,16 +721,17 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
               <div className="bg-gray-50 rounded-lg p-4 mb-4">
                 <p className="text-sm font-medium text-gray-900 mb-3">Receiver Information</p>
                 {receivers.map((receiver, index) => {
-                  const receiverEmployee = employeeMap.get(receiver.employeeId);
+                  const receiverEmployee = receiver.employeeId ? employeeMap.get(receiver.employeeId) : undefined;
+                  const receiverName = receiver.receiverName || receiverEmployee?.fullName || 'Unknown';
                   return (
-                    <div key={`${receiver.employeeId}-${index}`} className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-2 last:mb-0">
+                    <div key={`${receiver.employeeId || 'ext'}-${index}-${receiverName}`} className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-2 last:mb-0">
                       <div>
                         <p className="text-xs text-gray-600">Name</p>
-                        <p className="text-sm font-medium text-gray-900">{receiverEmployee?.fullName || 'Unknown'}</p>
+                        <p className="text-sm font-medium text-gray-900">{receiverName}</p>
                       </div>
                       <div>
                         <p className="text-xs text-gray-600">Position</p>
-                        <p className="text-sm text-gray-900 capitalize">{receiver.position}</p>
+                        <p className="text-sm text-gray-900">{receiver.position}</p>
                       </div>
                       <div>
                         <p className="text-xs text-gray-600">Received Date</p>
@@ -887,9 +1006,11 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
                             type="text"
                             value={receiver.receiverName}
                             onChange={(e) => handleReceiverChange(index, 'receiverName', e.target.value)}
-                            placeholder={isEmployee ? 'Type system admin full name' : 'Type employee full name'}
-                            list={isEmployee ? 'receiver-admin-names' : 'receiver-employee-names'}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
+                            placeholder={isEmployee ? 'System admin' : 'Type receiver name'}
+                            readOnly={isEmployee}
+                            className={`w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none ${
+                              isEmployee ? 'bg-gray-50 text-gray-600' : ''
+                            }`}
                             required
                           />
                         </div>
@@ -899,8 +1020,11 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
                             type="text"
                             value={receiver.position}
                             onChange={(e) => handleReceiverChange(index, 'position', e.target.value)}
-                            placeholder="system_admin | employee"
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
+                            placeholder={isEmployee ? 'system_admin' : 'Type receiver position'}
+                            readOnly={isEmployee}
+                            className={`w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none ${
+                              isEmployee ? 'bg-gray-50 text-gray-600' : ''
+                            }`}
                             required
                           />
                         </div>
@@ -928,16 +1052,6 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
                     </div>
                   ))}
                 </div>
-                <datalist id="receiver-employee-names">
-                  {(employees || []).map((employee) => (
-                    <option key={`all-${employee.id}`} value={employee.fullName} />
-                  ))}
-                </datalist>
-                <datalist id="receiver-admin-names">
-                  {adminEmployees.map((employee) => (
-                    <option key={`admin-${employee.id}`} value={employee.fullName} />
-                  ))}
-                </datalist>
               </div>
 
               {formError && <p className="text-sm text-red-600">{formError}</p>}
