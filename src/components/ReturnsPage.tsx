@@ -63,7 +63,6 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
   const [formState, setFormState] = useState<ReturnFormState>(emptyReturnForm);
   const [formError, setFormError] = useState<string | null>(null);
   const [processingNotes, setProcessingNotes] = useState('');
-  const [approvalRrspNumber, setApprovalRrspNumber] = useState('');
   const [submitSyncMessage, setSubmitSyncMessage] = useState<string | null>(null);
   const [propertySearch, setPropertySearch] = useState('');
   const [debouncedPropertySearch, setDebouncedPropertySearch] = useState('');
@@ -313,6 +312,44 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
     }
   };
 
+  const autoPushAdminReturnUpdates = async (): Promise<string | null> => {
+    if (!isAdmin || !window.api?.sync || !navigator.onLine) return null;
+
+    try {
+      let status = await window.api.sync.getStatus(user.id);
+      if (!status.configured) return null;
+
+      if (status.mode !== 'online') {
+        status = await window.api.sync.setMode(user.id, true);
+      }
+
+      if (status.fullSyncRequired) {
+        return status.fullSyncReason || 'Full sync is required before return status updates can be pushed.';
+      }
+
+      const localChanges = await window.api.sync.viewLocalChanges(user.id);
+      const returnOutboxIds = (localChanges?.changes || [])
+        .filter((change: any) => change.entityType === 'returns')
+        .map((change: any) => Number(change.outboxId))
+        .filter((id: number) => Number.isFinite(id));
+
+      if (!returnOutboxIds.length) return null;
+
+      const result = await window.api.sync.push(user.id, { outboxIds: returnOutboxIds });
+      if (result.status === 'synced') {
+        return `Synced ${result.pushedCount} return update(s).`;
+      }
+
+      if (result.status === 'error') {
+        return result.error || 'Failed to push return status updates.';
+      }
+
+      return null;
+    } catch (error: any) {
+      return error?.message || 'Failed to push return status updates.';
+    }
+  };
+
   const handleSubmitReturn = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!canSubmit) return;
@@ -485,6 +522,9 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
     if (user.role === 'employee') {
       const message = await autoPushEmployeeSubmission();
       setSubmitSyncMessage(message);
+    } else if (isAdmin) {
+      const adminSyncMessage = await autoPushAdminReturnUpdates();
+      if (adminSyncMessage) setSubmitSyncMessage(adminSyncMessage);
     }
 
     setShowSubmitModal(false);
@@ -496,12 +536,6 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
     if (selectedReturn.status !== 'pending') {
       setSelectedReturn(null);
       setProcessingNotes('');
-      setApprovalRrspNumber('');
-      return;
-    }
-    const normalizedRrspNumber = approvalRrspNumber.trim();
-    if (!normalizedRrspNumber) {
-      window.alert('RRSP No. is required before approving this return.');
       return;
     }
 
@@ -515,7 +549,6 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
     }
 
     await db.returns.update(selectedReturn.id, {
-      rrspNumber: normalizedRrspNumber,
       status: 'approved',
       processedByEmployeeId: user.id,
       processedDate: nowIso(),
@@ -539,7 +572,7 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
       details: serializeReturnAudit({
         action: 'approved',
         returnId: selectedReturn.id,
-        rrspNumber: normalizedRrspNumber,
+        rrspNumber: selectedReturn.rrspNumber,
         productId: selectedReturn.productId,
         productNumber: product?.propertyNumber,
         submittedBy: selectedReturn.returnedByEmployeeId,
@@ -551,9 +584,10 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
         note: processingNotes.trim()
       })
     });
+    const adminSyncMessage = await autoPushAdminReturnUpdates();
+    if (adminSyncMessage) setSubmitSyncMessage(adminSyncMessage);
     setSelectedReturn(null);
     setProcessingNotes('');
-    setApprovalRrspNumber('');
   };
 
   const handleReject = async (returnItem: ReturnRecord) => {
@@ -600,6 +634,8 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
         note: rejectionNote
       })
     });
+    const adminSyncMessage = await autoPushAdminReturnUpdates();
+    if (adminSyncMessage) setSubmitSyncMessage(adminSyncMessage);
   };
 
   return (
@@ -686,7 +722,12 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
                     </div>
                     <div>
                       <h3 className="font-medium text-gray-900">{product?.article || 'Unknown product'}</h3>
-                      <p className="text-sm text-gray-600">RRSP No: {returnItem.rrspNumber || 'Pending admin assignment'}</p>
+                      <p className="text-sm text-gray-600">
+                        RRSP No:{' '}
+                        {returnItem.returnedByPosition === 'system_admin'
+                          ? returnItem.rrspNumber || 'N/A'
+                          : 'N/A (employee return)'}
+                      </p>
                     </div>
                   </div>
                 </div>
@@ -780,7 +821,6 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
                     onClick={() => {
                       setSelectedReturn(returnItem);
                       setProcessingNotes('');
-                      setApprovalRrspNumber(returnItem.rrspNumber || '');
                     }}
                     className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition flex items-center justify-center gap-2"
                   >
@@ -1095,12 +1135,6 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
             </div>
             <div className="mb-4">
               <p className="text-sm text-gray-600 mb-2">
-                RRSP No:{' '}
-                <span className="font-medium text-gray-900">
-                  {selectedReturn.rrspNumber || 'Pending admin assignment'}
-                </span>
-              </p>
-              <p className="text-sm text-gray-600 mb-2">
                 Product: <span className="font-medium text-gray-900">{productMap.get(selectedReturn.productId)?.article || 'Unknown'}</span>
               </p>
               <p className="text-sm text-gray-600 mb-2">
@@ -1114,17 +1148,6 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
               </p>
             </div>
             <form className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">RRSP No. *</label>
-                <input
-                  type="text"
-                  value={approvalRrspNumber}
-                  onChange={(e) => setApprovalRrspNumber(e.target.value)}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
-                  placeholder="Enter approved RRSP number"
-                  required
-                />
-              </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Processing Notes</label>
                 <textarea

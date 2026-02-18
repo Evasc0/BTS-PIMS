@@ -3,6 +3,7 @@ import { dataStore } from '../db';
 import { authService } from '../auth/authService';
 import {
   autoPullEmployeeSubmissions,
+  checkPendingFullSyncRequest,
   clearSyncActorAccessToken,
   getFullSyncSession,
   getLocalChanges,
@@ -236,6 +237,10 @@ export function registerIpc(mainWindow: BrowserWindow): void {
     const result = await requestFullSync(actor);
     notify('sync_state', [`sync:${actor.userId}`]);
     return result;
+  });
+  ipcMain.handle('sync:full:check', async (_evt, userId: string) => {
+    const actor = resolveSyncActor(userId);
+    return checkPendingFullSyncRequest(actor);
   });
   ipcMain.handle('sync:full:session', async (_evt, userId: string) => {
     const actor = resolveSyncActor(userId);

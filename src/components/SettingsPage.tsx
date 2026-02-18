@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Settings, Save, Bell, Lock, Database, Mail, Globe, Shield, Upload, Download } from 'lucide-react';
+import { Settings, Save, Bell, Lock, Database, Mail, Globe, Shield } from 'lucide-react';
 import { useLiveQuery } from '../lib/useLiveQuery';
 import type { Employee, SystemSettings } from '../lib/types';
 import { db } from '../lib/db';
@@ -24,6 +24,12 @@ interface SyncLogEntry {
 interface SyncStatusSnapshot {
   fullSyncRequired?: boolean;
   fullSyncReason?: string | null;
+  fullSyncEligible?: boolean;
+  fullSyncEligibilityReason?: string | null;
+  deviceId?: string | null;
+  lastAutoSyncAt?: string | null;
+  lastFullSyncAt?: string | null;
+  deviceRegisteredAt?: string | null;
   lastSuccessfulSyncAt?: string | null;
   retentionDays?: number;
   maxOfflineDays?: number;
@@ -36,6 +42,18 @@ interface SyncStatusSnapshot {
   lastConflictCount: number;
   lastStatus: string;
   lastError: string | null;
+  lastWarning?: string | null;
+  relayQueueRows?: number;
+  relayQueuePayloadMb?: number;
+  relayStorageMb?: number;
+  relayOldestQueueAt?: string | null;
+  relayLastCheckedAt?: string | null;
+  relayDbLimitMb?: number;
+  relayStorageLimitMb?: number;
+  relayDbSoftThreshold?: number;
+  relayDbHardThreshold?: number;
+  relayStorageSoftThreshold?: number;
+  relayStorageHardThreshold?: number;
   pendingLocalChanges: number;
   recentLogs: SyncLogEntry[];
 }
@@ -60,11 +78,16 @@ interface SyncLocalChangesSummary {
 
 interface FullSyncRequestSummary {
   requestId: string;
+  requestingDeviceId?: string;
+  targetDeviceId?: string;
+  requestedBy?: string | null;
   requesterDeviceId: string;
   requesterUserId: string | null;
   requestedAt: string;
   status: string;
   lastSuccessfulSyncAt: string | null;
+  estimatedRecords?: number | null;
+  estimatedSizeMb?: number | null;
   estimatedDbSizeBytes: number | null;
   approvedAt: string | null;
   approvedByUserId: string | null;
@@ -137,10 +160,10 @@ export function SettingsPage({ user }: SettingsPageProps) {
   const [showPushConfirm, setShowPushConfirm] = useState(false);
   const [remotePreview, setRemotePreview] = useState<{ count: number; totalSizeKb: number; message?: string } | null>(null);
   const [syncRelayConnected, setSyncRelayConnected] = useState(false);
-  const [fullSyncBusy, setFullSyncBusy] = useState<'request' | 'pull' | 'approve' | 'reject' | 'upload' | null>(null);
+  const [fullSyncBusy, setFullSyncBusy] = useState<'check' | 'request' | 'pull' | 'approve' | 'reject' | 'upload' | null>(null);
   const [fullSyncMessage, setFullSyncMessage] = useState('');
   const [fullSyncSession, setFullSyncSession] = useState<FullSyncSessionSnapshot | null>(null);
-  const [adminFullSyncRequests, setAdminFullSyncRequests] = useState<FullSyncRequestSummary[]>([]);
+  const [pendingFullSyncRequest, setPendingFullSyncRequest] = useState<FullSyncRequestSummary | null>(null);
   const [networkOnline, setNetworkOnline] = useState<boolean>(navigator.onLine);
 
   const settings = useLiveQuery(() => db.settings.get('system'), []);
@@ -314,15 +337,6 @@ export function SettingsPage({ user }: SettingsPageProps) {
       setFullSyncSession(session);
     } catch {
       setFullSyncSession(null);
-    }
-
-    if (isAdmin && window.api?.sync?.fullSyncAdminList) {
-      try {
-        const listResult = await window.api.sync.fullSyncAdminList(user.id);
-        setAdminFullSyncRequests(listResult.requests || []);
-      } catch {
-        setAdminFullSyncRequests([]);
-      }
     }
   };
 
@@ -612,6 +626,20 @@ export function SettingsPage({ user }: SettingsPageProps) {
     if (!window.api?.sync?.fullSyncRequest) return;
     setFullSyncBusy('request');
     try {
+      if (window.api?.sync?.previewPull) {
+        const preview = await window.api.sync.previewPull(user.id);
+        if (preview.status === 'ok') {
+          const estimatedSize = formatSizeFromKb(preview.totalSizeKb || 0);
+          const proceed = window.confirm(
+            `Full Sync Required\nRecords: ${Number(preview.newRecords || 0).toLocaleString()}\nEstimated Size: ${estimatedSize}\n\nProceed?`
+          );
+          if (!proceed) {
+            setFullSyncMessage('Full Sync request cancelled.');
+            return;
+          }
+        }
+      }
+
       const result = await window.api.sync.fullSyncRequest(user.id);
       if (result.status === 'requested') {
         setFullSyncMessage('Full Sync requested. Waiting for Master approval.');
@@ -696,16 +724,127 @@ export function SettingsPage({ user }: SettingsPageProps) {
     }
   };
 
+  const pullApprovedFullSyncBatches = async () => {
+    if (!window.api?.sync?.fullSyncPullNext) return;
+
+    let batchNumber = 0;
+    while (batchNumber < 500) {
+      const result = await window.api.sync.fullSyncPullNext(user.id);
+      if (result.status === 'pulled') {
+        batchNumber += 1;
+        setFullSyncMessage(`Syncing batch ${batchNumber}...`);
+        continue;
+      }
+      if (result.status === 'completed') {
+        setFullSyncMessage('Full Sync completed successfully. Local inventory was rebuilt.');
+        return;
+      }
+      if (result.status === 'waiting_chunk') {
+        setFullSyncMessage('Full Sync approved. Waiting for the next batch from relay.');
+        return;
+      }
+      if (result.status === 'pending') {
+        setFullSyncMessage('Full sync request is still pending approval.');
+        return;
+      }
+      if (result.status === 'idle') {
+        setFullSyncMessage(result.error || 'No active full sync request for this device.');
+        return;
+      }
+      setFullSyncMessage(result.error || 'Full sync failed while pulling batches.');
+      return;
+    }
+
+    setFullSyncMessage('Full sync paused after 500 batches. Run Full Sync Check again to continue.');
+  };
+
+  const handleFullSyncCheck = async () => {
+    if (!window.api?.sync?.fullSyncCheck) return;
+    if (!navigator.onLine) {
+      setFullSyncMessage('Internet connection required.');
+      return;
+    }
+    if (!syncStatus?.configured) {
+      setFullSyncMessage('Supabase is not configured.');
+      return;
+    }
+
+    setFullSyncBusy('check');
+    try {
+      const result = await window.api.sync.fullSyncCheck(user.id);
+      if (result.status === 'pending' && result.request) {
+        setPendingFullSyncRequest(result.request);
+        setFullSyncMessage('');
+      } else if (result.status === 'none') {
+        setPendingFullSyncRequest(null);
+        setFullSyncMessage('No pending full sync request for this device.');
+      } else {
+        setPendingFullSyncRequest(null);
+        setFullSyncMessage(result.error || 'Unable to check full sync request.');
+      }
+      await loadFullSyncData();
+    } catch (error: any) {
+      setPendingFullSyncRequest(null);
+      setFullSyncMessage(error?.message || 'Unable to check full sync request.');
+    } finally {
+      setFullSyncBusy(null);
+    }
+  };
+
+  const handleApprovePendingFullSync = async () => {
+    if (!pendingFullSyncRequest || !window.api?.sync?.fullSyncAdminReview) return;
+    setFullSyncBusy('approve');
+    try {
+      const result = await window.api.sync.fullSyncAdminReview(user.id, pendingFullSyncRequest.requestId, 'approve');
+      if (result.status === 'approved') {
+        setPendingFullSyncRequest(null);
+        setFullSyncMessage('Full sync request approved. Starting batch sync...');
+        await pullApprovedFullSyncBatches();
+      } else {
+        setFullSyncMessage(result.error || 'Failed to approve full sync request.');
+      }
+      await loadFullSyncData();
+    } catch (error: any) {
+      setFullSyncMessage(error?.message || 'Failed to approve full sync request.');
+    } finally {
+      setFullSyncBusy(null);
+    }
+  };
+
+  const handleRejectPendingFullSync = async () => {
+    if (!pendingFullSyncRequest || !window.api?.sync?.fullSyncAdminReview) return;
+    setFullSyncBusy('reject');
+    try {
+      const result = await window.api.sync.fullSyncAdminReview(
+        user.id,
+        pendingFullSyncRequest.requestId,
+        'reject',
+        'Full sync request rejected.'
+      );
+      if (result.status === 'rejected') {
+        setPendingFullSyncRequest(null);
+        setFullSyncMessage('Full sync request rejected.');
+      } else {
+        setFullSyncMessage(result.error || 'Failed to reject full sync request.');
+      }
+      await loadFullSyncData();
+    } catch (error: any) {
+      setFullSyncMessage(error?.message || 'Failed to reject full sync request.');
+    } finally {
+      setFullSyncBusy(null);
+    }
+  };
+
   const databaseStatus = db.isOpen() ? 'Connected and operational' : 'Disconnected';
   const syncModeOnline = syncStatus?.mode === 'online';
   const fullSyncRequired = Boolean(syncStatus?.fullSyncRequired);
+  const fullSyncEligible = syncStatus?.fullSyncEligible !== false;
   const syncConnectivity = syncModeOnline && networkOnline && syncStatus?.configured;
   const lastSyncAt =
     syncStatus?.lastPushAt && syncStatus?.lastPullAt
       ? (syncStatus.lastPushAt > syncStatus.lastPullAt ? syncStatus.lastPushAt : syncStatus.lastPullAt)
       : syncStatus?.lastPushAt || syncStatus?.lastPullAt || null;
   const sessionRequest = fullSyncSession?.request || null;
-  const sessionNextChunk = fullSyncSession?.nextChunk || null;
 
   if (!settings) {
     return (
@@ -1048,37 +1187,11 @@ export function SettingsPage({ user }: SettingsPageProps) {
                   </button>
 
                   <div className="border border-gray-200 rounded-lg p-4 space-y-4">
-                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                      <div>
-                        <p className="font-medium text-gray-900">Manual Sync Control</p>
-                        <p className="text-sm text-gray-600">Git-style staging, push, and pull for admin devices only.</p>
-                      </div>
-                      <div className="flex items-center gap-3">
-                        <button
-                          onClick={handleOpenManualSyncPanel}
-                          className="px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition"
-                        >
-                          Manual Sync
-                        </button>
-                        <div className="flex items-center gap-2">
-                          <span className={`text-xs font-medium ${syncModeOnline ? 'text-gray-500' : 'text-gray-900'}`}>OFFLINE</span>
-                          <button
-                            onClick={() => handleSyncModeChange(!syncModeOnline)}
-                            disabled={syncBusy === 'mode'}
-                            className={`relative w-16 h-8 rounded-full border transition-all duration-200 ${
-                              syncModeOnline ? 'bg-emerald-100 border-emerald-300' : 'bg-gray-200 border-gray-300'
-                            } hover:scale-[1.03] disabled:opacity-60`}
-                            aria-label={syncModeOnline ? 'Switch to offline mode' : 'Switch to online mode'}
-                          >
-                            <span
-                              className={`absolute top-0.5 left-0.5 h-6 w-6 rounded-full bg-white shadow transition-transform duration-200 ${
-                                syncModeOnline ? 'translate-x-8' : 'translate-x-0'
-                              }`}
-                            />
-                          </button>
-                          <span className={`text-xs font-medium ${syncModeOnline ? 'text-emerald-700' : 'text-gray-500'}`}>ONLINE</span>
-                        </div>
-                      </div>
+                    <div>
+                      <p className="font-medium text-gray-900">Automatic Sync Engine</p>
+                      <p className="text-sm text-gray-600">
+                        Push and pull run automatically in the background when internet is available and the user is authenticated.
+                      </p>
                     </div>
 
                     {!syncStatus?.configured && (
@@ -1087,15 +1200,15 @@ export function SettingsPage({ user }: SettingsPageProps) {
                       </p>
                     )}
 
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3">
                       <div className="border border-gray-200 rounded-lg p-3">
-                        <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Mode</p>
-                        <p className="font-medium text-gray-900">{syncModeOnline ? 'Online' : 'Offline'}</p>
+                        <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Sync Mode</p>
+                        <p className="font-medium text-gray-900">Automatic</p>
                       </div>
                       <div className="border border-gray-200 rounded-lg p-3">
-                        <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Connection</p>
-                        <p className={`font-medium ${syncRelayConnected ? 'text-emerald-700' : 'text-red-700'}`}>
-                          {syncRelayConnected ? 'Connected' : 'Not Connected'}
+                        <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Connectivity</p>
+                        <p className={`font-medium ${syncConnectivity ? 'text-emerald-700' : 'text-gray-700'}`}>
+                          {syncConnectivity ? 'Online' : 'Offline'}
                         </p>
                       </div>
                       <div className="border border-gray-200 rounded-lg p-3">
@@ -1103,122 +1216,27 @@ export function SettingsPage({ user }: SettingsPageProps) {
                         <p className="font-medium text-gray-900">{syncStatus?.pendingLocalChanges ?? 0}</p>
                       </div>
                       <div className="border border-gray-200 rounded-lg p-3">
-                        <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Last Sync</p>
-                        <p className="font-medium text-gray-900">{formatTimestamp(lastSyncAt)}</p>
+                        <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Last Auto Sync</p>
+                        <p className="font-medium text-gray-900">{formatTimestamp(syncStatus?.lastAutoSyncAt || lastSyncAt)}</p>
                       </div>
-                    </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                      <button
-                        onClick={handleViewLocalChanges}
-                        disabled={viewChangesBusy}
-                        className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition disabled:opacity-60"
-                      >
-                        {viewChangesBusy ? 'Checking Changes...' : 'View Local Changes'}
-                      </button>
-                    </div>
-
-                    {localChanges && (
-                      <div className="border border-gray-200 rounded-lg p-3 space-y-3">
-                        <p className="text-sm font-medium text-gray-900">Local Pending Changes</p>
-                        {localChanges.total === 0 ? (
-                          <p className="text-sm text-gray-600">No pending local changes.</p>
-                        ) : (
-                          <div className="space-y-3">
-                            <div className="text-sm text-gray-700">
-                              <p>
-                                Total: {localChanges.total} change(s) | {formatKb(localChanges.totalSizeKb)}
-                              </p>
-                              <p>
-                                Safe to push: {localChanges.safeToPush ? 'YES' : 'NO'} | Estimated batches: {localChanges.recommendedBatchCount}
-                              </p>
-                            </div>
-
-                            <div className="space-y-2">
-                              <p className="text-sm font-medium text-gray-800">Stage by Category</p>
-                              <div className="flex items-center gap-2">
-                                <button
-                                  onClick={handleMarkAll}
-                                  className="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-50"
-                                >
-                                  Mark All
-                                </button>
-                                <button
-                                  onClick={handleUnmarkAll}
-                                  className="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-50"
-                                >
-                                  Unmark All
-                                </button>
-                              </div>
-                              {localChanges.categories.map((item) => (
-                                <label key={item.key} className="flex items-center justify-between text-sm border border-gray-200 rounded-lg px-3 py-2">
-                                  <span className="flex items-center gap-2">
-                                    <input
-                                      type="checkbox"
-                                      checked={selectedCategoryKeys.includes(item.key)}
-                                      onChange={() => toggleCategoryStage(item.key)}
-                                    />
-                                    {item.count} {item.label}
-                                  </span>
-                                  <span className="text-gray-500">{formatKb(item.sizeKb)}</span>
-                                </label>
-                              ))}
-                            </div>
-
-                            <div className="space-y-2">
-                              <p className="text-sm font-medium text-gray-800">Or Stage Individual Changes</p>
-                              <div className="max-h-44 overflow-auto border border-gray-200 rounded-lg divide-y divide-gray-100">
-                                {localChanges.changes.map((change) => (
-                                  <label key={change.outboxId} className="flex items-center justify-between px-3 py-2 text-sm">
-                                    <span className="flex items-center gap-2">
-                                      <input
-                                        type="checkbox"
-                                        checked={selectedOutboxIds.includes(change.outboxId)}
-                                        onChange={() => toggleOutboxStage(change.outboxId)}
-                                      />
-                                      <span className="text-gray-900">{change.label}</span>
-                                      <span className="text-xs text-gray-500">[{change.operation}]</span>
-                                    </span>
-                                    <span className="text-gray-500">{formatKb(change.sizeKb)}</span>
-                                  </label>
-                                ))}
-                              </div>
-                            </div>
-
-                            <div className="text-sm border border-indigo-200 rounded-lg p-3 bg-indigo-50">
-                              <p className="font-medium text-indigo-900">Push Size Preview</p>
-                              <p className="text-indigo-800">
-                                Total Push Size: {formatKb(stagedTotalSizeKb)} | Safe to push: YES | Estimated batches: {stagedBatchCount}
-                              </p>
-                            </div>
-                          </div>
-                        )}
+                      <div className="border border-gray-200 rounded-lg p-3">
+                        <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Relay Queue</p>
+                        <p className="font-medium text-gray-900">
+                          {(syncStatus?.relayQueuePayloadMb ?? 0).toFixed(2)} MB
+                        </p>
+                        <p className="text-xs text-gray-500 mt-1">
+                          Rows: {syncStatus?.relayQueueRows ?? 0}
+                        </p>
                       </div>
-                    )}
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      <button
-                        onClick={handleRequestPushConfirm}
-                        disabled={
-                          !syncModeOnline ||
-                          !syncStatus?.configured ||
-                          syncBusy !== null ||
-                          fullSyncRequired ||
-                          (isAdmin && localChanges !== null && localChanges.total > 0 && stagedChanges.length === 0)
-                        }
-                        className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition disabled:opacity-60 flex items-center justify-center gap-2"
-                      >
-                        <Upload className="w-4 h-4" />
-                        Push Local Changes
-                      </button>
-                      <button
-                        onClick={handleCheckRemoteChanges}
-                        disabled={!syncModeOnline || !syncStatus?.configured || syncBusy !== null || fullSyncRequired}
-                        className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition disabled:opacity-60 flex items-center justify-center gap-2"
-                      >
-                        <Download className="w-4 h-4" />
-                        Check Remote Changes
-                      </button>
+                      <div className="border border-gray-200 rounded-lg p-3">
+                        <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Relay Storage</p>
+                        <p className="font-medium text-gray-900">
+                          {(syncStatus?.relayStorageMb ?? 0).toFixed(2)} MB
+                        </p>
+                        <p className="text-xs text-gray-500 mt-1">
+                          Checked: {formatTimestamp(syncStatus?.relayLastCheckedAt)}
+                        </p>
+                      </div>
                     </div>
 
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
@@ -1234,11 +1252,18 @@ export function SettingsPage({ user }: SettingsPageProps) {
                       </div>
                     </div>
 
-                    {(syncMessage || syncStatus?.fullSyncReason || syncStatus?.lastError || (syncStatus?.lastConflictCount ?? 0) > 0) && (
+                    {(syncMessage ||
+                      syncStatus?.fullSyncReason ||
+                      syncStatus?.lastError ||
+                      syncStatus?.lastWarning ||
+                      (syncStatus?.lastConflictCount ?? 0) > 0) && (
                       <div className="space-y-2">
                         {syncMessage && <p className="text-sm text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-lg p-2">{syncMessage}</p>}
                         {syncStatus?.fullSyncReason && (
                           <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2">{syncStatus.fullSyncReason}</p>
+                        )}
+                        {syncStatus?.lastWarning && (
+                          <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2">{syncStatus.lastWarning}</p>
                         )}
                         {syncStatus?.lastError && (
                           <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg p-2">{syncStatus.lastError}</p>
@@ -1270,9 +1295,9 @@ export function SettingsPage({ user }: SettingsPageProps) {
 
                     <div className="border border-amber-200 rounded-lg p-4 space-y-4 bg-amber-50/40">
                       <div>
-                        <p className="font-medium text-gray-900">Controlled Full Sync (Master Approved)</p>
+                        <p className="font-medium text-gray-900">Controlled Full Sync (Admin Only)</p>
                         <p className="text-sm text-gray-700">
-                          Use this only when a device was offline longer than the sync retention window.
+                          Full sync approval is for new admin-device onboarding and runs in safe batches.
                         </p>
                       </div>
 
@@ -1287,89 +1312,32 @@ export function SettingsPage({ user }: SettingsPageProps) {
                         </div>
                       )}
 
+                      {!fullSyncEligible && syncStatus?.fullSyncEligibilityReason && (
+                        <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2">
+                          {syncStatus.fullSyncEligibilityReason}
+                        </p>
+                      )}
+
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         <button
-                          onClick={handleRequestFullSync}
-                          disabled={fullSyncBusy !== null || !syncModeOnline || !syncStatus?.configured}
+                          onClick={handleFullSyncCheck}
+                          disabled={fullSyncBusy !== null || !syncStatus?.configured || !fullSyncEligible}
                           className="px-4 py-2 border border-amber-300 rounded-lg hover:bg-amber-100 transition disabled:opacity-60"
                         >
-                          Request Full Sync (This Device)
-                        </button>
-                        <button
-                          onClick={handlePullNextFullSyncChunk}
-                          disabled={
-                            fullSyncBusy !== null ||
-                            !syncModeOnline ||
-                            !syncStatus?.configured ||
-                            !sessionRequest ||
-                            !['approved', 'transferring'].includes(sessionRequest.status) ||
-                            !sessionNextChunk
-                          }
-                          className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition disabled:opacity-60"
-                        >
-                          Pull Next 200MB Chunk (This Device)
+                          {fullSyncBusy === 'check' ? 'Checking...' : 'Full Sync Check'}
                         </button>
                       </div>
 
                       {sessionRequest && (
                         <div className="text-sm border border-amber-200 rounded-lg p-3 bg-white">
-                          <p className="font-medium text-gray-900 mb-1">This Device Request</p>
+                          <p className="font-medium text-gray-900 mb-1">Current Full Sync Session</p>
                           <p className="text-gray-700 break-all">Request ID: {sessionRequest.requestId}</p>
                           <p className="text-gray-700">Status: {sessionRequest.status}</p>
                           <p className="text-gray-700">
-                            Progress: {sessionRequest.ackedChunks}/{sessionRequest.totalChunks ?? '?'} chunk(s)
+                            Progress: {sessionRequest.ackedChunks}/{sessionRequest.totalChunks ?? '?'} batch(es)
                           </p>
                         </div>
                       )}
-
-                      <div>
-                        <p className="font-medium text-gray-900 mb-2">Pending Full Sync Requests</p>
-                        {adminFullSyncRequests.length === 0 && (
-                          <p className="text-sm text-gray-600 border border-gray-200 rounded-lg p-3 bg-white">No pending requests.</p>
-                        )}
-                        <div className="space-y-3">
-                          {adminFullSyncRequests.map((request) => (
-                            <div key={request.requestId} className="border border-gray-200 rounded-lg p-3 bg-white">
-                              <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
-                                <div className="text-sm">
-                                  <p className="font-medium text-gray-900 break-all">{request.requestId}</p>
-                                  <p className="text-gray-600">Device: {request.requesterDeviceId}</p>
-                                  <p className="text-gray-600">Requested: {formatTimestamp(request.requestedAt)}</p>
-                                  <p className="text-gray-600">Last Sync: {formatTimestamp(request.lastSuccessfulSyncAt)}</p>
-                                  <p className="text-gray-600">Estimated DB: {formatBytes(request.estimatedDbSizeBytes)}</p>
-                                  <p className="text-gray-600">
-                                    Progress: {request.ackedChunks}/{request.totalChunks ?? '?'} chunk(s)
-                                  </p>
-                                  <p className="text-gray-600 capitalize">Status: {request.status}</p>
-                                </div>
-                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                                  <button
-                                    onClick={() => handleAdminReviewFullSync(request.requestId, 'approve')}
-                                    disabled={fullSyncBusy !== null || request.status !== 'pending'}
-                                    className="px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition disabled:opacity-60"
-                                  >
-                                    Approve
-                                  </button>
-                                  <button
-                                    onClick={() => handleAdminReviewFullSync(request.requestId, 'reject')}
-                                    disabled={fullSyncBusy !== null || request.status !== 'pending'}
-                                    className="px-3 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition disabled:opacity-60"
-                                  >
-                                    Reject
-                                  </button>
-                                  <button
-                                    onClick={() => handleAdminUploadNextChunk(request.requestId)}
-                                    disabled={fullSyncBusy !== null || !['approved', 'transferring'].includes(request.status)}
-                                    className="px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition disabled:opacity-60"
-                                  >
-                                    Upload Next Chunk
-                                  </button>
-                                </div>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
                     </div>
                   </div>
                 </div>
@@ -1510,220 +1478,34 @@ export function SettingsPage({ user }: SettingsPageProps) {
         </div>
       </div>
 
-      {showManualSyncPanel && (
-        <div className="fixed inset-0 z-50 flex">
-          <button
-            onClick={() => setShowManualSyncPanel(false)}
-            className="flex-1 bg-black/30"
-            aria-label="Close manual sync panel"
-          />
-          <aside className="w-full max-w-2xl h-full bg-white border-l border-gray-200 shadow-xl overflow-y-auto p-6 space-y-5">
-            <div className="flex items-center justify-between">
-              <div>
-                <h2 className="font-bold text-gray-900">Manual Sync</h2>
-                <p className="text-sm text-gray-600">Stage local changes like Source Control and sync in safe batches.</p>
-              </div>
-              <button
-                onClick={() => setShowManualSyncPanel(false)}
-                className="px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-50"
-              >
-                Close
-              </button>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div className="border border-gray-200 rounded-lg p-3">
-                <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Mode</p>
-                <p className="font-medium text-gray-900">{syncModeOnline ? 'Online' : 'Offline'}</p>
-              </div>
-              <div className="border border-gray-200 rounded-lg p-3">
-                <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Status</p>
-                <p className={`font-medium ${syncRelayConnected ? 'text-emerald-700' : 'text-red-700'}`}>
-                  {syncRelayConnected ? 'Connected' : 'Not Connected'}
-                </p>
-              </div>
-              <div className="border border-gray-200 rounded-lg p-3">
-                <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Last Sync</p>
-                <p className="font-medium text-gray-900">{formatTimestamp(lastSyncAt)}</p>
-              </div>
-            </div>
-
-            <div className="flex items-center justify-between border border-gray-200 rounded-lg p-3">
-              <div>
-                <p className="font-medium text-gray-900">Online / Offline</p>
-                <p className="text-xs text-gray-600">If internet disconnects, sync returns to Offline mode.</p>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className={`text-xs font-medium ${syncModeOnline ? 'text-gray-500' : 'text-gray-900'}`}>OFFLINE</span>
-                <button
-                  onClick={() => handleSyncModeChange(!syncModeOnline)}
-                  disabled={syncBusy === 'mode'}
-                  className={`relative w-16 h-8 rounded-full border transition-all duration-200 ${
-                    syncModeOnline ? 'bg-emerald-100 border-emerald-300' : 'bg-gray-200 border-gray-300'
-                  } hover:scale-[1.03] disabled:opacity-60`}
-                >
-                  <span
-                    className={`absolute top-0.5 left-0.5 h-6 w-6 rounded-full bg-white shadow transition-transform duration-200 ${
-                      syncModeOnline ? 'translate-x-8' : 'translate-x-0'
-                    }`}
-                  />
-                </button>
-                <span className={`text-xs font-medium ${syncModeOnline ? 'text-emerald-700' : 'text-gray-500'}`}>ONLINE</span>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <button
-                onClick={handleViewLocalChanges}
-                disabled={viewChangesBusy}
-                className="px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-60"
-              >
-                {viewChangesBusy ? 'Loading...' : 'View Local Changes'}
-              </button>
-              <button
-                onClick={handleCheckRemoteChanges}
-                disabled={!syncModeOnline || !syncStatus?.configured || syncBusy !== null || fullSyncRequired}
-                className="px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-60"
-              >
-                Check Remote Changes
-              </button>
-              <button onClick={handleMarkAll} className="px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-50">
-                Mark All
-              </button>
-              <button onClick={handleUnmarkAll} className="px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-50">
-                Unmark All
-              </button>
-            </div>
-
-            <div className="border border-gray-200 rounded-lg p-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <p className="font-medium text-gray-900">Pending Changes</p>
-                <p className="text-sm text-gray-700">
-                  Total: {localChanges?.total ?? 0} | {formatSizeFromKb(localChanges?.totalSizeKb ?? 0)}
-                </p>
-              </div>
-              {!localChanges || localChanges.total === 0 ? (
-                <p className="text-sm text-gray-600">No pending local changes.</p>
-              ) : (
-                <div className="space-y-2">
-                  {localChanges.categories.map((category) => (
-                    <div key={category.key} className="border border-gray-200 rounded-lg">
-                      <div className="px-3 py-2 flex items-center justify-between gap-2">
-                        <label className="flex items-center gap-2 text-sm">
-                          <input
-                            type="checkbox"
-                            checked={selectedCategoryKeys.includes(category.key)}
-                            onChange={() => toggleCategoryStage(category.key)}
-                          />
-                          {category.count} {category.label}
-                        </label>
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs text-gray-500">{formatSizeFromKb(category.sizeKb)}</span>
-                          <button
-                            onClick={() => toggleExpandedCategory(category.key)}
-                            className="text-xs px-2 py-1 border border-gray-300 rounded hover:bg-gray-50"
-                          >
-                            {expandedCategoryKeys.includes(category.key) ? 'Hide' : 'Show'}
-                          </button>
-                        </div>
-                      </div>
-                      {expandedCategoryKeys.includes(category.key) && (
-                        <div className="border-t border-gray-200 max-h-36 overflow-y-auto divide-y divide-gray-100">
-                          {localChanges.changes
-                            .filter((change) => change.categoryKey === category.key)
-                            .map((change) => (
-                              <label key={change.outboxId} className="px-3 py-2 flex items-center justify-between text-sm">
-                                <span className="flex items-center gap-2">
-                                  <input
-                                    type="checkbox"
-                                    checked={selectedOutboxIds.includes(change.outboxId)}
-                                    onChange={() => toggleOutboxStage(change.outboxId)}
-                                  />
-                                  {change.label}
-                                </span>
-                                <span className="text-xs text-gray-500">{formatSizeFromKb(change.sizeKb)}</span>
-                              </label>
-                            ))}
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <div className="border border-indigo-200 rounded-lg p-3 bg-indigo-50">
-              <p className="text-sm font-medium text-indigo-900">Staged Push Preview</p>
-              <p className="text-sm text-indigo-800">
-                {stagedChanges.length} record(s) | {formatSizeFromKb(stagedTotalSizeKb)} | Estimated batches: {stagedBatchCount}
-              </p>
-            </div>
-
-            {syncBusy === 'push' && (
-              <div className="space-y-2">
-                <p className="text-sm text-gray-700">Uploading staged changes...</p>
-                <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
-                  <div className="h-full w-1/2 bg-indigo-600 animate-pulse" />
-                </div>
-              </div>
-            )}
-
-            <div className="flex items-center justify-end">
-              <button
-                onClick={handleRequestPushConfirm}
-                disabled={!syncModeOnline || !syncStatus?.configured || syncBusy !== null || fullSyncRequired || stagedChanges.length === 0}
-                className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition disabled:opacity-60"
-              >
-                Push Selected
-              </button>
-            </div>
-          </aside>
-        </div>
-      )}
-
-      {showPushConfirm && (
+      {pendingFullSyncRequest && (
         <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
           <div className="w-full max-w-lg bg-white rounded-xl border border-gray-200 p-6 space-y-4">
-            <h3 className="font-bold text-gray-900">Confirm Push</h3>
-            <p className="text-sm text-gray-700">You are about to push the following staged changes:</p>
-            <div className="space-y-1 text-sm">
-              {stagedCategorySummary.map((item) => (
-                <p key={item.label}>
-                  {item.count} {item.label}
-                </p>
-              ))}
-            </div>
-            <p className="text-sm text-gray-900">Total Size: {formatSizeFromKb(stagedTotalSizeKb)}</p>
+            <h3 className="font-bold text-gray-900">Full Sync Request Found</h3>
+            <p className="text-sm text-gray-700">
+              Requested By: {pendingFullSyncRequest.requestedBy || pendingFullSyncRequest.requesterUserId || 'Unknown'}
+            </p>
+            <p className="text-sm text-gray-700">
+              Estimated Records: {Number(pendingFullSyncRequest.estimatedRecords || 0).toLocaleString()}
+            </p>
+            <p className="text-sm text-gray-700">
+              Estimated Size: {pendingFullSyncRequest.estimatedSizeMb != null ? `${pendingFullSyncRequest.estimatedSizeMb} MB` : formatBytes(pendingFullSyncRequest.estimatedDbSizeBytes)}
+            </p>
+            <p className="text-sm text-gray-700">Approve Full Sync?</p>
             <div className="flex items-center justify-end gap-2">
-              <button onClick={() => setShowPushConfirm(false)} className="px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-50">
-                Cancel
-              </button>
-              <button onClick={handlePushChanges} className="px-3 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">
-                Confirm Push
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {remotePreview && (
-        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
-          <div className="w-full max-w-lg bg-white rounded-xl border border-gray-200 p-6 space-y-4">
-            <h3 className="font-bold text-gray-900">{remotePreview.count} Remote Updates Found</h3>
-            <p className="text-sm text-gray-700">Total Size: {formatSizeFromKb(remotePreview.totalSizeKb)}</p>
-            {remotePreview.message && <p className="text-sm text-gray-600">{remotePreview.message}</p>}
-            <div className="flex items-center justify-end gap-2">
-              <button onClick={() => setRemotePreview(null)} className="px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-50">
-                Cancel
+              <button
+                onClick={handleRejectPendingFullSync}
+                disabled={fullSyncBusy !== null}
+                className="px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-60"
+              >
+                Reject
               </button>
               <button
-                onClick={async () => {
-                  setRemotePreview(null);
-                  await handlePullChanges();
-                }}
-                className="px-3 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700"
+                onClick={handleApprovePendingFullSync}
+                disabled={fullSyncBusy !== null}
+                className="px-3 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-60"
               >
-                Pull
+                Approve
               </button>
             </div>
           </div>

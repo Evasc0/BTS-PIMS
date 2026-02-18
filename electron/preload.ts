@@ -82,6 +82,7 @@ contextBridge.exposeInMainWorld('api', {
     pull: (userId: string, conflictStrategy: 'skip' | 'remote_wins' = 'skip') =>
       ipcRenderer.invoke('sync:pull', userId, conflictStrategy),
     fullSyncRequest: (userId: string) => ipcRenderer.invoke('sync:full:request', userId),
+    fullSyncCheck: (userId: string) => ipcRenderer.invoke('sync:full:check', userId),
     fullSyncSession: (userId: string) => ipcRenderer.invoke('sync:full:session', userId),
     fullSyncPullNext: (userId: string) => ipcRenderer.invoke('sync:full:pull-next', userId),
     fullSyncAdminList: (userId: string) => ipcRenderer.invoke('sync:full:admin:list', userId),

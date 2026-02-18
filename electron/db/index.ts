@@ -106,6 +106,15 @@ const ensureCoreSchema = (db: Database.Database): void => {
 
   db.exec('CREATE INDEX IF NOT EXISTS idx_products_assigned_status ON products(assigned_to_employee_id, assignment_status)');
   db.exec("DELETE FROM sync_outbox WHERE entity_type = 'activity_logs'");
+  db.exec(`
+    DELETE FROM sync_outbox
+    WHERE id NOT IN (
+      SELECT MAX(id)
+      FROM sync_outbox
+      GROUP BY entity_type, entity_id
+    )
+  `);
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_outbox_entity_unique ON sync_outbox(entity_type, entity_id)');
 
   coreSchemaEnsured = true;
 };
@@ -131,6 +140,13 @@ const enqueueOutbox = (db: Database.Database, entityType: string, entityId: stri
       ) VALUES (
         @entity_type, @entity_id, @operation, @payload, @created_at, @attempts, @last_error, @next_retry_at
       )
+      ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+        operation = excluded.operation,
+        payload = excluded.payload,
+        created_at = excluded.created_at,
+        attempts = 0,
+        last_error = NULL,
+        next_retry_at = NULL
     `
   ).run({
     entity_type: entityType,

@@ -16,6 +16,12 @@ interface SyncStatusSnapshot {
   canPull?: boolean;
   fullSyncRequired?: boolean;
   fullSyncReason?: string | null;
+  fullSyncEligible?: boolean;
+  fullSyncEligibilityReason?: string | null;
+  deviceId?: string | null;
+  lastAutoSyncAt?: string | null;
+  lastFullSyncAt?: string | null;
+  deviceRegisteredAt?: string | null;
   lastSuccessfulSyncAt?: string | null;
   retentionDays?: number;
   maxOfflineDays?: number;
@@ -28,6 +34,18 @@ interface SyncStatusSnapshot {
   lastConflictCount: number;
   lastStatus: string;
   lastError: string | null;
+  lastWarning?: string | null;
+  relayQueueRows?: number;
+  relayQueuePayloadMb?: number;
+  relayStorageMb?: number;
+  relayOldestQueueAt?: string | null;
+  relayLastCheckedAt?: string | null;
+  relayDbLimitMb?: number;
+  relayStorageLimitMb?: number;
+  relayDbSoftThreshold?: number;
+  relayDbHardThreshold?: number;
+  relayStorageSoftThreshold?: number;
+  relayStorageHardThreshold?: number;
   pendingLocalChanges: number;
   recentLogs: SyncLogEntry[];
 }
@@ -60,11 +78,16 @@ interface SyncLocalChangesSummary {
 
 interface FullSyncRequestSummary {
   requestId: string;
+  requestingDeviceId?: string;
+  targetDeviceId?: string;
+  requestedBy?: string | null;
   requesterDeviceId: string;
   requesterUserId: string | null;
   requestedAt: string;
   status: string;
   lastSuccessfulSyncAt: string | null;
+  estimatedRecords?: number | null;
+  estimatedSizeMb?: number | null;
   estimatedDbSizeBytes: number | null;
   approvedAt: string | null;
   approvedByUserId: string | null;
@@ -209,6 +232,9 @@ declare global {
         fullSyncRequest: (
           userId: string
         ) => Promise<{ status: string; request?: FullSyncRequestSummary; error?: string }>;
+        fullSyncCheck: (
+          userId: string
+        ) => Promise<{ status: string; request?: FullSyncRequestSummary | null; error?: string }>;
         fullSyncSession: (
           userId: string
         ) => Promise<{ status: string; request?: FullSyncRequestSummary | null; nextChunk?: FullSyncChunkSummary | null; error?: string }>;

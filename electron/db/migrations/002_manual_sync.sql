@@ -5,6 +5,10 @@ ALTER TABLE activity_logs ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
 
 CREATE TABLE IF NOT EXISTS sync_state (
   id TEXT PRIMARY KEY,
+  device_id TEXT,
+  last_auto_sync_at TEXT,
+  last_full_sync_at TEXT,
+  device_registered_at TEXT,
   online_mode INTEGER NOT NULL DEFAULT 0,
   last_push_at TEXT,
   last_pull_at TEXT,
@@ -17,9 +21,11 @@ CREATE TABLE IF NOT EXISTS sync_state (
 );
 
 INSERT OR IGNORE INTO sync_state (
-  id, online_mode, last_push_at, last_pull_at, last_push_count, last_pull_count, last_conflict_count, last_status, last_error, updated_at
+  id, device_id, last_auto_sync_at, last_full_sync_at, device_registered_at,
+  online_mode, last_push_at, last_pull_at, last_push_count, last_pull_count, last_conflict_count, last_status, last_error, updated_at
 ) VALUES (
-  'default', 0, NULL, NULL, 0, 0, 0, 'offline', NULL,
+  'default', NULL, NULL, NULL, NULL,
+  0, NULL, NULL, 0, 0, 0, 'offline', NULL,
   datetime('now')
 );
 

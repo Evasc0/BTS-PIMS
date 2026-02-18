@@ -8,17 +8,45 @@ import { dataStore } from '../db';
 import { authService } from '../auth/authService';
 
 const nowIso = (): string => new Date().toISOString();
+const clamp01 = (value: number, fallback: number): number => {
+  if (!Number.isFinite(value)) return fallback;
+  if (value < 0) return 0;
+  if (value > 1) return 1;
+  return value;
+};
 
 const MAX_EVENT_LOG_ITEMS = 10;
 const MAX_STORED_EVENTS = 200;
-const SYNC_QUEUE_RETENTION_DAYS = Math.max(1, Number(process.env.SYNC_QUEUE_RETENTION_DAYS || 7));
+const SYNC_QUEUE_RETENTION_DAYS = Math.max(1, Number(process.env.SYNC_QUEUE_RETENTION_DAYS || 2));
 const SYNC_MAX_OFFLINE_DAYS = Math.max(1, Number(process.env.SYNC_MAX_OFFLINE_DAYS || 7));
+const SYNC_TARGET_STALE_DAYS = Math.max(1, Number(process.env.SYNC_TARGET_STALE_DAYS || 3));
 const SYNC_DELETE_RETRY_ATTEMPTS = Math.max(1, Number(process.env.SYNC_DELETE_RETRY_ATTEMPTS || 3));
 const SYNC_PUSH_MAX_BATCH_MB = Math.max(1, Number(process.env.SYNC_PUSH_MAX_BATCH_MB || 5));
 const SYNC_PUSH_MAX_BATCH_BYTES = SYNC_PUSH_MAX_BATCH_MB * 1024 * 1024;
-const FULL_SYNC_CHUNK_MB = Math.min(200, Math.max(1, Number(process.env.SYNC_FULL_CHUNK_MB || 200)));
+const SYNC_PUSH_MAX_BATCH_RECORDS = Math.min(500, Math.max(300, Number(process.env.SYNC_PUSH_BATCH_SIZE || 500)));
+const FULL_SYNC_CHUNK_MB = Math.min(5, Math.max(1, Number(process.env.SYNC_FULL_CHUNK_MB || 5)));
 const FULL_SYNC_CHUNK_SIZE_BYTES = FULL_SYNC_CHUNK_MB * 1024 * 1024;
+const SYNC_RELAY_DB_LIMIT_MB = Math.max(100, Number(process.env.SYNC_RELAY_DB_LIMIT_MB || 500));
+const SYNC_RELAY_STORAGE_LIMIT_MB = Math.max(100, Number(process.env.SYNC_RELAY_STORAGE_LIMIT_MB || 1024));
+const SYNC_RELAY_DB_SOFT_THRESHOLD = clamp01(Number(process.env.SYNC_RELAY_DB_SOFT_THRESHOLD || 0.7), 0.7);
+const SYNC_RELAY_DB_HARD_THRESHOLD = Math.max(
+  SYNC_RELAY_DB_SOFT_THRESHOLD,
+  clamp01(Number(process.env.SYNC_RELAY_DB_HARD_THRESHOLD || 0.85), 0.85)
+);
+const SYNC_RELAY_STORAGE_SOFT_THRESHOLD = clamp01(Number(process.env.SYNC_RELAY_STORAGE_SOFT_THRESHOLD || 0.7), 0.7);
+const SYNC_RELAY_STORAGE_HARD_THRESHOLD = Math.max(
+  SYNC_RELAY_STORAGE_SOFT_THRESHOLD,
+  clamp01(Number(process.env.SYNC_RELAY_STORAGE_HARD_THRESHOLD || 0.85), 0.85)
+);
+const SYNC_RELAY_HARD_STOP_MIN_FREE_MB = Math.max(10, Number(process.env.SYNC_RELAY_HARD_STOP_MIN_FREE_MB || 25));
+const SYNC_RETENTION_RPC_COOLDOWN_MS = Math.max(
+  5 * 60 * 1000,
+  Number(process.env.SYNC_RETENTION_RPC_COOLDOWN_MS || 4 * 60 * 60 * 1000)
+);
+const SYNC_ORPHAN_OBJECT_RETENTION_DAYS = Math.max(1, Number(process.env.SYNC_ORPHAN_OBJECT_RETENTION_DAYS || 2));
+const SYNC_ORPHAN_OBJECT_CLEANUP_LIMIT = Math.max(100, Number(process.env.SYNC_ORPHAN_OBJECT_CLEANUP_LIMIT || 1000));
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
+const RELAY_RECIPIENT_ALL = '__all__';
 
 const getAdminQueueTable = (): string =>
   process.env.SUPABASE_ADMIN_QUEUE_TABLE || process.env.SUPABASE_SYNC_QUEUE_TABLE || 'admin_sync_queue';
@@ -26,7 +54,6 @@ const getEmployeeQueueTable = (): string => process.env.SUPABASE_EMPLOYEE_QUEUE_
 const getAppUsersTable = (): string => process.env.SUPABASE_APP_USERS_TABLE || 'app_users';
 const getSupabaseUrl = (): string => (process.env.SUPABASE_URL || '').replace(/\/+$/u, '');
 const getSupabaseAnonKey = (): string => process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_PUBLISHABLE_KEY || '';
-const getPushBatchSize = (): number => Math.max(1, Number(process.env.SYNC_PUSH_BATCH_SIZE || 100));
 const getPullPageSize = (): number => Math.max(1, Number(process.env.SYNC_PULL_PAGE_SIZE || 200));
 const getFullSyncRequestsTable = (): string => process.env.SUPABASE_FULL_SYNC_REQUESTS_TABLE || 'full_sync_requests';
 const getFullSyncChunksTable = (): string => process.env.SUPABASE_FULL_SYNC_CHUNKS_TABLE || 'full_sync_chunks';
@@ -68,6 +95,10 @@ interface PushStageOptions {
 
 interface SyncStateRow {
   id: string;
+  device_id: string | null;
+  last_auto_sync_at: string | null;
+  last_full_sync_at: string | null;
+  device_registered_at: string | null;
   online_mode: number;
   last_push_at: string | null;
   last_pull_at: string | null;
@@ -79,6 +110,12 @@ interface SyncStateRow {
   full_sync_reason: string | null;
   last_status: string;
   last_error: string | null;
+  last_warning: string | null;
+  relay_queue_rows: number;
+  relay_queue_payload_mb: number;
+  relay_storage_mb: number;
+  relay_oldest_queue_at: string | null;
+  relay_last_checked_at: string | null;
   updated_at: string;
 }
 
@@ -112,11 +149,33 @@ interface RemoteQueueRow {
   payload?: any;
   payload_size_kb?: number | null;
   created_at?: string | null;
+  updated_at?: string | null;
   table_name?: string;
   operation?: string;
   record_id?: string;
   data?: any;
   timestamp?: string;
+  recipient_key?: string | null;
+}
+
+interface AppUserPresenceRow {
+  employee_id: string;
+  role: string | null;
+  account_status: string | null;
+  last_seen_at: string | null;
+  updated_at: string | null;
+}
+
+interface RelayUsageStats {
+  adminQueueRows: number;
+  employeeQueueRows: number;
+  totalQueueRows: number;
+  queuePayloadMb: number;
+  fullSyncChunkRows: number;
+  fullSyncRequestRows: number;
+  storageObjects: number;
+  storageMb: number;
+  oldestQueueAt: string | null;
 }
 
 interface ConflictRecord {
@@ -148,6 +207,12 @@ interface LocalChangeSummaryItem {
 
 interface FullSyncRequestRow {
   id: string;
+  requesting_device_id: string | null;
+  target_device_id: string | null;
+  requested_by: string | null;
+  estimated_records: number | null;
+  estimated_size_mb: number | null;
+  created_at: string | null;
   requester_device_id: string;
   requester_user_id: string | null;
   requested_at: string;
@@ -364,6 +429,7 @@ const ensureDir = (dirPath: string): void => {
 };
 
 let syncSchemaEnsured = false;
+let lastRetentionCleanupAtMs = 0;
 
 const getTableColumns = (db: Database.Database, tableName: string): Set<string> => {
   const rows = db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name?: string }>;
@@ -377,6 +443,10 @@ const ensureSyncSchema = (db: Database.Database): void => {
     `
       CREATE TABLE IF NOT EXISTS sync_state (
         id TEXT PRIMARY KEY,
+        device_id TEXT,
+        last_auto_sync_at TEXT,
+        last_full_sync_at TEXT,
+        device_registered_at TEXT,
         online_mode INTEGER NOT NULL DEFAULT 0,
         last_push_at TEXT,
         last_pull_at TEXT,
@@ -388,6 +458,12 @@ const ensureSyncSchema = (db: Database.Database): void => {
         full_sync_reason TEXT,
         last_status TEXT NOT NULL DEFAULT 'offline',
         last_error TEXT,
+        last_warning TEXT,
+        relay_queue_rows INTEGER NOT NULL DEFAULT 0,
+        relay_queue_payload_mb REAL NOT NULL DEFAULT 0,
+        relay_storage_mb REAL NOT NULL DEFAULT 0,
+        relay_oldest_queue_at TEXT,
+        relay_last_checked_at TEXT,
         updated_at TEXT NOT NULL
       );
 
@@ -420,6 +496,10 @@ const ensureSyncSchema = (db: Database.Database): void => {
     stateColumns.add(name);
   };
 
+  ensureStateColumn('device_id', 'TEXT');
+  ensureStateColumn('last_auto_sync_at', 'TEXT');
+  ensureStateColumn('last_full_sync_at', 'TEXT');
+  ensureStateColumn('device_registered_at', 'TEXT');
   ensureStateColumn('online_mode', 'INTEGER NOT NULL DEFAULT 0');
   ensureStateColumn('last_push_at', 'TEXT');
   ensureStateColumn('last_pull_at', 'TEXT');
@@ -431,6 +511,12 @@ const ensureSyncSchema = (db: Database.Database): void => {
   ensureStateColumn('full_sync_reason', 'TEXT');
   ensureStateColumn('last_status', "TEXT NOT NULL DEFAULT 'offline'");
   ensureStateColumn('last_error', 'TEXT');
+  ensureStateColumn('last_warning', 'TEXT');
+  ensureStateColumn('relay_queue_rows', 'INTEGER NOT NULL DEFAULT 0');
+  ensureStateColumn('relay_queue_payload_mb', 'REAL NOT NULL DEFAULT 0');
+  ensureStateColumn('relay_storage_mb', 'REAL NOT NULL DEFAULT 0');
+  ensureStateColumn('relay_oldest_queue_at', 'TEXT');
+  ensureStateColumn('relay_last_checked_at', 'TEXT');
   ensureStateColumn('updated_at', "TEXT NOT NULL DEFAULT ''");
 
   if (hadLegacyModeColumn) {
@@ -449,6 +535,13 @@ const ensureSyncSchema = (db: Database.Database): void => {
     `
       UPDATE sync_state
       SET
+        device_id = CASE WHEN device_id IS NULL OR trim(device_id) = '' THEN NULL ELSE device_id END,
+        last_auto_sync_at = CASE WHEN last_auto_sync_at IS NULL OR trim(last_auto_sync_at) = '' THEN NULL ELSE last_auto_sync_at END,
+        last_full_sync_at = CASE WHEN last_full_sync_at IS NULL OR trim(last_full_sync_at) = '' THEN NULL ELSE last_full_sync_at END,
+        device_registered_at = CASE
+          WHEN device_registered_at IS NULL OR trim(device_registered_at) = '' THEN NULL
+          ELSE device_registered_at
+        END,
         online_mode = COALESCE(online_mode, 0),
         last_successful_sync_at = CASE
           WHEN last_successful_sync_at IS NULL OR trim(last_successful_sync_at) = '' THEN
@@ -467,6 +560,17 @@ const ensureSyncSchema = (db: Database.Database): void => {
           ELSE NULL
         END,
         last_status = CASE WHEN last_status IS NULL OR trim(last_status) = '' THEN 'offline' ELSE last_status END,
+        relay_queue_rows = COALESCE(relay_queue_rows, 0),
+        relay_queue_payload_mb = COALESCE(relay_queue_payload_mb, 0),
+        relay_storage_mb = COALESCE(relay_storage_mb, 0),
+        relay_oldest_queue_at = CASE
+          WHEN relay_oldest_queue_at IS NULL OR trim(relay_oldest_queue_at) = '' THEN NULL
+          ELSE relay_oldest_queue_at
+        END,
+        relay_last_checked_at = CASE
+          WHEN relay_last_checked_at IS NULL OR trim(relay_last_checked_at) = '' THEN NULL
+          ELSE relay_last_checked_at
+        END,
         updated_at = CASE WHEN updated_at IS NULL OR trim(updated_at) = '' THEN @now ELSE updated_at END
     `
   ).run({ now: nowIso() });
@@ -514,18 +618,27 @@ const getLocalDeviceId = (db: Database.Database): string => {
 
 const ensureSyncStateRow = (db: Database.Database, actor: SyncActor): void => {
   ensureSyncSchema(db);
+  const deviceId = getLocalDeviceId(db);
   db.prepare(
     `
       INSERT OR IGNORE INTO sync_state (
-        id, online_mode, last_push_at, last_pull_at, last_successful_sync_at, last_push_count, last_pull_count,
-        last_conflict_count, full_sync_required, full_sync_reason, last_status, last_error, updated_at
+        id, device_id, last_auto_sync_at, last_full_sync_at, device_registered_at,
+        online_mode, last_push_at, last_pull_at, last_successful_sync_at, last_push_count, last_pull_count,
+        last_conflict_count, full_sync_required, full_sync_reason, last_status, last_error, last_warning,
+        relay_queue_rows, relay_queue_payload_mb, relay_storage_mb, relay_oldest_queue_at, relay_last_checked_at, updated_at
       ) VALUES (
-        @id, @online_mode, @last_push_at, @last_pull_at, @last_successful_sync_at, @last_push_count, @last_pull_count,
-        @last_conflict_count, @full_sync_required, @full_sync_reason, @last_status, @last_error, @updated_at
+        @id, @device_id, @last_auto_sync_at, @last_full_sync_at, @device_registered_at,
+        @online_mode, @last_push_at, @last_pull_at, @last_successful_sync_at, @last_push_count, @last_pull_count,
+        @last_conflict_count, @full_sync_required, @full_sync_reason, @last_status, @last_error, @last_warning,
+        @relay_queue_rows, @relay_queue_payload_mb, @relay_storage_mb, @relay_oldest_queue_at, @relay_last_checked_at, @updated_at
       )
     `
   ).run({
     id: stateIdForActor(actor),
+    device_id: deviceId,
+    last_auto_sync_at: null,
+    last_full_sync_at: null,
+    device_registered_at: null,
     online_mode: 0,
     last_push_at: null,
     last_pull_at: null,
@@ -537,7 +650,24 @@ const ensureSyncStateRow = (db: Database.Database, actor: SyncActor): void => {
     full_sync_reason: null,
     last_status: 'offline',
     last_error: null,
+    last_warning: null,
+    relay_queue_rows: 0,
+    relay_queue_payload_mb: 0,
+    relay_storage_mb: 0,
+    relay_oldest_queue_at: null,
+    relay_last_checked_at: null,
     updated_at: nowIso()
+  });
+
+  db.prepare(
+    `
+      UPDATE sync_state
+      SET device_id = @device_id
+      WHERE id = @id AND (device_id IS NULL OR trim(device_id) = '')
+    `
+  ).run({
+    id: stateIdForActor(actor),
+    device_id: deviceId
   });
 };
 
@@ -559,6 +689,10 @@ const writeSyncState = (db: Database.Database, actor: SyncActor, patch: Partial<
     `
       UPDATE sync_state
       SET
+        device_id = @device_id,
+        last_auto_sync_at = @last_auto_sync_at,
+        last_full_sync_at = @last_full_sync_at,
+        device_registered_at = @device_registered_at,
         online_mode = @online_mode,
         last_push_at = @last_push_at,
         last_pull_at = @last_pull_at,
@@ -570,6 +704,12 @@ const writeSyncState = (db: Database.Database, actor: SyncActor, patch: Partial<
         full_sync_reason = @full_sync_reason,
         last_status = @last_status,
         last_error = @last_error,
+        last_warning = @last_warning,
+        relay_queue_rows = @relay_queue_rows,
+        relay_queue_payload_mb = @relay_queue_payload_mb,
+        relay_storage_mb = @relay_storage_mb,
+        relay_oldest_queue_at = @relay_oldest_queue_at,
+        relay_last_checked_at = @relay_last_checked_at,
         updated_at = @updated_at
       WHERE id = @id
     `
@@ -585,19 +725,7 @@ const getFullSyncRequiredReason = (state: SyncStateRow): string | null => {
   if (state.full_sync_required) {
     return state.full_sync_reason || buildFullSyncRequiredMessage(getLastSuccessfulSyncAt(state));
   }
-
-  const lastPullMs = parseTimestamp(state.last_pull_at);
-  if (lastPullMs !== null && lastPullMs <= getOfflineCutoffMs()) {
-    return buildStalePullMessage(state.last_pull_at);
-  }
-
-  const lastSuccessfulSyncAt = getLastSuccessfulSyncAt(state);
-  if (!lastSuccessfulSyncAt) return null;
-  const lastSuccessfulMs = parseTimestamp(lastSuccessfulSyncAt);
-  if (lastSuccessfulMs === null) return null;
-  if (lastSuccessfulMs > getOfflineCutoffMs()) return null;
-
-  return buildFullSyncRequiredMessage(lastSuccessfulSyncAt);
+  return null;
 };
 
 const markFullSyncRequired = (db: Database.Database, actor: SyncActor, state: SyncStateRow): SyncStateRow => {
@@ -613,6 +741,16 @@ const markFullSyncRequired = (db: Database.Database, actor: SyncActor, state: Sy
     last_status: 'full_sync_required',
     last_error: reason
   });
+};
+
+const isManualFullSyncEligible = (state: SyncStateRow): boolean => !state.device_registered_at || !state.last_full_sync_at;
+
+const getManualFullSyncBlockReason = (state: SyncStateRow): string | null => {
+  if (isManualFullSyncEligible(state)) return null;
+  return (
+    `Manual full sync is only allowed for new admin device onboarding. ` +
+    `This device was registered at ${formatIsoUtc(state.device_registered_at)} and already completed full sync at ${formatIsoUtc(state.last_full_sync_at)}.`
+  );
 };
 
 const logSyncEvent = (
@@ -769,7 +907,9 @@ const buildLocalChangeSummary = (actor: SyncActor, rows: OutboxRow[]) => {
   }
 
   const totalBytes = Math.round(totalSizeKb * 1024);
-  const recommendedBatchCount = totalBytes === 0 ? 0 : Math.max(1, Math.ceil(totalBytes / SYNC_PUSH_MAX_BATCH_BYTES));
+  const recommendedBatchCountBySize = totalBytes === 0 ? 0 : Math.max(1, Math.ceil(totalBytes / SYNC_PUSH_MAX_BATCH_BYTES));
+  const recommendedBatchCountByCount = rows.length === 0 ? 0 : Math.max(1, Math.ceil(rows.length / SYNC_PUSH_MAX_BATCH_RECORDS));
+  const recommendedBatchCount = Math.max(recommendedBatchCountBySize, recommendedBatchCountByCount);
 
   return {
     total: rows.length,
@@ -841,11 +981,25 @@ const markEntityConflict = (db: Database.Database, entityType: string, entityId:
   db.prepare(`UPDATE ${table} SET sync_status = 'conflict' WHERE id = ?`).run(entityId);
 };
 
-const getLocalVersion = (db: Database.Database, entityType: string, recordId: string): number => {
+const getLocalRecordMeta = (
+  db: Database.Database,
+  entityType: string,
+  recordId: string
+): { exists: boolean; version: number; lastModified: string | null } => {
   const table = entityToTable[entityType];
-  if (!table) return 0;
-  const row = db.prepare(`SELECT version FROM ${table} WHERE id = ?`).get(recordId) as { version?: number } | undefined;
-  return readVersion(row?.version, 0);
+  if (!table) return { exists: false, version: 0, lastModified: null };
+  const row = db
+    .prepare(`SELECT version, last_modified FROM ${table} WHERE id = ?`)
+    .get(recordId) as { version?: number; last_modified?: string | null } | undefined;
+  return {
+    exists: Boolean(row),
+    version: readVersion(row?.version, 0),
+    lastModified: row?.last_modified ?? null
+  };
+};
+
+const getLocalVersion = (db: Database.Database, entityType: string, recordId: string): number => {
+  return getLocalRecordMeta(db, entityType, recordId).version;
 };
 
 const normalizeActorRole = (value: unknown): SyncRole | null => {
@@ -931,6 +1085,111 @@ const ensureActorQueuePermission = async (actor: SyncActor, supabaseUserId: stri
     return `Push denied: authenticated Supabase role is "${remoteRole || 'unknown'}", expected "employee".`;
   }
   return null;
+};
+
+const quoteInValues = (values: string[]): string =>
+  values
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+    .map((value) => `"${value.replace(/"/gu, '""')}"`)
+    .join(',');
+
+const callRpcMaybe = async (fnName: string, payload: Record<string, unknown> = {}) => {
+  return supabaseRequest(`rpc/${fnName}`, {
+    method: 'POST',
+    headers: {
+      Prefer: 'return=representation'
+    },
+    body: JSON.stringify(payload)
+  });
+};
+
+const touchActorPresence = async (db: Database.Database, actor: SyncActor, originUserId?: string | null): Promise<void> => {
+  if (!isConfigured()) return;
+  const resolvedOriginUserId = originUserId || resolveOriginUserId(db, actor);
+  if (!resolvedOriginUserId) return;
+  const params = new URLSearchParams();
+  params.set('user_id', `eq.${resolvedOriginUserId}`);
+  const seenAt = nowIso();
+  const deviceId = getLocalDeviceId(db);
+  try {
+    await supabaseRequest(`${getAppUsersTable()}?${params.toString()}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        last_seen_at: seenAt,
+        last_seen_device_id: deviceId,
+        updated_at: seenAt
+      })
+    });
+  } catch {
+    // Presence heartbeat is best-effort and should not block sync operations.
+  }
+};
+
+const fetchEmployeePresenceMap = async (employeeIds: string[]): Promise<Map<string, AppUserPresenceRow>> => {
+  const uniqueIds = Array.from(new Set(employeeIds.map((value) => String(value || '').trim()).filter(Boolean)));
+  if (!uniqueIds.length) return new Map<string, AppUserPresenceRow>();
+  const params = new URLSearchParams();
+  params.set('select', 'employee_id,role,account_status,last_seen_at,updated_at');
+  params.set('employee_id', `in.(${quoteInValues(uniqueIds)})`);
+  params.set('limit', String(uniqueIds.length));
+  const response = await supabaseRequest(`${getAppUsersTable()}?${params.toString()}`, { method: 'GET' });
+  const rows = (await response.json()) as AppUserPresenceRow[];
+  const map = new Map<string, AppUserPresenceRow>();
+  if (Array.isArray(rows)) {
+    for (const row of rows) {
+      const key = String(row?.employee_id || '').trim();
+      if (!key) continue;
+      map.set(key, row);
+    }
+  }
+  return map;
+};
+
+const extractPresenceMs = (row: AppUserPresenceRow | undefined): number | null => {
+  if (!row) return null;
+  const lastSeenMs = parseTimestamp(row.last_seen_at);
+  if (lastSeenMs != null) return lastSeenMs;
+  return parseTimestamp(row.updated_at);
+};
+
+const getStaleRecipients = (presence: Map<string, AppUserPresenceRow>, employeeIds: string[]): Set<string> => {
+  const staleCutoffMs = Date.now() - SYNC_TARGET_STALE_DAYS * DAY_IN_MS;
+  const stale = new Set<string>();
+  for (const employeeId of employeeIds) {
+    const normalized = String(employeeId || '').trim();
+    if (!normalized) continue;
+    const row = presence.get(normalized);
+    const seenMs = extractPresenceMs(row);
+    const role = normalizeActorRole(String(row?.role || 'employee'));
+    const status = normalizeActorStatus(String(row?.account_status || 'active'));
+    if (status !== 'active' || role !== 'employee' || seenMs == null || seenMs < staleCutoffMs) {
+      stale.add(normalized);
+    }
+  }
+  return stale;
+};
+
+const hasRecentAdminPresence = async (): Promise<boolean | null> => {
+  try {
+    const response = await callRpcMaybe('sync_has_recent_admin_activity', {
+      min_days: SYNC_TARGET_STALE_DAYS
+    });
+    const payload = await response.json();
+    if (typeof payload === 'boolean') return payload;
+    if (Array.isArray(payload) && payload.length > 0) {
+      const first = payload[0] as Record<string, unknown>;
+      if (typeof first?.sync_has_recent_admin_activity === 'boolean') {
+        return Boolean(first.sync_has_recent_admin_activity);
+      }
+    }
+    if (payload && typeof payload === 'object' && typeof (payload as Record<string, unknown>).sync_has_recent_admin_activity === 'boolean') {
+      return Boolean((payload as Record<string, unknown>).sync_has_recent_admin_activity);
+    }
+    return null;
+  } catch {
+    return null;
+  }
 };
 
 const supabaseRequest = async (pathAndQuery: string, init?: RequestInit): Promise<Response> => {
@@ -1039,9 +1298,40 @@ const deleteStorageObject = async (objectName: string): Promise<void> => {
 
 const pushQueueBatch = async (tableName: string, records: Array<Record<string, unknown>>): Promise<void> => {
   if (!records.length) return;
+  const postUpsert = async (payloadRows: Array<Record<string, unknown>>) =>
+    supabaseRequest(`${tableName}?on_conflict=recipient_key,table_name,record_id`, {
+      method: 'POST',
+      headers: {
+        Prefer: 'resolution=merge-duplicates,return=minimal'
+      },
+      body: JSON.stringify(payloadRows)
+    });
+
+  const stripLegacyColumns = (payloadRows: Array<Record<string, unknown>>) =>
+    payloadRows.map((record) => {
+      const { updated_at, recipient_key, ...rest } = record as Record<string, unknown>;
+      void updated_at;
+      void recipient_key;
+      return rest;
+    });
+
+  try {
+    await postUpsert(records);
+    return;
+  } catch (error: any) {
+    const message = String(error?.message || '').toLowerCase();
+    const needsLegacyRetry =
+      message.includes('updated_at') ||
+      message.includes('recipient_key') ||
+      message.includes('on_conflict') ||
+      message.includes('merge-duplicates');
+    if (!needsLegacyRetry) throw error;
+  }
+
+  const legacyRecords = stripLegacyColumns(records);
   await supabaseRequest(tableName, {
     method: 'POST',
-    body: JSON.stringify(records)
+    body: JSON.stringify(legacyRecords)
   });
 };
 
@@ -1056,10 +1346,11 @@ const fetchRemoteQueuePage = async (
   limit: number
 ): Promise<RemoteQueueRow[]> => {
   const params = new URLSearchParams();
-  params.set(
-    'select',
-    'id,employee_id,origin_device_id,origin_user_id,payload,payload_size_kb,created_at,table_name,operation,record_id,data,timestamp'
-  );
+  const selectWithUpdatedAt =
+    'id,employee_id,recipient_key,origin_device_id,origin_user_id,payload,payload_size_kb,created_at,updated_at,table_name,operation,record_id,data,timestamp';
+  const selectLegacy =
+    'id,employee_id,origin_device_id,origin_user_id,payload,payload_size_kb,created_at,table_name,operation,record_id,data,timestamp';
+  params.set('select', selectWithUpdatedAt);
   params.set('order', 'created_at.asc,id.asc');
   params.set('limit', String(limit));
   params.set('offset', String(offset));
@@ -1075,9 +1366,15 @@ const fetchRemoteQueuePage = async (
     params.set('or', `(origin_device_id.is.null,origin_device_id.neq.${excludeOriginDeviceId})`);
   }
 
-  const response = await supabaseRequest(`${tableName}?${params.toString()}`, {
-    method: 'GET'
-  });
+  let response: Response;
+  try {
+    response = await supabaseRequest(`${tableName}?${params.toString()}`, { method: 'GET' });
+  } catch (error: any) {
+    const message = String(error?.message || '').toLowerCase();
+    if (!message.includes('updated_at')) throw error;
+    params.set('select', selectLegacy);
+    response = await supabaseRequest(`${tableName}?${params.toString()}`, { method: 'GET' });
+  }
 
   const rows = (await response.json()) as RemoteQueueRow[];
   return Array.isArray(rows) ? rows : [];
@@ -1134,8 +1431,23 @@ const readRemoteData = (row: RemoteQueueRow): any => {
 
 const readRemoteTimestamp = (row: RemoteQueueRow): string => {
   if (row.created_at) return row.created_at;
+  if (row.updated_at) return row.updated_at;
   if (row.timestamp) return row.timestamp;
   return nowIso();
+};
+
+const readRemoteUpdatedAt = (row: RemoteQueueRow, remoteData: any): string => {
+  const payload = readRemotePayload(row);
+  const candidate =
+    payload?.updated_at ??
+    row.updated_at ??
+    remoteData?.updatedAt ??
+    remoteData?.lastModified ??
+    remoteData?.createdAt ??
+    row.created_at ??
+    row.timestamp;
+  if (!candidate) return nowIso();
+  return String(candidate);
 };
 
 const deleteRemoteQueueRows = async (tableName: string, ids: string[], excludeOriginDeviceId: string | null = null): Promise<void> => {
@@ -1185,12 +1497,206 @@ const deleteQueueRowsOlderThan = async (tableName: string, cutoffIso: string): P
   await supabaseRequest(`${tableName}?${params.toString()}`, { method: 'DELETE' });
 };
 
-const cleanupQueueRetention = async (actor: SyncActor): Promise<void> => {
-  if (!canAdminSync(actor)) return;
+const mbFromBytes = (value: number): number => Number((Math.max(0, value) / (1024 * 1024)).toFixed(3));
 
-  const cutoffIso = getQueueRetentionCutoffIso();
-  await deleteQueueRowsOlderThan(getAdminQueueTable(), cutoffIso);
-  await deleteQueueRowsOlderThan(getEmployeeQueueTable(), cutoffIso);
+const parseRelayUsageStats = (input: any): RelayUsageStats | null => {
+  if (!input || typeof input !== 'object') return null;
+  const payload = Array.isArray(input) ? input[0] : input;
+  if (!payload || typeof payload !== 'object') return null;
+  const row = payload as Record<string, unknown>;
+  const adminQueueRows = Number(row.admin_queue_rows ?? row.adminQueueRows ?? 0);
+  const employeeQueueRows = Number(row.employee_queue_rows ?? row.employeeQueueRows ?? 0);
+  const totalQueueRows = Number(row.total_queue_rows ?? row.totalQueueRows ?? adminQueueRows + employeeQueueRows);
+  const queuePayloadMb = Number(row.queue_payload_mb ?? row.queuePayloadMb ?? 0);
+  const fullSyncChunkRows = Number(row.full_sync_chunk_rows ?? row.fullSyncChunkRows ?? 0);
+  const fullSyncRequestRows = Number(row.full_sync_request_rows ?? row.fullSyncRequestRows ?? 0);
+  const storageObjects = Number(row.storage_objects ?? row.storageObjects ?? 0);
+  const storageMb = Number(row.storage_mb ?? row.storageMb ?? 0);
+  const oldestQueueAtRaw = row.oldest_queue_at ?? row.oldestQueueAt ?? null;
+  const oldestQueueAt = oldestQueueAtRaw ? String(oldestQueueAtRaw) : null;
+  return {
+    adminQueueRows: Number.isFinite(adminQueueRows) ? adminQueueRows : 0,
+    employeeQueueRows: Number.isFinite(employeeQueueRows) ? employeeQueueRows : 0,
+    totalQueueRows: Number.isFinite(totalQueueRows) ? totalQueueRows : 0,
+    queuePayloadMb: Number.isFinite(queuePayloadMb) ? Number(queuePayloadMb.toFixed(3)) : 0,
+    fullSyncChunkRows: Number.isFinite(fullSyncChunkRows) ? fullSyncChunkRows : 0,
+    fullSyncRequestRows: Number.isFinite(fullSyncRequestRows) ? fullSyncRequestRows : 0,
+    storageObjects: Number.isFinite(storageObjects) ? storageObjects : 0,
+    storageMb: Number.isFinite(storageMb) ? Number(storageMb.toFixed(3)) : 0,
+    oldestQueueAt
+  };
+};
+
+const fetchRelayUsageStats = async (): Promise<RelayUsageStats | null> => {
+  try {
+    const response = await callRpcMaybe('sync_relay_usage_stats');
+    const payload = await response.json();
+    return parseRelayUsageStats(payload);
+  } catch {
+    return null;
+  }
+};
+
+const evaluateRelayPressure = (
+  stats: RelayUsageStats,
+  projectedPushBytes: number
+): { block: boolean; warning: string | null; projectedQueueMb: number } => {
+  const projectedQueueMb = Number((stats.queuePayloadMb + mbFromBytes(projectedPushBytes)).toFixed(3));
+  const queueSoftCap = SYNC_RELAY_DB_LIMIT_MB * SYNC_RELAY_DB_SOFT_THRESHOLD;
+  const queueHardCap = SYNC_RELAY_DB_LIMIT_MB * SYNC_RELAY_DB_HARD_THRESHOLD;
+  const storageSoftCap = SYNC_RELAY_STORAGE_LIMIT_MB * SYNC_RELAY_STORAGE_SOFT_THRESHOLD;
+  const storageHardCap = SYNC_RELAY_STORAGE_LIMIT_MB * SYNC_RELAY_STORAGE_HARD_THRESHOLD;
+  const queueFreeMb = SYNC_RELAY_DB_LIMIT_MB - projectedQueueMb;
+  const storageFreeMb = SYNC_RELAY_STORAGE_LIMIT_MB - stats.storageMb;
+
+  const queueHardExceeded = projectedQueueMb >= queueHardCap || queueFreeMb <= SYNC_RELAY_HARD_STOP_MIN_FREE_MB;
+  const storageHardExceeded = stats.storageMb >= storageHardCap || storageFreeMb <= SYNC_RELAY_HARD_STOP_MIN_FREE_MB;
+  if (queueHardExceeded || storageHardExceeded) {
+    const reason = queueHardExceeded
+      ? `relay DB projected to ${projectedQueueMb.toFixed(2)}MB (limit ${SYNC_RELAY_DB_LIMIT_MB}MB)`
+      : `relay storage at ${stats.storageMb.toFixed(2)}MB (limit ${SYNC_RELAY_STORAGE_LIMIT_MB}MB)`;
+    return {
+      block: true,
+      warning:
+        `Push paused to protect Supabase free-tier quotas: ${reason}. ` +
+        'Auto pull/cleanup will continue; push resumes after relay usage drops.',
+      projectedQueueMb
+    };
+  }
+
+  const queueSoftExceeded = projectedQueueMb >= queueSoftCap;
+  const storageSoftExceeded = stats.storageMb >= storageSoftCap;
+  if (queueSoftExceeded || storageSoftExceeded) {
+    return {
+      block: false,
+      warning:
+        `Relay usage warning: queue ${projectedQueueMb.toFixed(2)}MB/${SYNC_RELAY_DB_LIMIT_MB}MB, ` +
+        `storage ${stats.storageMb.toFixed(2)}MB/${SYNC_RELAY_STORAGE_LIMIT_MB}MB.`,
+      projectedQueueMb
+    };
+  }
+
+  return { block: false, warning: null, projectedQueueMb };
+};
+
+const persistRelayUsageSnapshot = (
+  db: Database.Database,
+  actor: SyncActor,
+  stats: RelayUsageStats,
+  warning: string | null
+): void => {
+  writeSyncState(db, actor, {
+    relay_queue_rows: stats.totalQueueRows,
+    relay_queue_payload_mb: stats.queuePayloadMb,
+    relay_storage_mb: stats.storageMb,
+    relay_oldest_queue_at: stats.oldestQueueAt,
+    relay_last_checked_at: nowIso(),
+    last_warning: warning
+  });
+};
+
+interface StorageListRow {
+  name?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+const listStorageObjectsPage = async (offset: number, limit: number): Promise<StorageListRow[]> => {
+  const bucket = encodeURIComponent(getFullSyncStorageBucket());
+  const response = await supabaseStorageRequest(`object/list/${bucket}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      limit,
+      offset,
+      sortBy: {
+        column: 'name',
+        order: 'asc'
+      }
+    })
+  });
+  const rows = (await response.json()) as StorageListRow[];
+  return Array.isArray(rows) ? rows : [];
+};
+
+const fetchProtectedFullSyncStorageObjects = async (): Promise<Set<string>> => {
+  const protectedObjects = new Set<string>();
+  const pageSize = 500;
+  let offset = 0;
+  while (true) {
+    const params = new URLSearchParams();
+    params.set('select', 'storage_object,status');
+    params.set('status', 'in.(uploaded,acked)');
+    params.set('limit', String(pageSize));
+    params.set('offset', String(offset));
+    const response = await supabaseRequest(`${getFullSyncChunksTable()}?${params.toString()}`, { method: 'GET' });
+    const rows = (await response.json()) as Array<{ storage_object?: string | null }>;
+    if (!Array.isArray(rows) || rows.length === 0) break;
+    for (const row of rows) {
+      const objectName = String(row?.storage_object || '').trim();
+      if (objectName) protectedObjects.add(objectName);
+    }
+    if (rows.length < pageSize) break;
+    offset += pageSize;
+  }
+  return protectedObjects;
+};
+
+const cleanupOrphanFullSyncStorageObjects = async (): Promise<number> => {
+  const protectedObjects = await fetchProtectedFullSyncStorageObjects();
+  const cutoffMs = Date.now() - SYNC_ORPHAN_OBJECT_RETENTION_DAYS * DAY_IN_MS;
+  const pageSize = 200;
+  let offset = 0;
+  let deletedCount = 0;
+
+  while (deletedCount < SYNC_ORPHAN_OBJECT_CLEANUP_LIMIT) {
+    const rows = await listStorageObjectsPage(offset, pageSize);
+    if (!rows.length) break;
+    for (const row of rows) {
+      if (deletedCount >= SYNC_ORPHAN_OBJECT_CLEANUP_LIMIT) break;
+      const objectName = String(row?.name || '').trim();
+      if (!objectName || !objectName.startsWith('request_') || protectedObjects.has(objectName)) continue;
+      const objectTimeMs = parseTimestamp(row.updated_at || row.created_at || null);
+      if (objectTimeMs == null || objectTimeMs >= cutoffMs) continue;
+      try {
+        await deleteStorageObject(objectName);
+        deletedCount += 1;
+      } catch {
+        // Best-effort cleanup; ignore objects that were already removed.
+      }
+    }
+    if (rows.length < pageSize) break;
+    offset += pageSize;
+  }
+
+  return deletedCount;
+};
+
+const cleanupQueueRetention = async (actor: SyncActor): Promise<void> => {
+  if (!isConfigured()) return;
+  const nowMs = Date.now();
+  if (nowMs - lastRetentionCleanupAtMs < SYNC_RETENTION_RPC_COOLDOWN_MS) return;
+  lastRetentionCleanupAtMs = nowMs;
+
+  try {
+    await callRpcMaybe('cleanup_sync_queues');
+  } catch {
+    // Cleanup RPC might not exist yet in older Supabase schema.
+  }
+
+  try {
+    await callRpcMaybe('cleanup_full_sync_requests');
+  } catch {
+    // Cleanup RPC might not exist yet in older Supabase schema.
+  }
+
+  if (canAdminSync(actor)) {
+    try {
+      await cleanupOrphanFullSyncStorageObjects();
+    } catch {
+      // Storage cleanup is best-effort and should not block sync.
+    }
+  }
 };
 
 const getLocalDbSizeBytes = (db: Database.Database): number => {
@@ -1199,6 +1705,19 @@ const getLocalDbSizeBytes = (db: Database.Database): number => {
   const pageCount = Number(pageCountRow?.page_count || 0);
   const pageSize = Number(pageSizeRow?.page_size || 0);
   return pageCount * pageSize;
+};
+
+const getLocalInventoryRecordCount = (db: Database.Database): number => {
+  const employees = db
+    .prepare('SELECT COUNT(*) AS count FROM employees WHERE deleted_at IS NULL')
+    .get() as { count?: number } | undefined;
+  const products = db
+    .prepare('SELECT COUNT(*) AS count FROM products WHERE deleted_at IS NULL')
+    .get() as { count?: number } | undefined;
+  const returns = db
+    .prepare('SELECT COUNT(*) AS count FROM returns WHERE deleted_at IS NULL')
+    .get() as { count?: number } | undefined;
+  return Number(employees?.count || 0) + Number(products?.count || 0) + Number(returns?.count || 0);
 };
 
 const readInventorySnapshot = (db: Database.Database) => {
@@ -1288,7 +1807,7 @@ const fetchFullSyncRequests = async (
   const params = new URLSearchParams();
   params.set(
     'select',
-    'id,requester_device_id,requester_user_id,requested_at,status,last_successful_sync_at,estimated_db_size_bytes,approved_at,approved_by_user_id,rejected_at,rejected_by_user_id,rejection_reason,total_chunks,manifest_checksum,started_at,completed_at,completed_by_device_id,updated_at'
+    'id,requesting_device_id,target_device_id,requested_by,estimated_records,estimated_size_mb,created_at,requester_device_id,requester_user_id,requested_at,status,last_successful_sync_at,estimated_db_size_bytes,approved_at,approved_by_user_id,rejected_at,rejected_by_user_id,rejection_reason,total_chunks,manifest_checksum,started_at,completed_at,completed_by_device_id,updated_at'
   );
   queryBuilder(params);
   const response = await supabaseRequest(`${getFullSyncRequestsTable()}?${params.toString()}`, { method: 'GET' });
@@ -1303,9 +1822,16 @@ const fetchFullSyncRequestById = async (requestId: string): Promise<FullSyncRequ
   return rows[0] || null;
 };
 
+const applyFullSyncDeviceFilter = (params: URLSearchParams, deviceId: string): void => {
+  params.set(
+    'or',
+    `(target_device_id.eq.${deviceId},requesting_device_id.eq.${deviceId},requester_device_id.eq.${deviceId})`
+  );
+};
+
 const fetchLatestActiveFullSyncRequestForDevice = async (deviceId: string): Promise<FullSyncRequestRow | null> => {
   const rows = await fetchFullSyncRequests((params) => {
-    params.set('requester_device_id', `eq.${deviceId}`);
+    applyFullSyncDeviceFilter(params, deviceId);
     params.set('status', 'in.(pending,approved,transferring)');
     params.set('order', 'requested_at.desc');
     params.set('limit', '1');
@@ -1315,7 +1841,17 @@ const fetchLatestActiveFullSyncRequestForDevice = async (deviceId: string): Prom
 
 const fetchLatestFullSyncRequestForDevice = async (deviceId: string): Promise<FullSyncRequestRow | null> => {
   const rows = await fetchFullSyncRequests((params) => {
-    params.set('requester_device_id', `eq.${deviceId}`);
+    applyFullSyncDeviceFilter(params, deviceId);
+    params.set('order', 'requested_at.desc');
+    params.set('limit', '1');
+  });
+  return rows[0] || null;
+};
+
+const fetchPendingFullSyncRequestForTargetDevice = async (deviceId: string): Promise<FullSyncRequestRow | null> => {
+  const rows = await fetchFullSyncRequests((params) => {
+    applyFullSyncDeviceFilter(params, deviceId);
+    params.set('status', 'eq.pending');
     params.set('order', 'requested_at.desc');
     params.set('limit', '1');
   });
@@ -1608,14 +2144,30 @@ const summarizeFullSyncRequest = (request: FullSyncRequestRow, chunks: FullSyncC
   const uploadedChunks = chunks.filter((chunk) => chunk.status === 'uploaded').length;
   const ackedChunks = chunks.filter((chunk) => chunk.status === 'acked' || chunk.status === 'deleted').length;
   const nextUploaded = chunks.find((chunk) => chunk.status === 'uploaded');
+  const estimatedDbSizeBytes =
+    request.estimated_db_size_bytes != null
+      ? request.estimated_db_size_bytes
+      : request.estimated_size_mb != null
+        ? Math.round(Number(request.estimated_size_mb) * 1024 * 1024)
+        : null;
   return {
     requestId: request.id,
-    requesterDeviceId: request.requester_device_id,
-    requesterUserId: request.requester_user_id,
-    requestedAt: request.requested_at,
+    requestingDeviceId: request.requesting_device_id || request.requester_device_id,
+    targetDeviceId: request.target_device_id || request.requester_device_id,
+    requestedBy: request.requested_by || request.requester_user_id,
+    requesterDeviceId: request.requester_device_id || request.requesting_device_id || request.target_device_id,
+    requesterUserId: request.requested_by || request.requester_user_id,
+    requestedAt: request.created_at || request.requested_at,
     status: request.status,
     lastSuccessfulSyncAt: request.last_successful_sync_at,
-    estimatedDbSizeBytes: request.estimated_db_size_bytes,
+    estimatedRecords: request.estimated_records,
+    estimatedSizeMb:
+      request.estimated_size_mb != null
+        ? Number(request.estimated_size_mb)
+        : estimatedDbSizeBytes != null
+          ? Number((estimatedDbSizeBytes / 1024 / 1024).toFixed(3))
+          : null,
+    estimatedDbSizeBytes,
     approvedAt: request.approved_at,
     approvedByUserId: request.approved_by_user_id,
     rejectedAt: request.rejected_at,
@@ -2051,31 +2603,52 @@ const buildEmployeeQueueRecords = (
     data: any;
   };
 }> => {
-  if (entry.entityType !== 'products') return [];
-
   const payload = entry.queueRecord.data || {};
-  const currentAssigned = payload.assignedToEmployeeId ? String(payload.assignedToEmployeeId) : null;
-  const previousAssigned = payload?._meta?.previousAssignedToEmployeeId
-    ? String(payload._meta.previousAssignedToEmployeeId)
-    : null;
+  if (entry.entityType === 'products') {
+    const currentAssigned = payload.assignedToEmployeeId ? String(payload.assignedToEmployeeId) : null;
+    const previousAssigned = payload?._meta?.previousAssignedToEmployeeId
+      ? String(payload._meta.previousAssignedToEmployeeId)
+      : null;
 
-  const recipients = new Set<string>();
-  if (currentAssigned) recipients.add(currentAssigned);
-  if (previousAssigned) recipients.add(previousAssigned);
+    const recipients = new Set<string>();
+    if (currentAssigned) recipients.add(currentAssigned);
+    if (previousAssigned) recipients.add(previousAssigned);
 
-  if (!recipients.size) return [];
+    if (!recipients.size) return [];
 
-  const data = sanitizeQueueData(payload);
+    const data = sanitizeQueueData(payload);
 
-  return Array.from(recipients).map((employeeId) => ({
-    employee_id: employeeId,
-    payload: {
-      table_name: entry.entityType,
-      operation: entry.queueRecord.operation,
-      record_id: entry.entityId,
-      data
-    }
-  }));
+    return Array.from(recipients).map((employeeId) => ({
+      employee_id: employeeId,
+      payload: {
+        table_name: entry.entityType,
+        operation: entry.queueRecord.operation,
+        record_id: entry.entityId,
+        data
+      }
+    }));
+  }
+
+  if (entry.entityType === 'returns') {
+    const returnedByEmployeeId = payload.returnedByEmployeeId || payload.returned_by_employee_id;
+    const returnedByPosition = String(payload.returnedByPosition || payload.returned_by_position || '').trim().toLowerCase();
+    if (!returnedByEmployeeId || returnedByPosition !== 'employee') return [];
+
+    const data = sanitizeQueueData(payload);
+    return [
+      {
+        employee_id: String(returnedByEmployeeId),
+        payload: {
+          table_name: entry.entityType,
+          operation: entry.queueRecord.operation,
+          record_id: entry.entityId,
+          data
+        }
+      }
+    ];
+  }
+
+  return [];
 };
 
 const isUuidLike = (value: string): boolean => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value);
@@ -2104,6 +2677,11 @@ const resolveOriginUserId = (db: Database.Database, actor: SyncActor): string | 
   return isUuidLike(actor.userId) ? actor.userId : null;
 };
 
+const buildRecipientKey = (employeeId: string | null): string => {
+  const normalized = String(employeeId || '').trim();
+  return normalized || RELAY_RECIPIENT_ALL;
+};
+
 const buildRelayQueueRow = (
   payload: { table_name: string; operation: QueueOperation; record_id: string; data: any },
   originDeviceId: string,
@@ -2111,13 +2689,23 @@ const buildRelayQueueRow = (
   employeeId: string | null
 ) => {
   const createdAt = nowIso();
+  const updatedAt = String(
+    payload.data?.updatedAt || payload.data?.lastModified || payload.data?.createdAt || payload.data?.timestamp || createdAt
+  );
+  const queuePayload = {
+    ...payload,
+    created_at: createdAt,
+    updated_at: updatedAt
+  };
   return {
     employee_id: employeeId,
+    recipient_key: buildRecipientKey(employeeId),
     origin_device_id: originDeviceId,
     origin_user_id: originUserId,
-    payload,
-    payload_size_kb: sizeKbForJson(payload),
+    payload: queuePayload,
+    payload_size_kb: sizeKbForJson(queuePayload),
     created_at: createdAt,
+    updated_at: updatedAt,
     // backward-compatibility columns
     table_name: payload.table_name,
     operation: payload.operation,
@@ -2129,7 +2717,8 @@ const buildRelayQueueRow = (
 
 const chunkRecordsBySize = <T extends Record<string, unknown>>(
   records: T[],
-  maxBytes: number
+  maxBytes: number,
+  maxRecords: number
 ): Array<{ rows: T[]; bytes: number }> => {
   if (!records.length) return [];
 
@@ -2141,8 +2730,9 @@ const chunkRecordsBySize = <T extends Record<string, unknown>>(
     const rowBytes = Math.max(1, sizeBytesForJson(row));
     const rowExceeds = rowBytes > maxBytes;
     const wouldOverflow = currentRows.length > 0 && currentBytes + rowBytes > maxBytes;
+    const wouldExceedRecordCount = currentRows.length >= maxRecords;
 
-    if (wouldOverflow) {
+    if (wouldOverflow || wouldExceedRecordCount) {
       batches.push({ rows: currentRows, bytes: currentBytes });
       currentRows = [];
       currentBytes = 0;
@@ -2168,7 +2758,13 @@ const chunkRecordsBySize = <T extends Record<string, unknown>>(
 const mapStatus = (actor: SyncActor, state: SyncStateRow, db: Database.Database) => ({
   fullSyncRequired: Boolean(state.full_sync_required),
   fullSyncReason: state.full_sync_reason,
+  fullSyncEligible: canRequestFullSync(actor) ? isManualFullSyncEligible(state) : false,
+  fullSyncEligibilityReason: canRequestFullSync(actor) ? getManualFullSyncBlockReason(state) : null,
   lastSuccessfulSyncAt: getLastSuccessfulSyncAt(state),
+  deviceId: state.device_id,
+  lastAutoSyncAt: state.last_auto_sync_at,
+  lastFullSyncAt: state.last_full_sync_at,
+  deviceRegisteredAt: state.device_registered_at,
   retentionDays: SYNC_QUEUE_RETENTION_DAYS,
   maxOfflineDays: SYNC_MAX_OFFLINE_DAYS,
   role: actor.role,
@@ -2183,6 +2779,18 @@ const mapStatus = (actor: SyncActor, state: SyncStateRow, db: Database.Database)
   lastConflictCount: state.last_conflict_count,
   lastStatus: state.last_status,
   lastError: state.last_error,
+  lastWarning: state.last_warning,
+  relayQueueRows: state.relay_queue_rows,
+  relayQueuePayloadMb: state.relay_queue_payload_mb,
+  relayStorageMb: state.relay_storage_mb,
+  relayOldestQueueAt: state.relay_oldest_queue_at,
+  relayLastCheckedAt: state.relay_last_checked_at,
+  relayDbLimitMb: SYNC_RELAY_DB_LIMIT_MB,
+  relayStorageLimitMb: SYNC_RELAY_STORAGE_LIMIT_MB,
+  relayDbSoftThreshold: SYNC_RELAY_DB_SOFT_THRESHOLD,
+  relayDbHardThreshold: SYNC_RELAY_DB_HARD_THRESHOLD,
+  relayStorageSoftThreshold: SYNC_RELAY_STORAGE_SOFT_THRESHOLD,
+  relayStorageHardThreshold: SYNC_RELAY_STORAGE_HARD_THRESHOLD,
   pendingLocalChanges: canPushLocalChanges(actor) ? getPendingLocalChangeCount(db, actor) : 0,
   recentLogs: getRecentEvents(db).map((event) => ({
     id: event.id,
@@ -2367,9 +2975,34 @@ export async function pushLocalChanges(actor: SyncActor, stage?: PushStageOption
         }))
       : [];
 
-    const targetedAdminPayloadRecords = canAdminSync(actor)
+    let targetedAdminPayloadRecords = canAdminSync(actor)
       ? prepared.flatMap((entry) => buildEmployeeQueueRecords(entry))
       : [];
+
+    if (canAdminSync(actor) && targetedAdminPayloadRecords.length) {
+      const targetEmployeeIds = Array.from(
+        new Set(targetedAdminPayloadRecords.map((item) => String(item.employee_id || '').trim()).filter(Boolean))
+      );
+      if (targetEmployeeIds.length) {
+        try {
+          const presence = await fetchEmployeePresenceMap(targetEmployeeIds);
+          const staleTargets = getStaleRecipients(presence, targetEmployeeIds);
+          if (staleTargets.size > 0) {
+            targetedAdminPayloadRecords = targetedAdminPayloadRecords.filter(
+              (item) => !staleTargets.has(String(item.employee_id || '').trim())
+            );
+            logSyncEvent(db, {
+              eventType: 'push',
+              message:
+                `Skipped ${staleTargets.size} stale employee target(s) with no recent activity ` +
+                `(>${SYNC_TARGET_STALE_DAYS} days).`
+            });
+          }
+        } catch {
+          // Best-effort stale target filtering. Continue push flow if presence lookup fails.
+        }
+      }
+    }
 
     const employeePayloadRecords = !canAdminSync(actor)
       ? prepared.map((entry) => ({
@@ -2383,6 +3016,22 @@ export async function pushLocalChanges(actor: SyncActor, stage?: PushStageOption
         }))
       : [];
 
+    if (!canAdminSync(actor) && employeePayloadRecords.length) {
+      const freshAdminAvailable = await hasRecentAdminPresence();
+      if (freshAdminAvailable === false) {
+        const message =
+          `Push deferred: no active system-admin sync activity detected in the last ${SYNC_TARGET_STALE_DAYS} day` +
+          `${SYNC_TARGET_STALE_DAYS === 1 ? '' : 's'}. Local changes remain queued.`;
+        writeSyncState(db, actor, {
+          last_status: 'deferred',
+          last_error: null,
+          last_warning: message
+        });
+        logSyncEvent(db, { eventType: 'push', message });
+        return { status: 'deferred', pushedCount: 0, error: message };
+      }
+    }
+
     const adminQueueRecords = adminPayloadRecords.map((payload) => buildRelayQueueRow(payload, originDeviceId, originUserId, null));
     const targetedAdminQueueRecords = targetedAdminPayloadRecords.map((item) =>
       buildRelayQueueRow(item.payload, originDeviceId, originUserId, item.employee_id || null)
@@ -2391,11 +3040,41 @@ export async function pushLocalChanges(actor: SyncActor, stage?: PushStageOption
       buildRelayQueueRow(item.payload, originDeviceId, originUserId, item.employee_id || null)
     );
 
+    const projectedPushBytes =
+      adminQueueRecords.reduce((sum, row) => sum + sizeBytesForJson(row), 0) +
+      targetedAdminQueueRecords.reduce((sum, row) => sum + sizeBytesForJson(row), 0) +
+      employeeQueueRecords.reduce((sum, row) => sum + sizeBytesForJson(row), 0);
+
+    let relayWarning: string | null = null;
+    const relayUsage = await fetchRelayUsageStats();
+    if (relayUsage) {
+      const pressure = evaluateRelayPressure(relayUsage, projectedPushBytes);
+      relayWarning = pressure.warning;
+      persistRelayUsageSnapshot(db, actor, relayUsage, relayWarning);
+      if (relayWarning) {
+        logSyncEvent(db, { eventType: 'relay_usage', message: relayWarning });
+      }
+      if (pressure.block) {
+        writeSyncState(db, actor, {
+          last_status: 'throttled',
+          last_error: null,
+          last_warning: relayWarning
+        });
+        return {
+          status: 'deferred',
+          pushedCount: 0,
+          totalSizeKb: Number((projectedPushBytes / 1024).toFixed(3)),
+          batchCount: 0,
+          error: relayWarning || 'Push deferred due to relay quota protection.'
+        };
+      }
+    }
+
     try {
       let uploadedBatchCount = 0;
       let uploadedBytes = 0;
       const pushBatches = async (tableName: string, records: Array<Record<string, unknown>>) => {
-        const batches = chunkRecordsBySize(records, SYNC_PUSH_MAX_BATCH_BYTES);
+        const batches = chunkRecordsBySize(records, SYNC_PUSH_MAX_BATCH_BYTES, SYNC_PUSH_MAX_BATCH_RECORDS);
         for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
           const batch = batches[batchIndex];
           await pushQueueBatch(tableName, batch.rows);
@@ -2422,11 +3101,14 @@ export async function pushLocalChanges(actor: SyncActor, stage?: PushStageOption
         writeSyncState(db, actor, {
           last_push_at: syncedAt,
           last_successful_sync_at: syncedAt,
+          last_auto_sync_at: syncedAt,
+          device_registered_at: state.device_registered_at || syncedAt,
           last_push_count: prepared.length,
           full_sync_required: 0,
           full_sync_reason: null,
           last_status: 'online',
-          last_error: null
+          last_error: null,
+          last_warning: relayWarning
         });
 
         logSyncEvent(db, {
@@ -2439,6 +3121,7 @@ export async function pushLocalChanges(actor: SyncActor, stage?: PushStageOption
       });
 
       tx();
+      await touchActorPresence(db, actor, originUserId);
 
       return {
         status: 'synced',
@@ -2507,7 +3190,14 @@ export async function previewRemoteChanges(actor: SyncActor) {
         const remoteData = readRemoteData(row);
         totalSizeKb += Number(row.payload_size_kb ?? sizeKbForJson(remoteData));
         const remoteVersion = readVersion(remoteData?.version, 1);
-        const localVersion = getLocalVersion(db, entityType, readRemoteRecordId(row));
+        const localMeta = getLocalRecordMeta(db, entityType, readRemoteRecordId(row));
+        const localVersion = localMeta.version;
+        const remoteUpdatedMs = parseTimestamp(readRemoteUpdatedAt(row, remoteData));
+        const localUpdatedMs = parseTimestamp(localMeta.lastModified);
+        if (localMeta.exists && remoteUpdatedMs != null && localUpdatedMs != null && remoteUpdatedMs <= localUpdatedMs) {
+          conflicts += 1;
+          continue;
+        }
         if (localVersion > remoteVersion) conflicts += 1;
       }
 
@@ -2554,12 +3244,15 @@ const pullAdminChanges = async (
   if (!rows.length) {
     const allVisibleRows = await fetchAllRemoteQueueRows(getAdminQueueTable(), state.last_pull_at, EMPLOYEE_ID_NULL_FILTER);
     const message = allVisibleRows.length ? 'Data already exists locally.' : 'No new remote records available.';
+    const syncedAt = nowIso();
     writeSyncState(db, actor, {
       last_status: 'online',
       last_error: null,
       last_pull_count: 0,
       last_conflict_count: 0,
-      last_successful_sync_at: nowIso(),
+      last_successful_sync_at: syncedAt,
+      last_auto_sync_at: syncedAt,
+      device_registered_at: state.device_registered_at || syncedAt,
       full_sync_required: 0,
       full_sync_reason: null
     });
@@ -2598,7 +3291,19 @@ const pullAdminChanges = async (
       }
       const remoteData = readRemoteData(row);
       const remoteVersion = readVersion(remoteData?.version, 1);
-      const localVersion = getLocalVersion(db, entityType, recordId);
+      const localMeta = getLocalRecordMeta(db, entityType, recordId);
+      const localVersion = localMeta.version;
+      const remoteUpdatedAt = readRemoteUpdatedAt(row, remoteData);
+      const remoteUpdatedMs = parseTimestamp(remoteUpdatedAt);
+      const localUpdatedMs = parseTimestamp(localMeta.lastModified);
+
+      if (localMeta.exists && remoteUpdatedMs != null && localUpdatedMs != null && remoteUpdatedMs <= localUpdatedMs) {
+        remoteIdsToDelete.push(row.id);
+        if (!latestAppliedTimestamp || rowCreatedAt > latestAppliedTimestamp) {
+          latestAppliedTimestamp = rowCreatedAt;
+        }
+        continue;
+      }
 
       if (localVersion > remoteVersion && conflictStrategy === 'skip') {
         conflicts.push(createConflictRecord({ ...row, table_name: entityType, record_id: recordId }, entityType, localVersion, remoteVersion));
@@ -2637,11 +3342,14 @@ const pullAdminChanges = async (
   }
 
   const shouldAdvanceCursor = conflicts.length === 0 && Boolean(latestAppliedTimestamp);
+  const syncedAt = nowIso();
 
   const updateTx = db.transaction(() => {
     writeSyncState(db, actor, {
       last_pull_at: shouldAdvanceCursor ? latestAppliedTimestamp : state.last_pull_at,
-      last_successful_sync_at: nowIso(),
+      last_successful_sync_at: syncedAt,
+      last_auto_sync_at: syncedAt,
+      device_registered_at: state.device_registered_at || syncedAt,
       last_pull_count: pulledCount,
       last_conflict_count: conflicts.length,
       full_sync_required: 0,
@@ -2683,12 +3391,15 @@ const pullEmployeeAssignedChanges = async (
   if (!rows.length) {
     const allVisibleRows = await fetchAllRemoteQueueRows(getAdminQueueTable(), state.last_pull_at, actor.userId);
     const message = allVisibleRows.length ? 'Data already exists locally.' : 'No new remote records available.';
+    const syncedAt = nowIso();
     writeSyncState(db, actor, {
       last_status: 'online',
       last_error: null,
       last_pull_count: 0,
       last_conflict_count: 0,
-      last_successful_sync_at: nowIso(),
+      last_successful_sync_at: syncedAt,
+      last_auto_sync_at: syncedAt,
+      device_registered_at: state.device_registered_at || syncedAt,
       full_sync_required: 0,
       full_sync_reason: null
     });
@@ -2710,7 +3421,7 @@ const pullEmployeeAssignedChanges = async (
     for (const row of rows) {
       const entityType = normalizeEntityType(readRemoteTableName(row) || '');
       const rowCreatedAt = readRemoteTimestamp(row);
-      if (entityType !== 'products') {
+      if (entityType !== 'products' && entityType !== 'returns') {
         remoteIdsToDelete.push(row.id);
         if (!latestAppliedTimestamp || rowCreatedAt > latestAppliedTimestamp) {
           latestAppliedTimestamp = rowCreatedAt;
@@ -2727,7 +3438,19 @@ const pullEmployeeAssignedChanges = async (
       }
       const remoteData = readRemoteData(row);
       const remoteVersion = readVersion(remoteData?.version, 1);
-      const localVersion = getLocalVersion(db, entityType, recordId);
+      const localMeta = getLocalRecordMeta(db, entityType, recordId);
+      const localVersion = localMeta.version;
+      const remoteUpdatedAt = readRemoteUpdatedAt(row, remoteData);
+      const remoteUpdatedMs = parseTimestamp(remoteUpdatedAt);
+      const localUpdatedMs = parseTimestamp(localMeta.lastModified);
+
+      if (localMeta.exists && remoteUpdatedMs != null && localUpdatedMs != null && remoteUpdatedMs <= localUpdatedMs) {
+        remoteIdsToDelete.push(row.id);
+        if (!latestAppliedTimestamp || rowCreatedAt > latestAppliedTimestamp) {
+          latestAppliedTimestamp = rowCreatedAt;
+        }
+        continue;
+      }
 
       if (localVersion > remoteVersion && conflictStrategy === 'skip') {
         conflicts.push(createConflictRecord({ ...row, table_name: entityType, record_id: recordId }, entityType, localVersion, remoteVersion));
@@ -2744,17 +3467,25 @@ const pullEmployeeAssignedChanges = async (
         version: resolvedVersion
       };
 
-      const assignedToEmployeeId = payload.assignedToEmployeeId ? String(payload.assignedToEmployeeId) : null;
-      const shouldDeleteLocal =
-        operation === 'delete' ||
-        !assignedToEmployeeId ||
-        assignedToEmployeeId !== actor.userId ||
-        payload.assignmentStatus === 'returned';
+      if (entityType === 'products') {
+        const assignedToEmployeeId = payload.assignedToEmployeeId ? String(payload.assignedToEmployeeId) : null;
+        const shouldDeleteLocal =
+          operation === 'delete' ||
+          !assignedToEmployeeId ||
+          assignedToEmployeeId !== actor.userId ||
+          payload.assignmentStatus === 'returned';
 
-      if (shouldDeleteLocal) {
-        applyRemoteDelete(db, 'products', recordId, payload.deletedAt || rowCreatedAt || nowIso(), resolvedVersion);
+        if (shouldDeleteLocal) {
+          applyRemoteDelete(db, 'products', recordId, payload.deletedAt || rowCreatedAt || nowIso(), resolvedVersion);
+        } else {
+          applyRemoteProduct(db, payload, resolvedVersion);
+        }
       } else {
-        applyRemoteProduct(db, payload, resolvedVersion);
+        if (operation === 'delete') {
+          applyRemoteDelete(db, 'returns', recordId, payload.deletedAt || rowCreatedAt || nowIso(), resolvedVersion);
+        } else {
+          applyRemoteReturn(db, payload, resolvedVersion);
+        }
       }
 
       remoteIdsToDelete.push(row.id);
@@ -2773,11 +3504,14 @@ const pullEmployeeAssignedChanges = async (
   }
 
   const shouldAdvanceCursor = conflicts.length === 0 && Boolean(latestAppliedTimestamp);
+  const syncedAt = nowIso();
 
   const updateTx = db.transaction(() => {
     writeSyncState(db, actor, {
       last_pull_at: shouldAdvanceCursor ? latestAppliedTimestamp : state.last_pull_at,
-      last_successful_sync_at: nowIso(),
+      last_successful_sync_at: syncedAt,
+      last_auto_sync_at: syncedAt,
+      device_registered_at: state.device_registered_at || syncedAt,
       last_pull_count: pulledCount,
       last_conflict_count: conflicts.length,
       full_sync_required: 0,
@@ -2816,6 +3550,15 @@ const pullEmployeeSubmissionsForAdmin = async (
 ) => {
   const rows = await fetchAllRemoteQueueRows(getEmployeeQueueTable(), null, null, currentDeviceId);
   if (!rows.length) {
+    const syncedAt = nowIso();
+    const currentState = readSyncState(db, actor);
+    writeSyncState(db, actor, {
+      last_successful_sync_at: syncedAt,
+      last_auto_sync_at: syncedAt,
+      device_registered_at: currentState.device_registered_at || syncedAt,
+      last_status: 'online',
+      last_error: null
+    });
     return {
       status: 'idle' as const,
       pulledCount: 0,
@@ -2850,7 +3593,19 @@ const pullEmployeeSubmissionsForAdmin = async (
       }
       const remoteData = readRemoteData(row);
       const remoteVersion = readVersion(remoteData?.version, 1);
-      const localVersion = getLocalVersion(db, entityType, recordId);
+      const localMeta = getLocalRecordMeta(db, entityType, recordId);
+      const localVersion = localMeta.version;
+      const remoteUpdatedAt = readRemoteUpdatedAt(row, remoteData);
+      const remoteUpdatedMs = parseTimestamp(remoteUpdatedAt);
+      const localUpdatedMs = parseTimestamp(localMeta.lastModified);
+
+      if (localMeta.exists && remoteUpdatedMs != null && localUpdatedMs != null && remoteUpdatedMs <= localUpdatedMs) {
+        remoteIdsToDelete.push(row.id);
+        if (!latestAppliedTimestamp || rowCreatedAt > latestAppliedTimestamp) {
+          latestAppliedTimestamp = rowCreatedAt;
+        }
+        continue;
+      }
 
       if (localVersion > remoteVersion && conflictStrategy === 'skip') {
         conflicts.push(createConflictRecord({ ...row, table_name: entityType, record_id: recordId }, entityType, localVersion, remoteVersion));
@@ -2887,8 +3642,12 @@ const pullEmployeeSubmissionsForAdmin = async (
     await deleteRemoteQueueRowsWithRetry(getEmployeeQueueTable(), remoteIdsToDelete, currentDeviceId);
   }
 
+  const syncedAt = nowIso();
+  const currentState = readSyncState(db, actor);
   writeSyncState(db, actor, {
-    last_successful_sync_at: nowIso(),
+    last_successful_sync_at: syncedAt,
+    last_auto_sync_at: syncedAt,
+    device_registered_at: currentState.device_registered_at || syncedAt,
     full_sync_required: 0,
     full_sync_reason: null,
     last_status: conflicts.length ? 'conflict' : 'online',
@@ -2970,12 +3729,19 @@ export async function pullRemoteChanges(actor: SyncActor, conflictStrategy: Conf
     try {
       await cleanupQueueRetention(actor);
       const currentDeviceId = getLocalDeviceId(db);
+      const result = canAdminSync(actor)
+        ? await pullAdminChanges(db, actor, state, conflictStrategy, currentDeviceId)
+        : await pullEmployeeAssignedChanges(db, actor, state, conflictStrategy, currentDeviceId);
 
-      if (canAdminSync(actor)) {
-        return await pullAdminChanges(db, actor, state, conflictStrategy, currentDeviceId);
+      if (result.status === 'synced' || result.status === 'idle' || result.status === 'conflict') {
+        await touchActorPresence(db, actor);
+        const relayUsage = await fetchRelayUsageStats();
+        if (relayUsage) {
+          persistRelayUsageSnapshot(db, actor, relayUsage, readSyncState(db, actor).last_warning);
+        }
       }
 
-      return await pullEmployeeAssignedChanges(db, actor, state, conflictStrategy, currentDeviceId);
+      return result;
     } catch (error: any) {
       const message = error?.message ?? 'Pull failed';
       writeSyncState(db, actor, { last_status: 'error', last_error: message });
@@ -3025,7 +3791,15 @@ export async function autoPullEmployeeSubmissions(actor: SyncActor) {
     try {
       await cleanupQueueRetention(actor);
       const currentDeviceId = getLocalDeviceId(db);
-      return await pullEmployeeSubmissionsForAdmin(db, actor, 'remote_wins', currentDeviceId);
+      const result = await pullEmployeeSubmissionsForAdmin(db, actor, 'remote_wins', currentDeviceId);
+      if (result.status === 'synced' || result.status === 'idle' || result.status === 'conflict') {
+        await touchActorPresence(db, actor);
+        const relayUsage = await fetchRelayUsageStats();
+        if (relayUsage) {
+          persistRelayUsageSnapshot(db, actor, relayUsage, readSyncState(db, actor).last_warning);
+        }
+      }
+      return result;
     } catch (error: any) {
       const message = error?.message ?? 'Failed to auto pull employee submissions.';
       writeSyncState(db, actor, { last_status: 'error', last_error: message });
@@ -3037,6 +3811,38 @@ export async function autoPullEmployeeSubmissions(actor: SyncActor) {
 
 export async function syncNow(actor: SyncActor) {
   return pushLocalChanges(actor);
+}
+
+export async function checkPendingFullSyncRequest(actor: SyncActor) {
+  return withActorToken(actor, async () => {
+    const db = dataStore.getDb();
+
+    if (!canAdminSync(actor)) {
+      return { status: 'forbidden', error: 'Only system admin accounts can check full sync requests.' };
+    }
+
+    if (!isConfigured()) {
+      return {
+        status: 'error',
+        error: 'Supabase is not configured. Set SUPABASE_URL and SUPABASE_ANON_KEY (or SUPABASE_PUBLISHABLE_KEY).'
+      };
+    }
+
+    try {
+      const deviceId = getLocalDeviceId(db);
+      const request = await fetchPendingFullSyncRequestForTargetDevice(deviceId);
+      if (!request) {
+        return { status: 'none', request: null };
+      }
+
+      return {
+        status: 'pending',
+        request: summarizeFullSyncRequest(request)
+      };
+    } catch (error: any) {
+      return { status: 'error', error: error?.message ?? 'Failed to check full sync request.' };
+    }
+  });
 }
 
 export async function requestFullSync(actor: SyncActor) {
@@ -3071,13 +3877,31 @@ export async function requestFullSync(actor: SyncActor) {
         };
       }
 
+      const eligibilityError = getManualFullSyncBlockReason(state);
+      if (eligibilityError) {
+        writeSyncState(db, actor, {
+          last_status: 'full_sync_not_allowed',
+          last_error: eligibilityError
+        });
+        return { status: 'not_allowed', error: eligibilityError };
+      }
+
+      const estimatedDbSizeBytes = getLocalDbSizeBytes(db);
+      const estimatedRecords = getLocalInventoryRecordCount(db);
+      const requestedAt = nowIso();
       const request = await createFullSyncRequest({
+        requesting_device_id: deviceId,
+        target_device_id: deviceId,
+        requested_by: actor.userId,
+        estimated_records: estimatedRecords,
+        estimated_size_mb: Number((estimatedDbSizeBytes / 1024 / 1024).toFixed(3)),
+        created_at: requestedAt,
         requester_device_id: deviceId,
         requester_user_id: actor.userId,
-        requested_at: nowIso(),
+        requested_at: requestedAt,
         status: 'pending',
         last_successful_sync_at: getLastSuccessfulSyncAt(state),
-        estimated_db_size_bytes: getLocalDbSizeBytes(db)
+        estimated_db_size_bytes: estimatedDbSizeBytes
       });
 
       writeSyncState(db, actor, {
@@ -3383,6 +4207,10 @@ export async function pullNextFullSyncChunk(actor: SyncActor) {
       const deviceId = getLocalDeviceId(db);
       const request = await fetchLatestActiveFullSyncRequestForDevice(deviceId);
       if (!request) {
+        const eligibilityError = getManualFullSyncBlockReason(state);
+        if (eligibilityError) {
+          return { status: 'not_allowed', error: eligibilityError };
+        }
         return { status: 'idle', error: 'No active full sync request for this device.' };
       }
 
@@ -3466,6 +4294,9 @@ export async function pullNextFullSyncChunk(actor: SyncActor) {
           full_sync_reason: null,
           last_successful_sync_at: syncedAt,
           last_pull_at: syncedAt,
+          last_auto_sync_at: syncedAt,
+          last_full_sync_at: syncedAt,
+          device_registered_at: syncedAt,
           last_status: 'online',
           last_error: null
         });

@@ -1,4 +1,4 @@
--- Role-based manual sync queues for BTS Inventory
+-- Role-based automatic sync queues for BTS Inventory
 -- Run this in Supabase SQL Editor.
 
 create extension if not exists pgcrypto;
@@ -9,6 +9,8 @@ create table if not exists public.app_users (
   email text not null unique,
   role text not null check (role in ('system_admin', 'employee')),
   account_status text not null default 'active' check (account_status in ('active', 'inactive')),
+  last_seen_at timestamptz,
+  last_seen_device_id text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -18,6 +20,8 @@ alter table public.app_users add column if not exists employee_id text;
 alter table public.app_users add column if not exists email text;
 alter table public.app_users add column if not exists role text;
 alter table public.app_users add column if not exists account_status text not null default 'active';
+alter table public.app_users add column if not exists last_seen_at timestamptz;
+alter table public.app_users add column if not exists last_seen_device_id text;
 alter table public.app_users add column if not exists created_at timestamptz not null default now();
 alter table public.app_users add column if not exists updated_at timestamptz not null default now();
 
@@ -36,15 +40,18 @@ alter table public.app_users
 create unique index if not exists idx_app_users_employee_id on public.app_users(employee_id);
 create unique index if not exists idx_app_users_email on public.app_users(email);
 create index if not exists idx_app_users_role_status on public.app_users(role, account_status);
+create index if not exists idx_app_users_last_seen on public.app_users(last_seen_at desc);
 
 create table if not exists public.admin_sync_queue (
   id uuid primary key default gen_random_uuid(),
   employee_id text,
+  recipient_key text not null default '__all__',
   origin_device_id text not null default '',
   origin_user_id uuid,
   payload jsonb,
   payload_size_kb numeric,
   created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
   table_name text not null,
   operation text not null check (operation in ('insert', 'update', 'delete')),
   record_id text not null,
@@ -55,11 +62,13 @@ create table if not exists public.admin_sync_queue (
 create table if not exists public.employee_sync_queue (
   id uuid primary key default gen_random_uuid(),
   employee_id text not null,
+  recipient_key text not null default '__all__',
   origin_device_id text not null default '',
   origin_user_id uuid,
   payload jsonb,
   payload_size_kb numeric,
   created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
   table_name text not null,
   operation text not null check (operation in ('insert', 'update', 'delete')),
   record_id text not null,
@@ -68,20 +77,25 @@ create table if not exists public.employee_sync_queue (
 );
 
 alter table public.admin_sync_queue add column if not exists employee_id text;
+alter table public.admin_sync_queue add column if not exists recipient_key text not null default '__all__';
 alter table public.admin_sync_queue add column if not exists origin_device_id text;
 alter table public.admin_sync_queue add column if not exists origin_user_id uuid;
 alter table public.admin_sync_queue add column if not exists payload jsonb;
 alter table public.admin_sync_queue add column if not exists payload_size_kb numeric;
 alter table public.admin_sync_queue add column if not exists created_at timestamptz not null default now();
+alter table public.admin_sync_queue add column if not exists updated_at timestamptz not null default now();
 
 alter table public.employee_sync_queue add column if not exists origin_device_id text;
+alter table public.employee_sync_queue add column if not exists recipient_key text not null default '__all__';
 alter table public.employee_sync_queue add column if not exists origin_user_id uuid;
 alter table public.employee_sync_queue add column if not exists payload jsonb;
 alter table public.employee_sync_queue add column if not exists payload_size_kb numeric;
 alter table public.employee_sync_queue add column if not exists created_at timestamptz not null default now();
+alter table public.employee_sync_queue add column if not exists updated_at timestamptz not null default now();
 
 update public.admin_sync_queue
 set
+  recipient_key = coalesce(nullif(trim(recipient_key), ''), nullif(trim(employee_id), ''), '__all__'),
   payload = coalesce(
     payload,
     jsonb_build_object(
@@ -92,11 +106,13 @@ set
     )
   ),
   payload_size_kb = coalesce(payload_size_kb, round((pg_column_size(coalesce(payload, data))::numeric / 1024.0), 3)),
-  created_at = coalesce(created_at, "timestamp", now())
-where payload is null or payload_size_kb is null or created_at is null;
+  created_at = coalesce(created_at, "timestamp", now()),
+  updated_at = coalesce(updated_at, created_at, "timestamp", now())
+where recipient_key is null or payload is null or payload_size_kb is null or created_at is null or updated_at is null;
 
 update public.employee_sync_queue
 set
+  recipient_key = coalesce(nullif(trim(recipient_key), ''), nullif(trim(employee_id), ''), '__all__'),
   payload = coalesce(
     payload,
     jsonb_build_object(
@@ -107,11 +123,44 @@ set
     )
   ),
   payload_size_kb = coalesce(payload_size_kb, round((pg_column_size(coalesce(payload, data))::numeric / 1024.0), 3)),
-  created_at = coalesce(created_at, "timestamp", now())
-where payload is null or payload_size_kb is null or created_at is null;
+  created_at = coalesce(created_at, "timestamp", now()),
+  updated_at = coalesce(updated_at, created_at, "timestamp", now())
+where recipient_key is null or payload is null or payload_size_kb is null or created_at is null or updated_at is null;
+
+with ranked as (
+  select
+    id,
+    row_number() over (
+      partition by recipient_key, table_name, record_id
+      order by coalesce(updated_at, created_at, "timestamp") desc, id desc
+    ) as rn
+  from public.admin_sync_queue
+)
+delete from public.admin_sync_queue q
+using ranked r
+where q.id = r.id and r.rn > 1;
+
+with ranked as (
+  select
+    id,
+    row_number() over (
+      partition by recipient_key, table_name, record_id
+      order by coalesce(updated_at, created_at, "timestamp") desc, id desc
+    ) as rn
+  from public.employee_sync_queue
+)
+delete from public.employee_sync_queue q
+using ranked r
+where q.id = r.id and r.rn > 1;
 
 create table if not exists public.full_sync_requests (
   id uuid primary key default gen_random_uuid(),
+  requesting_device_id text,
+  target_device_id text,
+  requested_by text,
+  estimated_records integer,
+  estimated_size_mb numeric,
+  created_at timestamptz not null default now(),
   requester_device_id text not null,
   requester_user_id text,
   requested_at timestamptz not null default now(),
@@ -149,6 +198,12 @@ create table if not exists public.full_sync_chunks (
 alter table public.full_sync_requests add column if not exists requester_device_id text;
 alter table public.full_sync_requests add column if not exists requester_user_id text;
 alter table public.full_sync_requests add column if not exists requested_at timestamptz not null default now();
+alter table public.full_sync_requests add column if not exists requesting_device_id text;
+alter table public.full_sync_requests add column if not exists target_device_id text;
+alter table public.full_sync_requests add column if not exists requested_by text;
+alter table public.full_sync_requests add column if not exists estimated_records integer;
+alter table public.full_sync_requests add column if not exists estimated_size_mb numeric;
+alter table public.full_sync_requests add column if not exists created_at timestamptz not null default now();
 alter table public.full_sync_requests add column if not exists status text not null default 'pending';
 alter table public.full_sync_requests add column if not exists last_successful_sync_at timestamptz;
 alter table public.full_sync_requests add column if not exists estimated_db_size_bytes bigint;
@@ -163,6 +218,26 @@ alter table public.full_sync_requests add column if not exists started_at timest
 alter table public.full_sync_requests add column if not exists completed_at timestamptz;
 alter table public.full_sync_requests add column if not exists completed_by_device_id text;
 alter table public.full_sync_requests add column if not exists updated_at timestamptz not null default now();
+
+update public.full_sync_requests
+set
+  requesting_device_id = coalesce(requesting_device_id, requester_device_id),
+  target_device_id = coalesce(target_device_id, requester_device_id),
+  requested_by = coalesce(requested_by, requester_user_id),
+  estimated_size_mb = coalesce(
+    estimated_size_mb,
+    case
+      when estimated_db_size_bytes is not null then round((estimated_db_size_bytes::numeric / 1024.0 / 1024.0), 3)
+      else null
+    end
+  ),
+  created_at = coalesce(created_at, requested_at, now())
+where
+  requesting_device_id is null
+  or target_device_id is null
+  or requested_by is null
+  or estimated_size_mb is null
+  or created_at is null;
 
 alter table public.full_sync_chunks add column if not exists chunk_size_bytes bigint;
 alter table public.full_sync_chunks add column if not exists checksum_sha256 text;
@@ -182,8 +257,14 @@ create index if not exists idx_admin_sync_queue_employee_timestamp
 create index if not exists idx_admin_sync_queue_created_at
   on public.admin_sync_queue (created_at desc);
 
+create index if not exists idx_admin_sync_queue_updated_at
+  on public.admin_sync_queue (updated_at desc);
+
 create index if not exists idx_admin_sync_queue_origin_device
   on public.admin_sync_queue (origin_device_id);
+
+create unique index if not exists idx_admin_sync_queue_recipient_record
+  on public.admin_sync_queue (recipient_key, table_name, record_id);
 
 create index if not exists idx_employee_sync_queue_employee_timestamp
   on public.employee_sync_queue (employee_id, "timestamp");
@@ -194,14 +275,26 @@ create index if not exists idx_employee_sync_queue_timestamp
 create index if not exists idx_employee_sync_queue_created_at
   on public.employee_sync_queue (created_at desc);
 
+create index if not exists idx_employee_sync_queue_updated_at
+  on public.employee_sync_queue (updated_at desc);
+
 create index if not exists idx_employee_sync_queue_origin_device
   on public.employee_sync_queue (origin_device_id);
+
+create unique index if not exists idx_employee_sync_queue_recipient_record
+  on public.employee_sync_queue (recipient_key, table_name, record_id);
 
 create index if not exists idx_full_sync_requests_status_requested_at
   on public.full_sync_requests (status, requested_at desc);
 
 create index if not exists idx_full_sync_requests_device_requested_at
   on public.full_sync_requests (requester_device_id, requested_at desc);
+
+create index if not exists idx_full_sync_requests_target_status_created_at
+  on public.full_sync_requests (target_device_id, status, created_at desc);
+
+create index if not exists idx_full_sync_requests_requesting_created_at
+  on public.full_sync_requests (requesting_device_id, created_at desc);
 
 create index if not exists idx_full_sync_chunks_request_status_chunk
   on public.full_sync_chunks (request_id, status, chunk_index);
@@ -294,12 +387,94 @@ as $$
   select coalesce(auth.jwt() ->> 'device_id', auth.uid()::text);
 $$;
 
+create or replace function public.sync_has_recent_admin_activity(min_days integer default 3)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from public.app_users u
+    where lower(u.role) = 'system_admin'
+      and u.account_status = 'active'
+      and coalesce(u.last_seen_at, u.updated_at, u.created_at) >= now() - make_interval(days => greatest(coalesce(min_days, 3), 1))
+  );
+$$;
+
+create or replace function public.sync_relay_usage_stats()
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = public, storage
+as $$
+declare
+  admin_rows bigint := 0;
+  employee_rows bigint := 0;
+  admin_payload_kb numeric := 0;
+  employee_payload_kb numeric := 0;
+  queue_payload_kb numeric := 0;
+  full_sync_chunk_rows bigint := 0;
+  full_sync_request_rows bigint := 0;
+  storage_objects bigint := 0;
+  storage_bytes numeric := 0;
+  oldest_queue_at timestamptz := null;
+begin
+  select count(*), coalesce(sum(payload_size_kb), 0)
+  into admin_rows, admin_payload_kb
+  from public.admin_sync_queue;
+
+  select count(*), coalesce(sum(payload_size_kb), 0)
+  into employee_rows, employee_payload_kb
+  from public.employee_sync_queue;
+
+  queue_payload_kb := admin_payload_kb + employee_payload_kb;
+
+  select min(ts)
+  into oldest_queue_at
+  from (
+    select min(coalesce(created_at, "timestamp")) as ts from public.admin_sync_queue
+    union all
+    select min(coalesce(created_at, "timestamp")) as ts from public.employee_sync_queue
+  ) oldest
+  where ts is not null;
+
+  select count(*) into full_sync_chunk_rows from public.full_sync_chunks;
+  select count(*) into full_sync_request_rows from public.full_sync_requests;
+
+  select
+    count(*),
+    coalesce(sum(nullif(metadata ->> 'size', '')::numeric), 0)
+  into storage_objects, storage_bytes
+  from storage.objects
+  where bucket_id = 'full-sync-temp';
+
+  return jsonb_build_object(
+    'admin_queue_rows', admin_rows,
+    'employee_queue_rows', employee_rows,
+    'total_queue_rows', admin_rows + employee_rows,
+    'queue_payload_mb', round((queue_payload_kb / 1024.0), 3),
+    'full_sync_chunk_rows', full_sync_chunk_rows,
+    'full_sync_request_rows', full_sync_request_rows,
+    'storage_objects', storage_objects,
+    'storage_mb', round((storage_bytes / 1024.0 / 1024.0), 3),
+    'oldest_queue_at', oldest_queue_at
+  );
+end;
+$$;
+
+grant execute on function public.sync_has_recent_admin_activity(integer) to authenticated;
+grant execute on function public.sync_relay_usage_stats() to authenticated;
+
 drop policy if exists "admin_queue_admin_all" on public.admin_sync_queue;
 drop policy if exists "admin_queue_employee_select_assigned" on public.admin_sync_queue;
 drop policy if exists "admin_queue_employee_insert_changes" on public.admin_sync_queue;
 drop policy if exists "admin_queue_insert_admin" on public.admin_sync_queue;
 drop policy if exists "admin_queue_select_authenticated" on public.admin_sync_queue;
 drop policy if exists "admin_queue_delete_authenticated" on public.admin_sync_queue;
+drop policy if exists "admin_queue_update_authenticated" on public.admin_sync_queue;
 drop policy if exists "employee_queue_admin_all" on public.employee_sync_queue;
 drop policy if exists "employee_queue_admin_select" on public.employee_sync_queue;
 drop policy if exists "employee_queue_admin_delete" on public.employee_sync_queue;
@@ -309,6 +484,7 @@ drop policy if exists "employee_queue_employee_insert" on public.employee_sync_q
 drop policy if exists "employee_queue_insert_employee" on public.employee_sync_queue;
 drop policy if exists "employee_queue_select_admin" on public.employee_sync_queue;
 drop policy if exists "employee_queue_delete_admin" on public.employee_sync_queue;
+drop policy if exists "employee_queue_update_employee" on public.employee_sync_queue;
 drop policy if exists "app_users_admin_all" on public.app_users;
 drop policy if exists "app_users_user_select_self" on public.app_users;
 drop policy if exists "app_users_user_insert_self" on public.app_users;
@@ -350,6 +526,16 @@ using (
   or (public.sync_is_employee() and employee_id = public.sync_employee_id())
 );
 
+create policy "admin_queue_update_authenticated"
+on public.admin_sync_queue
+for update
+to authenticated
+using (public.sync_is_admin())
+with check (
+  public.sync_is_admin()
+  and coalesce(origin_device_id, '') <> ''
+);
+
 create policy "employee_queue_insert_employee"
 on public.employee_sync_queue
 for insert
@@ -371,6 +557,20 @@ on public.employee_sync_queue
 for delete
 to authenticated
 using (public.sync_is_admin());
+
+create policy "employee_queue_update_employee"
+on public.employee_sync_queue
+for update
+to authenticated
+using (
+  public.sync_is_employee()
+  and employee_id = public.sync_employee_id()
+)
+with check (
+  public.sync_is_employee()
+  and employee_id = public.sync_employee_id()
+  and coalesce(origin_device_id, '') <> ''
+);
 
 create policy "app_users_admin_all"
 on public.app_users
@@ -433,7 +633,7 @@ with check (public.sync_is_admin());
 -- full sync chunk transfer is system-admin only
 
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
-values ('full-sync-temp', 'full-sync-temp', false, 209715200, array['application/octet-stream'])
+values ('full-sync-temp', 'full-sync-temp', false, 5242880, array['application/octet-stream'])
 on conflict (id) do update
 set file_size_limit = excluded.file_size_limit,
     allowed_mime_types = excluded.allowed_mime_types;
@@ -452,17 +652,17 @@ with check (bucket_id = 'full-sync-temp' and public.sync_is_admin());
 
 -- storage access for full-sync chunks is system-admin only
 
--- 7-day queue retention (Supabase stays temporary queue only)
+-- 48-hour queue retention (Supabase stays temporary relay only)
 create or replace function public.cleanup_sync_queues()
 returns void
 language sql
 security definer
 as $$
   delete from public.admin_sync_queue
-  where coalesce(created_at, "timestamp") < now() - interval '7 days';
+  where coalesce(created_at, "timestamp") < now() - interval '2 days';
 
   delete from public.employee_sync_queue
-  where coalesce(created_at, "timestamp") < now() - interval '7 days';
+  where coalesce(created_at, "timestamp") < now() - interval '2 days';
 $$;
 
 create or replace function public.cleanup_full_sync_requests()
@@ -470,12 +670,25 @@ returns void
 language sql
 security definer
 as $$
+  delete from storage.objects o
+  where o.bucket_id = 'full-sync-temp'
+    and coalesce(o.updated_at, o.created_at) < now() - interval '2 days'
+    and not exists (
+      select 1
+      from public.full_sync_chunks c
+      where c.storage_object = o.name
+        and c.status in ('uploaded', 'acked')
+    );
+
   delete from public.full_sync_chunks
-  where uploaded_at < now() - interval '7 days';
+  where uploaded_at < now() - interval '2 days';
 
   delete from public.full_sync_requests
-  where requested_at < now() - interval '7 days';
+  where coalesce(created_at, requested_at) < now() - interval '2 days';
 $$;
+
+grant execute on function public.cleanup_sync_queues() to authenticated;
+grant execute on function public.cleanup_full_sync_requests() to authenticated;
 
 -- Optional: run retention daily via pg_cron.
 -- If pg_cron is unavailable in your project, keep this function and run it
@@ -504,7 +717,7 @@ begin
 
   perform cron.schedule(
     'sync_queue_cleanup_daily',
-    '5 1 * * *',
+    '15 */6 * * *',
     'select public.cleanup_sync_queues();'
   );
 exception
@@ -528,7 +741,7 @@ begin
 
   perform cron.schedule(
     'full_sync_cleanup_daily',
-    '20 1 * * *',
+    '30 */6 * * *',
     'select public.cleanup_full_sync_requests();'
   );
 exception

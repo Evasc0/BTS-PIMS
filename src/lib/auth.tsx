@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { db, initializeDatabase } from './db';
 import type { Employee } from './types';
 
@@ -16,6 +16,9 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 const SESSION_KEY = 'bts-pims-session-user';
+const REALTIME_SYNC_POLL_MS = 30000;
+const IDLE_SYNC_AFTER_MS = 30 * 60 * 1000;
+const IDLE_SYNC_POLL_MS = 5 * 60 * 1000;
 const parseDateMs = (value?: string): number | null => {
   if (!value) return null;
   const parsed = Date.parse(value);
@@ -33,19 +36,31 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [initError, setInitError] = useState<string | null>(null);
   const [syncNotice, setSyncNotice] = useState<string | null>(null);
+  const employeeSyncInFlightRef = useRef(false);
+  const adminSyncInFlightRef = useRef(false);
+  const lastActivityAtRef = useRef(Date.now());
+  const idleSyncRef = useRef(false);
 
-  const autoPullAssignedUpdates = async (user: Employee): Promise<void> => {
+  const autoPullAssignedUpdates = async (
+    user: Employee,
+    options?: { silent?: boolean }
+  ): Promise<void> => {
     if (user.role !== 'employee' || !window.api?.sync) return;
+    const silent = Boolean(options?.silent);
 
     if (!navigator.onLine) {
-      setSyncNotice('Offline: assigned data is loaded from local storage.');
+      if (!silent) {
+        setSyncNotice('Offline: assigned data is loaded from local storage.');
+      }
       return;
     }
 
     try {
       let status = await window.api.sync.getStatus(user.id);
       if (!status.configured) {
-        setSyncNotice('Supabase sync is not configured. Assigned data will stay local.');
+        if (!silent) {
+          setSyncNotice('Supabase sync is not configured. Assigned data will stay local.');
+        }
         return;
       }
       if (status.mode !== 'online') {
@@ -86,18 +101,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return;
       }
       if (preview.status !== 'ok') {
-        setSyncNotice(preview.error || 'Unable to check assigned updates.');
+        if (!silent) {
+          setSyncNotice(preview.error || 'Unable to check assigned updates.');
+        }
         return;
       }
 
       if (preview.newRecords === 0) {
-        setSyncNotice(preview.message || 'Assigned data is up to date.');
+        if (!silent) {
+          setSyncNotice(preview.message || 'Assigned data is up to date.');
+        }
         return;
       }
 
       const result = await window.api.sync.pull(user.id, 'remote_wins');
       if (result.status === 'synced' || result.status === 'idle') {
-        setSyncNotice(`Synced ${result.pulledCount} assigned update(s).`);
+        if (!silent || result.pulledCount > 0) {
+          setSyncNotice(`Synced ${result.pulledCount} assigned update(s).`);
+        }
         return;
       }
 
@@ -111,9 +132,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      setSyncNotice(result.error || 'Assigned updates were found but could not be pulled.');
+      if (!silent) {
+        setSyncNotice(result.error || 'Assigned updates were found but could not be pulled.');
+      }
     } catch (error: any) {
-      setSyncNotice(error?.message || 'Automatic assigned pull failed.');
+      if (!silent) {
+        setSyncNotice(error?.message || 'Automatic assigned pull failed.');
+      }
     }
   };
 
@@ -136,22 +161,56 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
-  const autoPullEmployeeSubmissionsForAdmin = async (user: Employee): Promise<void> => {
-    if (user.role !== 'system_admin' || !window.api?.sync?.autoPullEmployeeSubmissions) return;
+  const autoSyncAdmin = async (user: Employee, options?: { silent?: boolean }): Promise<void> => {
+    if (user.role !== 'system_admin' || !window.api?.sync) return;
     if (!navigator.onLine) return;
+    const silent = Boolean(options?.silent);
 
     try {
       let status = await window.api.sync.getStatus(user.id);
-      if (!status.configured || status.fullSyncRequired) return;
+      if (!status.configured) return;
 
       if (status.mode !== 'online') {
         status = await window.api.sync.setMode(user.id, true);
       }
 
-      if (status.fullSyncRequired) return;
-      await window.api.sync.autoPullEmployeeSubmissions(user.id);
-    } catch {
-      // keep silent for background admin pull
+      if (status.fullSyncRequired) {
+        if (!silent) {
+          setSyncNotice(status.fullSyncReason || 'Full sync is required before automatic admin sync can continue.');
+        }
+        return;
+      }
+
+      await window.api.sync.push(user.id);
+      await window.api.sync.pull(user.id, 'remote_wins');
+      if (window.api.sync.autoPullEmployeeSubmissions) {
+        await window.api.sync.autoPullEmployeeSubmissions(user.id);
+      }
+    } catch (error: any) {
+      if (!silent) {
+        setSyncNotice(error?.message || 'Automatic admin sync failed.');
+      }
+    }
+  };
+
+  const runEmployeeRealtimeSync = async (user: Employee, options?: { silent?: boolean }): Promise<void> => {
+    if (employeeSyncInFlightRef.current) return;
+    employeeSyncInFlightRef.current = true;
+    try {
+      await autoPushEmployeeSubmissions(user);
+      await autoPullAssignedUpdates(user, options);
+    } finally {
+      employeeSyncInFlightRef.current = false;
+    }
+  };
+
+  const runAdminRealtimeSync = async (user: Employee, options?: { silent?: boolean }): Promise<void> => {
+    if (adminSyncInFlightRef.current) return;
+    adminSyncInFlightRef.current = true;
+    try {
+      await autoSyncAdmin(user, options);
+    } finally {
+      adminSyncInFlightRef.current = false;
     }
   };
 
@@ -165,10 +224,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           const user = await db.employees.get(sessionUserId);
           if (user && user.status === 'active' && !isVerificationExpired(user)) {
             if (user.role === 'employee') {
-              await autoPushEmployeeSubmissions(user);
-              await autoPullAssignedUpdates(user);
+              await runEmployeeRealtimeSync(user);
             } else if (user.role === 'system_admin') {
-              await autoPullEmployeeSubmissionsForAdmin(user);
+              await runAdminRealtimeSync(user);
             }
             if (isMounted) setCurrentUser(user);
           } else {
@@ -213,15 +271,101 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (!currentUser || !window.api?.sync) return;
     const onOnline = () => {
       if (currentUser.role === 'employee') {
-        void autoPushEmployeeSubmissions(currentUser);
-        void autoPullAssignedUpdates(currentUser);
+        void runEmployeeRealtimeSync(currentUser);
       } else if (currentUser.role === 'system_admin') {
-        void autoPullEmployeeSubmissionsForAdmin(currentUser);
+        void runAdminRealtimeSync(currentUser);
       }
     };
     window.addEventListener('online', onOnline);
     return () => window.removeEventListener('online', onOnline);
   }, [currentUser]);
+
+  useEffect(() => {
+    if (!currentUser || !window.api?.sync) return;
+
+    const markActive = () => {
+      lastActivityAtRef.current = Date.now();
+    };
+
+    const wakeSyncIfIdle = () => {
+      const wasIdle = idleSyncRef.current;
+      markActive();
+      if (!wasIdle || !navigator.onLine) return;
+      idleSyncRef.current = false;
+      if (currentUser.role === 'employee') {
+        void runEmployeeRealtimeSync(currentUser, { silent: true });
+      } else if (currentUser.role === 'system_admin') {
+        void runAdminRealtimeSync(currentUser, { silent: true });
+      }
+    };
+
+    const onVisibility = () => {
+      if (document.hidden) return;
+      wakeSyncIfIdle();
+    };
+
+    const events: Array<keyof WindowEventMap> = ['pointerdown', 'keydown', 'mousemove', 'touchstart', 'scroll', 'focus'];
+    for (const eventName of events) {
+      window.addEventListener(eventName, wakeSyncIfIdle, { passive: true });
+    }
+    document.addEventListener('visibilitychange', onVisibility);
+    markActive();
+
+    return () => {
+      for (const eventName of events) {
+        window.removeEventListener(eventName, wakeSyncIfIdle);
+      }
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [currentUser?.id, currentUser?.role]);
+
+  useEffect(() => {
+    if (!currentUser || !window.api?.sync) return;
+
+    let disposed = false;
+    let timer: number | null = null;
+
+    const schedule = (delayMs: number) => {
+      if (disposed) return;
+      if (timer != null) {
+        window.clearTimeout(timer);
+      }
+      timer = window.setTimeout(() => {
+        void tick();
+      }, delayMs);
+    };
+
+    const tick = async () => {
+      if (disposed) return;
+
+      const idleForMs = Date.now() - lastActivityAtRef.current;
+      const isIdle = idleForMs >= IDLE_SYNC_AFTER_MS;
+      idleSyncRef.current = isIdle;
+      const intervalMs = isIdle ? IDLE_SYNC_POLL_MS : REALTIME_SYNC_POLL_MS;
+
+      if (!navigator.onLine) {
+        schedule(intervalMs);
+        return;
+      }
+
+      if (currentUser.role === 'employee') {
+        await runEmployeeRealtimeSync(currentUser, { silent: true });
+      } else if (currentUser.role === 'system_admin') {
+        await runAdminRealtimeSync(currentUser, { silent: true });
+      }
+
+      schedule(intervalMs);
+    };
+
+    void tick();
+
+    return () => {
+      disposed = true;
+      if (timer != null) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [currentUser?.id, currentUser?.role]);
 
   const login = async (email: string, password: string) => {
     setSyncNotice(null);
@@ -264,10 +408,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     if (user.role === 'employee') {
-      await autoPushEmployeeSubmissions(user);
-      await autoPullAssignedUpdates(user);
+      await runEmployeeRealtimeSync(user);
     } else if (user.role === 'system_admin') {
-      await autoPullEmployeeSubmissionsForAdmin(user);
+      await runAdminRealtimeSync(user);
     }
 
     localStorage.setItem(SESSION_KEY, user.id);
@@ -304,7 +447,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     if (currentUser.role === 'system_admin') {
-      await autoPullEmployeeSubmissionsForAdmin(currentUser);
+      await runAdminRealtimeSync(currentUser);
       await refreshUser();
     }
   };

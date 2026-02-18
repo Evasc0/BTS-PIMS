@@ -165,3 +165,4 @@ CREATE INDEX IF NOT EXISTS idx_returns_product_id ON returns(product_id);
 CREATE INDEX IF NOT EXISTS idx_returns_returned_by ON returns(returned_by_employee_id);
 CREATE INDEX IF NOT EXISTS idx_activity_entity ON activity_logs(entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS idx_outbox_entity ON sync_outbox(entity_type, entity_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_outbox_entity_unique ON sync_outbox(entity_type, entity_id);
