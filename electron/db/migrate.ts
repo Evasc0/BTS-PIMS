@@ -40,6 +40,5 @@ export function runMigrations(db: Database.Database): void {
       migration.version,
       new Date().toISOString()
     );
-    applied.add(migration.version);
   }
 }
