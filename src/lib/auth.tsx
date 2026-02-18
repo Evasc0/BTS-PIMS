@@ -10,6 +10,7 @@ interface AuthContextValue {
   login: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
   logout: () => void;
   refreshUser: () => Promise<void>;
+  refreshAssignedUpdates: () => Promise<void>;
   clearSyncNotice: () => void;
 }
 
@@ -292,10 +293,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  const refreshAssignedUpdates = async () => {
+    if (!currentUser) return;
+
+    if (currentUser.role === 'employee') {
+      setSyncNotice('Refreshing assigned updates...');
+      await autoPushEmployeeSubmissions(currentUser);
+      await autoPullAssignedUpdates(currentUser);
+      await refreshUser();
+      return;
+    }
+
+    if (currentUser.role === 'system_admin') {
+      await autoPullEmployeeSubmissionsForAdmin(currentUser);
+      await refreshUser();
+    }
+  };
+
   const clearSyncNotice = () => setSyncNotice(null);
 
   const value = useMemo<AuthContextValue>(
-    () => ({ currentUser, loading, initError, syncNotice, login, logout, refreshUser, clearSyncNotice }),
+    () => ({ currentUser, loading, initError, syncNotice, login, logout, refreshUser, refreshAssignedUpdates, clearSyncNotice }),
     [currentUser, loading, initError, syncNotice]
   );
 

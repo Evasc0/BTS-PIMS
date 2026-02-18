@@ -13,7 +13,7 @@ import { useAuth } from './lib/auth';
 import type { EmployeeRole } from './lib/types';
 
 export default function App() {
-  const { currentUser, loading, initError, logout, syncNotice, clearSyncNotice } = useAuth();
+  const { currentUser, loading, initError, logout, syncNotice, refreshAssignedUpdates, clearSyncNotice } = useAuth();
   const [currentPage, setCurrentPage] = useState('dashboard');
 
   const pagePermissions = useMemo<Record<string, EmployeeRole[]>>(
@@ -53,7 +53,14 @@ export default function App() {
   const renderPage = () => {
     switch (currentPage) {
       case 'dashboard':
-        return <Dashboard user={currentUser} syncNotice={syncNotice} onDismissSyncNotice={clearSyncNotice} />;
+        return (
+          <Dashboard
+            user={currentUser}
+            syncNotice={syncNotice}
+            onRefreshAssignedUpdates={refreshAssignedUpdates}
+            onDismissSyncNotice={clearSyncNotice}
+          />
+        );
       case 'products':
         return <ProductsPage user={currentUser} />;
       case 'employees':
@@ -69,7 +76,7 @@ export default function App() {
       case 'profile':
         return <ProfilePage user={currentUser} />;
       default:
-        return <Dashboard user={currentUser} />;
+        return <Dashboard user={currentUser} onRefreshAssignedUpdates={refreshAssignedUpdates} />;
     }
   };
 
