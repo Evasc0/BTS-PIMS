@@ -11,6 +11,14 @@ if (!fs.existsSync(sourceDir)) {
 
 fs.mkdirSync(targetDir, { recursive: true });
 
+const sourceFiles = new Set(fs.readdirSync(sourceDir).filter((file) => file.endsWith('.sql')));
+
+for (const file of fs.readdirSync(targetDir)) {
+  if (!file.endsWith('.sql')) continue;
+  if (sourceFiles.has(file)) continue;
+  fs.unlinkSync(path.join(targetDir, file));
+}
+
 for (const file of fs.readdirSync(sourceDir)) {
   if (!file.endsWith('.sql')) continue;
   const src = path.join(sourceDir, file);
