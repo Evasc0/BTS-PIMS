@@ -63,6 +63,7 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
   const [formState, setFormState] = useState<ReturnFormState>(emptyReturnForm);
   const [formError, setFormError] = useState<string | null>(null);
   const [processingNotes, setProcessingNotes] = useState('');
+  const [approvalRrspNumber, setApprovalRrspNumber] = useState('');
   const [submitSyncMessage, setSubmitSyncMessage] = useState<string | null>(null);
   const [propertySearch, setPropertySearch] = useState('');
   const [debouncedPropertySearch, setDebouncedPropertySearch] = useState('');
@@ -386,9 +387,7 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
     }
 
     const primaryReceiver = receiverEntries[0];
-    const rrspNumber = isAdmin
-      ? formState.rrspNumber.trim()
-      : `EMP-${new Date().getTime()}-${user.id.slice(0, 6).toUpperCase()}`;
+    const rrspNumber = isAdmin ? formState.rrspNumber.trim() : '';
 
     const targetProductIds = isAdmin ? formState.selectedProductIds : [formState.productId];
     const targetProducts = targetProductIds
@@ -497,6 +496,12 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
     if (selectedReturn.status !== 'pending') {
       setSelectedReturn(null);
       setProcessingNotes('');
+      setApprovalRrspNumber('');
+      return;
+    }
+    const normalizedRrspNumber = approvalRrspNumber.trim();
+    if (!normalizedRrspNumber) {
+      window.alert('RRSP No. is required before approving this return.');
       return;
     }
 
@@ -510,6 +515,7 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
     }
 
     await db.returns.update(selectedReturn.id, {
+      rrspNumber: normalizedRrspNumber,
       status: 'approved',
       processedByEmployeeId: user.id,
       processedDate: nowIso(),
@@ -533,7 +539,7 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
       details: serializeReturnAudit({
         action: 'approved',
         returnId: selectedReturn.id,
-        rrspNumber: selectedReturn.rrspNumber,
+        rrspNumber: normalizedRrspNumber,
         productId: selectedReturn.productId,
         productNumber: product?.propertyNumber,
         submittedBy: selectedReturn.returnedByEmployeeId,
@@ -547,6 +553,7 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
     });
     setSelectedReturn(null);
     setProcessingNotes('');
+    setApprovalRrspNumber('');
   };
 
   const handleReject = async (returnItem: ReturnRecord) => {
@@ -679,7 +686,7 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
                     </div>
                     <div>
                       <h3 className="font-medium text-gray-900">{product?.article || 'Unknown product'}</h3>
-                      <p className="text-sm text-gray-600">RRSP No: {returnItem.rrspNumber}</p>
+                      <p className="text-sm text-gray-600">RRSP No: {returnItem.rrspNumber || 'Pending admin assignment'}</p>
                     </div>
                   </div>
                 </div>
@@ -773,6 +780,7 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
                     onClick={() => {
                       setSelectedReturn(returnItem);
                       setProcessingNotes('');
+                      setApprovalRrspNumber(returnItem.rrspNumber || '');
                     }}
                     className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition flex items-center justify-center gap-2"
                   >
@@ -1087,7 +1095,10 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
             </div>
             <div className="mb-4">
               <p className="text-sm text-gray-600 mb-2">
-                RRSP No: <span className="font-medium text-gray-900">{selectedReturn.rrspNumber}</span>
+                RRSP No:{' '}
+                <span className="font-medium text-gray-900">
+                  {selectedReturn.rrspNumber || 'Pending admin assignment'}
+                </span>
               </p>
               <p className="text-sm text-gray-600 mb-2">
                 Product: <span className="font-medium text-gray-900">{productMap.get(selectedReturn.productId)?.article || 'Unknown'}</span>
@@ -1103,6 +1114,17 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
               </p>
             </div>
             <form className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">RRSP No. *</label>
+                <input
+                  type="text"
+                  value={approvalRrspNumber}
+                  onChange={(e) => setApprovalRrspNumber(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
+                  placeholder="Enter approved RRSP number"
+                  required
+                />
+              </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Processing Notes</label>
                 <textarea
