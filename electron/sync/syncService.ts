@@ -433,7 +433,20 @@ const buildDeviceFingerprint = (): string => {
   const hostname = String(os.hostname() || '').trim().toLowerCase();
   const userHint = String(process.env.USERNAME || process.env.USER || '').trim().toLowerCase();
   const homeHint = path.basename(String(app.getPath('home') || '')).trim().toLowerCase();
-  const raw = [process.platform, process.arch, hostname, userHint || homeHint].join('|');
+  const userDataPath = String(app.getPath('userData') || '').trim().toLowerCase();
+  const macs = Object.values(os.networkInterfaces())
+    .flatMap((items) => (Array.isArray(items) ? items : []))
+    .map((item) => String(item?.mac || '').trim().toLowerCase())
+    .filter((value) => value && value !== '00:00:00:00:00:00');
+  const uniqueMacs = Array.from(new Set(macs)).sort();
+  const raw = [
+    process.platform,
+    process.arch,
+    hostname,
+    userHint || homeHint,
+    userDataPath,
+    uniqueMacs.join(',')
+  ].join('|');
   return createHash('sha256').update(raw).digest('hex');
 };
 
@@ -698,7 +711,12 @@ const ensureSyncStateRow = (db: Database.Database, actor: SyncActor): void => {
     `
       UPDATE sync_state
       SET device_id = @device_id
-      WHERE id = @id AND (device_id IS NULL OR trim(device_id) = '')
+      WHERE id = @id
+        AND (
+          device_id IS NULL
+          OR trim(device_id) = ''
+          OR trim(device_id) <> trim(@device_id)
+        )
     `
   ).run({
     id: stateIdForActor(actor),
@@ -1426,7 +1444,7 @@ const fetchRemoteQueuePage = async (
     params.set('created_at', `gt.${sinceTimestamp}`);
   }
   if (employeeId === EMPLOYEE_ID_NULL_FILTER) {
-    params.set('employee_id', 'is.null');
+    params.set('recipient_key', `eq.${RELAY_RECIPIENT_ALL}`);
   } else if (employeeId) {
     params.set('employee_id', `eq.${employeeId}`);
   }
@@ -1439,8 +1457,16 @@ const fetchRemoteQueuePage = async (
     response = await supabaseRequest(`${tableName}?${params.toString()}`, { method: 'GET' });
   } catch (error: any) {
     const message = String(error?.message || '').toLowerCase();
-    if (!message.includes('updated_at')) throw error;
-    params.set('select', selectLegacy);
+    const missingUpdatedAt = message.includes('updated_at');
+    const missingRecipientKey = message.includes('recipient_key');
+    if (!missingUpdatedAt && !missingRecipientKey) throw error;
+    if (missingUpdatedAt) {
+      params.set('select', selectLegacy);
+    }
+    if (missingRecipientKey && employeeId === EMPLOYEE_ID_NULL_FILTER) {
+      params.delete('recipient_key');
+      params.set('employee_id', 'is.null');
+    }
     response = await supabaseRequest(`${tableName}?${params.toString()}`, { method: 'GET' });
   }
 
