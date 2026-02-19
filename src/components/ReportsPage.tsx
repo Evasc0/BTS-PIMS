@@ -10,8 +10,9 @@ import {
   createInventoryExcelBlob,
   createReturnsExcelBlob,
   downloadBlob,
+  exportInventoryToPDF,
   exportReturnsToPDF,
-  exportToPDF
+  type InventoryReportFilter
 } from '../lib/reportExports';
 
 interface ReportsPageProps {
@@ -45,34 +46,27 @@ const getRangeStart = (range: DateRange, customStart?: string) => {
   return start;
 };
 
-const getValueColor = (value: ValueCategory) => {
-  switch (value) {
-    case 'HV':
-      return 'bg-purple-100 text-purple-700';
-    case 'MV':
-      return 'bg-blue-100 text-blue-700';
-    case 'LV':
-      return 'bg-green-100 text-green-700';
-    default:
-      return 'bg-gray-100 text-gray-700';
-  }
-};
-
 const getControlNumberLabel = (valueCategory?: ValueCategory) => {
-  if (valueCategory === 'HV' || valueCategory === 'LV') return 'ICS Control Number';
-  if (valueCategory === 'MV') return 'PAR Control Number';
+  if (valueCategory === 'HV' || valueCategory === 'LV') return 'PAR Control Number';
+  if (valueCategory === 'MV') return 'ICS Control Number';
   return 'Control Number';
 };
 
 const getAssetNumberLabel = (valueCategory?: ValueCategory) => {
-  if (valueCategory === 'HV' || valueCategory === 'LV') return 'Inventory Number';
-  if (valueCategory === 'MV') return 'Property Number';
+  if (valueCategory === 'HV' || valueCategory === 'LV') return 'Property Number';
+  if (valueCategory === 'MV') return 'Inventory Number';
   return 'Inventory / Property Number';
 };
 
-const getValueBadgeLabel = (valueCategory: ValueCategory) => {
-  if (valueCategory === 'MV') return 'PPEIR';
-  return valueCategory;
+const getInventoryControlHeader = (inventoryFilter: InventoryReportFilter) =>
+  inventoryFilter === 'PPEIR' ? 'ICS CONTROL NO.' : 'PAR CONTROL NO.';
+
+const getInventoryAssetHeader = (inventoryFilter: InventoryReportFilter) =>
+  inventoryFilter === 'PPEIR' ? 'INVENTORY NO.' : 'PROPERTY NO.';
+
+const isMatchingInventoryFilter = (valueCategory: ValueCategory, inventoryFilter: InventoryReportFilter): boolean => {
+  if (inventoryFilter === 'PPEIR') return valueCategory === 'MV';
+  return valueCategory === inventoryFilter;
 };
 
 const getConditionColor = (condition: ReturnCondition) => {
@@ -92,6 +86,7 @@ const getConditionColor = (condition: ReturnCondition) => {
 
 export function ReportsPage({ user }: ReportsPageProps) {
   const [reportType, setReportType] = useState<'inventory' | 'returns'>('inventory');
+  const [inventoryFilter, setInventoryFilter] = useState<InventoryReportFilter>('HV');
   const [dateRange, setDateRange] = useState<DateRange>('month');
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
   const [customRange, setCustomRange] = useState<{ start: string; end: string } | null>(null);
@@ -116,6 +111,11 @@ export function ReportsPage({ user }: ReportsPageProps) {
     });
   }, [products, rangeStart, rangeEnd]);
 
+  const filteredInventoryProducts = useMemo(
+    () => filteredProducts.filter((product) => isMatchingInventoryFilter(product.valueCategory, inventoryFilter)),
+    [filteredProducts, inventoryFilter]
+  );
+
   const filteredReturns = useMemo(() => {
     return (returns || []).filter((ret) => {
       const date = new Date(ret.returnDate);
@@ -137,8 +137,8 @@ export function ReportsPage({ user }: ReportsPageProps) {
 
   const handleExportPdf = () => {
     if (reportType === 'inventory') {
-      const rows = buildInventoryReportRows(filteredProducts);
-      exportToPDF(rows);
+      const rows = buildInventoryReportRows(filteredInventoryProducts, employees || []);
+      exportInventoryToPDF(rows, inventoryFilter);
       return;
     }
 
@@ -148,9 +148,9 @@ export function ReportsPage({ user }: ReportsPageProps) {
 
   const handleExportExcel = async () => {
     if (reportType === 'inventory') {
-      const rows = buildInventoryReportRows(filteredProducts);
-      const blob = await createInventoryExcelBlob(rows, 'Inventory Report');
-      downloadBlob(blob, 'inventory-report.xlsx');
+      const rows = buildInventoryReportRows(filteredInventoryProducts, employees || []);
+      const blob = await createInventoryExcelBlob(rows, inventoryFilter);
+      downloadBlob(blob, `inventory-report-${inventoryFilter.toLowerCase()}.xlsx`);
       return;
     }
 
@@ -205,6 +205,17 @@ export function ReportsPage({ user }: ReportsPageProps) {
             <option value="inventory">Inventory Report</option>
             <option value="returns">Returns Report</option>
           </select>
+          {reportType === 'inventory' && (
+            <select
+              value={inventoryFilter}
+              onChange={(e) => setInventoryFilter(e.target.value as InventoryReportFilter)}
+              className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
+            >
+              <option value="HV">HV</option>
+              <option value="LV">LV</option>
+              <option value="PPEIR">PPEIR</option>
+            </select>
+          )}
           <select
             value={dateRange}
             onChange={(e) => setDateRange(e.target.value as DateRange)}
@@ -228,104 +239,63 @@ export function ReportsPage({ user }: ReportsPageProps) {
 
       {reportType === 'inventory' && (
         <div className="space-y-4">
-          {filteredProducts.length === 0 && (
+          {filteredInventoryProducts.length === 0 && (
             <div className="bg-white rounded-xl border border-gray-200 p-8 text-center text-gray-600">
               Not enough data to generate report
             </div>
           )}
-          {filteredProducts.map((item) => {
-            const isExpanded = expandedItems.has(item.id);
-            return (
-              <div key={item.id} className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-                <div className="p-6">
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                    <div>
-                      <p className="text-sm text-gray-600 mb-1">Article:</p>
-                      <p className="font-medium text-gray-900">{item.article}</p>
-                    </div>
-                    <div>
-                      <p className="text-sm text-gray-600 mb-1">Description:</p>
-                      <p className="text-sm text-gray-900">{item.description}</p>
-                    </div>
-                    <div>
-                      <p className="text-sm text-gray-600 mb-1">Date:</p>
-                      <p className="text-sm text-gray-900">{formatDate(item.date)}</p>
-                    </div>
-                    <div>
-                      <p className="text-sm text-gray-600 mb-1">{getControlNumberLabel(item.valueCategory)}:</p>
-                      <p className="text-sm text-gray-900">{item.parControlNumber}</p>
-                    </div>
-                    <div>
-                      <p className="text-sm text-gray-600 mb-1">{getAssetNumberLabel(item.valueCategory)}:</p>
-                      <p className="text-sm text-gray-900">{item.propertyNumber}</p>
-                    </div>
-                    <div>
-                      <p className="text-sm text-gray-600 mb-1">Unit:</p>
-                      <p className="text-sm text-gray-900">{item.unit}</p>
-                    </div>
-                    <div>
-                      <p className="text-sm text-gray-600 mb-1">Unit Value:</p>
-                      <p className="text-sm text-gray-900">{formatCurrency(item.unitValue)}</p>
-                    </div>
-                    <div>
-                      <p className="text-sm text-gray-600 mb-1">Balance per Card:</p>
-                      <p className="text-sm text-gray-900">{item.balancePerCard}</p>
-                    </div>
-                    <div>
-                      <p className="text-sm text-gray-600 mb-1">On Hand per Count:</p>
-                      <p className="text-sm text-gray-900">{item.onHandPerCount}</p>
-                    </div>
-                    <div>
-                      <p className="text-sm text-gray-600 mb-1">Total:</p>
-                      <p className="font-medium text-gray-900">{formatCurrency(item.total)}</p>
-                    </div>
-                    <div className="md:col-span-2">
-                      <p className="text-sm text-gray-600 mb-1">Remarks:</p>
-                      <p className="text-sm text-gray-900">{item.remarks}</p>
-                    </div>
-                  </div>
-
-                  {isExpanded && (
-                    <div className="mt-4 pt-4 border-t border-gray-200">
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div>
-                          <p className="text-sm text-gray-600 mb-1">Value:</p>
-                          <span className={`inline-flex px-3 py-1 rounded-full text-xs font-medium ${getValueColor(item.valueCategory)}`}>
-                            {getValueBadgeLabel(item.valueCategory)}
-                          </span>
-                        </div>
-                        <div>
-                          <p className="text-sm text-gray-600 mb-1">Assigned To:</p>
-                          <p className="text-sm font-medium text-gray-900">
-                            {item.assignedToEmployeeId ? employeeMap.get(item.assignedToEmployeeId) || 'Unknown' : 'Unassigned'}
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                <button
-                  onClick={() => toggleExpand(item.id)}
-                  className="w-full px-6 py-3 bg-gray-50 hover:bg-gray-100 transition flex items-center justify-center gap-2 text-sm font-medium text-gray-700 border-t border-gray-200"
-                >
-                  {isExpanded ? (
-                    <>
-                      <EyeOff className="w-4 h-4" />
-                      Hide Details
-                      <ChevronUp className="w-4 h-4" />
-                    </>
-                  ) : (
-                    <>
-                      <Eye className="w-4 h-4" />
-                      Show More Details
-                      <ChevronDown className="w-4 h-4" />
-                    </>
-                  )}
-                </button>
+          {filteredInventoryProducts.length > 0 && (
+            <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+              <div className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex items-center justify-between">
+                <h2 className="font-semibold text-gray-900">Inventory Report - {inventoryFilter}</h2>
+                <p className="text-sm text-gray-600">{filteredInventoryProducts.length} item(s)</p>
               </div>
-            );
-          })}
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[1300px] border-collapse">
+                  <thead className="bg-gray-50 border-b border-gray-200">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200">Article</th>
+                      <th className="px-4 py-3 text-left text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200 min-w-[560px] w-[560px]">Description</th>
+                      <th className="px-4 py-3 text-left text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200">Date Acquired</th>
+                      <th className="px-4 py-3 text-left text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200">
+                        {getInventoryControlHeader(inventoryFilter)}
+                      </th>
+                      <th className="px-4 py-3 text-left text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200">
+                        {getInventoryAssetHeader(inventoryFilter)}
+                      </th>
+                      <th className="px-4 py-3 text-left text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200">UOM</th>
+                      <th className="px-4 py-3 text-right text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200">Unit Cost</th>
+                      <th className="px-4 py-3 text-right text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200">Qty</th>
+                      <th className="px-4 py-3 text-right text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200">Total Amount</th>
+                      <th className="px-4 py-3 text-left text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200">Location</th>
+                      <th className="px-4 py-3 text-left text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200">Actual User</th>
+                      <th className="px-4 py-3 text-left text-xs font-semibold tracking-wider text-gray-600 uppercase">Remarks</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-200">
+                    {filteredInventoryProducts.map((item) => (
+                      <tr key={item.id} className="hover:bg-gray-50">
+                        <td className="px-4 py-3 text-sm text-gray-900 font-medium border-r border-gray-200">{item.article}</td>
+                        <td className="px-4 py-3 text-sm text-gray-700 border-r border-gray-200 min-w-[360px] w-[360px]">{item.description}</td>
+                        <td className="px-4 py-3 text-sm text-gray-700 border-r border-gray-200">{formatDate(item.date)}</td>
+                        <td className="px-4 py-3 text-sm text-gray-700 border-r border-gray-200">{item.parControlNumber}</td>
+                        <td className="px-4 py-3 text-sm text-gray-700 border-r border-gray-200">{item.propertyNumber}</td>
+                        <td className="px-4 py-3 text-sm text-gray-700 border-r border-gray-200">{item.unit}</td>
+                        <td className="px-4 py-3 text-sm text-gray-900 text-right border-r border-gray-200">{formatCurrency(item.unitValue)}</td>
+                        <td className="px-4 py-3 text-sm text-gray-900 text-right border-r border-gray-200">{item.onHandPerCount}</td>
+                        <td className="px-4 py-3 text-sm text-gray-900 text-right font-medium border-r border-gray-200">{formatCurrency(item.total)}</td>
+                        <td className="px-4 py-3 text-sm text-gray-700 border-r border-gray-200">{item.location}</td>
+                        <td className="px-4 py-3 text-sm text-gray-700 border-r border-gray-200">
+                          {item.assignedToEmployeeId ? employeeMap.get(item.assignedToEmployeeId) || 'Unknown' : 'Unassigned'}
+                        </td>
+                        <td className="px-4 py-3 text-sm text-gray-700">{item.remarks}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

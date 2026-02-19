@@ -14,6 +14,7 @@ type ReportColumn = {
 };
 
 type ReportRow = Record<string, string | number | null | undefined>;
+export type InventoryReportFilter = 'HV' | 'LV' | 'PPEIR';
 
 const PDF_MARGINS = { top: 56, left: 24, right: 24, bottom: 24 };
 const PDF_TITLE_Y = 32;
@@ -22,19 +23,25 @@ const PDF_HEADER_FONT_SIZE = 9;
 const PDF_PAGE_NUMBER_FONT_SIZE = 8;
 const NUMBER_FORMAT = new Intl.NumberFormat('en-US');
 
-const inventoryColumns: ReportColumn[] = [
-  { key: 'article', header: 'Article', align: 'left', pdfWidth: 60, excelWidth: 16 },
-  { key: 'description', header: 'Description', align: 'left', pdfWidth: 170, excelWidth: 40 },
-  { key: 'date', header: 'Date', align: 'center', pdfWidth: 60, excelWidth: 14 },
-  { key: 'parControlNumber', header: 'ICS Control Number', align: 'left', pdfWidth: 85, excelWidth: 22 },
-  { key: 'propertyNumber', header: 'Inventory Number', align: 'left', pdfWidth: 85, excelWidth: 22 },
-  { key: 'unit', header: 'UOM', align: 'left', pdfWidth: 40, excelWidth: 10 },
-  { key: 'unitValue', header: 'Unit Value', align: 'right', pdfWidth: 65, excelWidth: 16, format: 'currency' },
-  { key: 'balance', header: 'QTY', align: 'right', pdfWidth: 50, excelWidth: 12, format: 'number' },
-  { key: 'total', header: 'Total', align: 'right', pdfWidth: 65, excelWidth: 16, format: 'currency' },
-  { key: 'location', header: 'Location', align: 'left', pdfWidth: 65, excelWidth: 18 },
-  { key: 'remarks', header: 'Remarks', align: 'left', pdfWidth: 64, excelWidth: 40 }
-];
+const getInventoryColumns = (inventoryFilter: InventoryReportFilter): ReportColumn[] => {
+  const controlHeader = inventoryFilter === 'PPEIR' ? 'ICS CONTROL NO.' : 'PAR CONTROL NO.';
+  const assetHeader = inventoryFilter === 'PPEIR' ? 'INVENTORY NO.' : 'PROPERTY NO.';
+
+  return [
+    { key: 'article', header: 'ARTICLE', align: 'left', pdfWidth: 56, excelWidth: 16 },
+    { key: 'description', header: 'DESCRIPTION', align: 'left', pdfWidth: 132, excelWidth: 36 },
+    { key: 'dateAcquired', header: 'DATE ACQUIRED', align: 'center', pdfWidth: 62, excelWidth: 14 },
+    { key: 'controlNumber', header: controlHeader, align: 'left', pdfWidth: 72, excelWidth: 20 },
+    { key: 'assetNumber', header: assetHeader, align: 'left', pdfWidth: 72, excelWidth: 20 },
+    { key: 'uom', header: 'UOM', align: 'left', pdfWidth: 36, excelWidth: 10 },
+    { key: 'unitCost', header: 'UNIT COST', align: 'right', pdfWidth: 58, excelWidth: 14, format: 'currency' },
+    { key: 'qty', header: 'QTY', align: 'right', pdfWidth: 38, excelWidth: 10, format: 'number' },
+    { key: 'totalAmount', header: 'TOTAL AMOUNT', align: 'right', pdfWidth: 64, excelWidth: 16, format: 'currency' },
+    { key: 'location', header: 'LOCATION', align: 'left', pdfWidth: 58, excelWidth: 16 },
+    { key: 'actualUser', header: 'ACTUAL USER', align: 'left', pdfWidth: 76, excelWidth: 22 },
+    { key: 'remarks', header: 'REMARKS', align: 'left', pdfWidth: 72, excelWidth: 24 }
+  ];
+};
 
 const returnsColumns: ReportColumn[] = [
   { key: 'rrspNumber', header: 'RRSP Number', align: 'left', pdfWidth: 100, excelWidth: 18 },
@@ -179,24 +186,22 @@ const buildExcelBlob = async (title: string, columns: ReportColumn[], rows: Repo
   });
 };
 
-export const buildInventoryReportRows = (products: Product[]): ReportRow[] => {
-  return products.map((product) => {
-    return {
-      article: product.article,
-      description: product.description,
-      date: formatDate(product.date),
-      parControlNumber: product.parControlNumber,
-      propertyNumber: product.propertyNumber,
-      unit: product.unit,
-      unitValue: product.unitValue,
-      balance: product.balancePerCard,
-      onHand: product.onHandPerCount,
-      total: product.total,
-      location: product.location,
-      assignedTo: product.assignedToEmployeeId || null,
-      remarks: product.remarks
-    };
-  });
+export const buildInventoryReportRows = (products: Product[], employees: Employee[]): ReportRow[] => {
+  const employeeMap = new Map(employees.map((employee) => [employee.id, employee.fullName]));
+  return products.map((product) => ({
+    article: product.article,
+    description: product.description,
+    dateAcquired: formatDate(product.date),
+    controlNumber: product.parControlNumber,
+    assetNumber: product.propertyNumber,
+    uom: product.unit,
+    unitCost: product.unitValue,
+    qty: product.onHandPerCount,
+    totalAmount: product.total,
+    location: product.location,
+    actualUser: product.assignedToEmployeeId ? employeeMap.get(product.assignedToEmployeeId) || 'Unknown' : 'Unassigned',
+    remarks: product.remarks
+  }));
 };
 
 export const buildReturnReportRows = (
@@ -218,11 +223,17 @@ export const buildReturnReportRows = (
   }));
 };
 
-export const exportToPDF = (rows: ReportRow[], reportDate: Date = new Date()): void => {
-  const title = 'Inventory Report';
+const getInventoryReportTitle = (inventoryFilter: InventoryReportFilter): string => `Inventory Report - ${inventoryFilter}`;
+
+export const exportInventoryToPDF = (
+  rows: ReportRow[],
+  inventoryFilter: InventoryReportFilter,
+  reportDate: Date = new Date()
+): void => {
+  const title = getInventoryReportTitle(inventoryFilter);
   const fileDate = formatFileDate(reportDate);
-  const doc = buildPdfDocument(title, inventoryColumns, rows);
-  doc.save(`Inventory_Report_${fileDate}.pdf`);
+  const doc = buildPdfDocument(title, getInventoryColumns(inventoryFilter), rows);
+  doc.save(`Inventory_Report_${inventoryFilter}_${fileDate}.pdf`);
 };
 
 export const exportReturnsToPDF = (rows: ReportRow[], reportDate: Date = new Date()): void => {
@@ -234,9 +245,10 @@ export const exportReturnsToPDF = (rows: ReportRow[], reportDate: Date = new Dat
 
 export const createInventoryExcelBlob = async (
   rows: ReportRow[],
-  title = 'Inventory Report'
+  inventoryFilter: InventoryReportFilter,
+  title = getInventoryReportTitle(inventoryFilter)
 ): Promise<Blob> => {
-  return buildExcelBlob(title, inventoryColumns, rows);
+  return buildExcelBlob(title, getInventoryColumns(inventoryFilter), rows);
 };
 
 export const createReturnsExcelBlob = async (
