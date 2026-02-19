@@ -16,9 +16,9 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 const SESSION_KEY = 'bts-pims-session-user';
-const REALTIME_SYNC_POLL_MS = 30000;
+const REALTIME_SYNC_POLL_MS = 60000;
 const IDLE_SYNC_AFTER_MS = 30 * 60 * 1000;
-const IDLE_SYNC_POLL_MS = 5 * 60 * 1000;
+const IDLE_SYNC_POLL_MS = 10 * 60 * 1000;
 const parseDateMs = (value?: string): number | null => {
   if (!value) return null;
   const parsed = Date.parse(value);
@@ -43,10 +43,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const autoPullAssignedUpdates = async (
     user: Employee,
-    options?: { silent?: boolean }
+    options?: { silent?: boolean; skipPreview?: boolean }
   ): Promise<void> => {
     if (user.role !== 'employee' || !window.api?.sync) return;
     const silent = Boolean(options?.silent);
+    const skipPreview = Boolean(options?.skipPreview);
 
     if (!navigator.onLine) {
       if (!silent) {
@@ -95,27 +96,36 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      const preview = await window.api.sync.previewPull(user.id);
-      if (preview.status === 'full_sync_required') {
-        setSyncNotice(preview.error || 'Full sync required before assigned updates can be pulled.');
-        return;
-      }
-      if (preview.status !== 'ok') {
-        if (!silent) {
-          setSyncNotice(preview.error || 'Unable to check assigned updates.');
+      if (!skipPreview) {
+        const preview = await window.api.sync.previewPull(user.id);
+        if (preview.status === 'full_sync_required') {
+          setSyncNotice(preview.error || 'Full sync required before assigned updates can be pulled.');
+          return;
         }
-        return;
-      }
+        if (preview.status !== 'ok') {
+          if (!silent) {
+            setSyncNotice(preview.error || 'Unable to check assigned updates.');
+          }
+          return;
+        }
 
-      if (preview.newRecords === 0) {
-        if (!silent) {
-          setSyncNotice(preview.message || 'Assigned data is up to date.');
+        if (preview.newRecords === 0) {
+          if (!silent) {
+            setSyncNotice(preview.message || 'Assigned data is up to date.');
+          }
+          return;
         }
-        return;
       }
 
       const result = await window.api.sync.pull(user.id, 'remote_wins');
-      if (result.status === 'synced' || result.status === 'idle') {
+      if (result.status === 'idle') {
+        if (!silent) {
+          setSyncNotice('Assigned data is up to date.');
+        }
+        return;
+      }
+
+      if (result.status === 'synced') {
         if (!silent || result.pulledCount > 0) {
           setSyncNotice(`Synced ${result.pulledCount} assigned update(s).`);
         }
@@ -155,6 +165,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
 
       if (status.fullSyncRequired) return;
+      if (Number(status.pendingLocalChanges || 0) === 0) return;
       await window.api.sync.push(user.id);
     } catch {
       // keep silent for background push
@@ -183,10 +194,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       let lastStepError: string | null = null;
 
-      try {
-        await window.api.sync.push(user.id);
-      } catch (error: any) {
-        lastStepError = error?.message || 'Automatic admin push failed.';
+      if (Number(status.pendingLocalChanges || 0) > 0) {
+        try {
+          await window.api.sync.push(user.id);
+        } catch (error: any) {
+          lastStepError = error?.message || 'Automatic admin push failed.';
+        }
       }
 
       try {
@@ -213,7 +226,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
-  const runEmployeeRealtimeSync = async (user: Employee, options?: { silent?: boolean }): Promise<void> => {
+  const runEmployeeRealtimeSync = async (
+    user: Employee,
+    options?: { silent?: boolean; skipPreview?: boolean }
+  ): Promise<void> => {
     if (employeeSyncInFlightRef.current) return;
     employeeSyncInFlightRef.current = true;
     try {
@@ -244,7 +260,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           const user = await db.employees.get(sessionUserId);
           if (user && user.status === 'active' && !isVerificationExpired(user)) {
             if (user.role === 'employee') {
-              await runEmployeeRealtimeSync(user);
+              await runEmployeeRealtimeSync(user, { skipPreview: true });
             } else if (user.role === 'system_admin') {
               await runAdminRealtimeSync(user);
             }
@@ -291,7 +307,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (!currentUser || !window.api?.sync) return;
     const onOnline = () => {
       if (currentUser.role === 'employee') {
-        void runEmployeeRealtimeSync(currentUser);
+        void runEmployeeRealtimeSync(currentUser, { skipPreview: true });
       } else if (currentUser.role === 'system_admin') {
         void runAdminRealtimeSync(currentUser);
       }
@@ -313,7 +329,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (!wasIdle || !navigator.onLine) return;
       idleSyncRef.current = false;
       if (currentUser.role === 'employee') {
-        void runEmployeeRealtimeSync(currentUser, { silent: true });
+        void runEmployeeRealtimeSync(currentUser, { silent: true, skipPreview: true });
       } else if (currentUser.role === 'system_admin') {
         void runAdminRealtimeSync(currentUser, { silent: true });
       }
@@ -374,7 +390,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
 
       if (currentUser.role === 'employee') {
-        await runEmployeeRealtimeSync(currentUser, { silent: true });
+        await runEmployeeRealtimeSync(currentUser, { silent: true, skipPreview: true });
       } else if (currentUser.role === 'system_admin') {
         await runAdminRealtimeSync(currentUser, { silent: true });
       }
@@ -433,7 +449,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     if (user.role === 'employee') {
-      await runEmployeeRealtimeSync(user);
+      await runEmployeeRealtimeSync(user, { skipPreview: true });
     } else if (user.role === 'system_admin') {
       await runAdminRealtimeSync(user);
     }
@@ -466,7 +482,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     if (currentUser.role === 'employee') {
       setSyncNotice('Refreshing assigned updates...');
-      await autoPullAssignedUpdates(currentUser);
+      await runEmployeeRealtimeSync(currentUser, { skipPreview: true });
       await refreshUser();
       return;
     }

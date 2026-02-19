@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Package,
   Users,
@@ -28,6 +28,8 @@ export function Dashboard({ user, syncNotice, onRefreshAssignedUpdates, onDismis
   const returns = useLiveQuery(() => db.returns.toArray(), []);
   const activityLogs = useLiveQuery(() => db.activityLogs.toArray(), []);
   const [refreshingSync, setRefreshingSync] = useState(false);
+  const [lastSyncAt, setLastSyncAt] = useState<string | null>(null);
+  const [syncClock, setSyncClock] = useState<number>(Date.now());
 
   const isAdmin = user.role === 'system_admin';
   const isEmployee = user.role === 'employee';
@@ -69,11 +71,43 @@ export function Dashboard({ user, syncNotice, onRefreshAssignedUpdates, onDismis
     return 'info';
   };
 
+  const formatSyncAge = (value: string | null): string => {
+    if (!value) return 'Not yet';
+    const timestampMs = Date.parse(value);
+    if (!Number.isFinite(timestampMs)) return 'Not yet';
+    const deltaMs = Math.max(0, syncClock - timestampMs);
+    if (deltaMs < 60 * 1000) return 'just now';
+    if (deltaMs < 60 * 60 * 1000) return `${Math.floor(deltaMs / (60 * 1000))}m ago`;
+    if (deltaMs < 24 * 60 * 60 * 1000) return `${Math.floor(deltaMs / (60 * 60 * 1000))}h ago`;
+    return `${Math.floor(deltaMs / (24 * 60 * 60 * 1000))}d ago`;
+  };
+
+  const refreshLastSyncAt = async () => {
+    if (!window.api?.sync?.getStatus) return;
+    try {
+      const status = await window.api.sync.getStatus(user.id);
+      const nextLastSyncAt = status.lastAutoSyncAt || status.lastSuccessfulSyncAt || status.lastPullAt || status.lastPushAt || null;
+      setLastSyncAt(nextLastSyncAt);
+    } catch {
+      // Ignore status refresh failures for dashboard badge.
+    }
+  };
+
+  useEffect(() => {
+    void refreshLastSyncAt();
+    const timer = window.setInterval(() => {
+      setSyncClock(Date.now());
+      void refreshLastSyncAt();
+    }, 60 * 1000);
+    return () => window.clearInterval(timer);
+  }, [user.id]);
+
   const handleRefreshSync = async () => {
     if (!onRefreshAssignedUpdates || refreshingSync) return;
     setRefreshingSync(true);
     try {
       await onRefreshAssignedUpdates();
+      await refreshLastSyncAt();
     } finally {
       setRefreshingSync(false);
     }
@@ -169,6 +203,7 @@ export function Dashboard({ user, syncNotice, onRefreshAssignedUpdates, onDismis
           </div>
           <p className="text-gray-600 text-sm mb-1">Pending Returns</p>
           <p className="font-bold text-gray-900">{stats.pendingReturns}</p>
+          {canRefreshPendingReturns && <p className="text-xs text-gray-500 mt-2">Last synced: {formatSyncAge(lastSyncAt)}</p>}
         </div>
       </div>
 
