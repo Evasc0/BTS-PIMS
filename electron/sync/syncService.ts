@@ -2419,7 +2419,15 @@ const applyRemoteReturn = (db: Database.Database, payload: any, version: number)
         | undefined)?.returned_by_employee_id
     );
 
-  if (!returnedByEmployeeId) {
+  const returnedByCandidate = String(payload.returnedByEmployeeId ?? payload.returned_by_employee_id ?? '').trim();
+  const returnedByPosition = String(payload.returnedByPosition ?? payload.returned_by_position ?? '').trim().toLowerCase();
+  const shadowReturnedByEmployeeId =
+    !returnedByEmployeeId && returnedByCandidate
+      ? ensureShadowEmployeeReference(db, returnedByCandidate, returnedByPosition === 'system_admin' ? 'system_admin' : 'employee')
+      : null;
+  const resolvedReturnedByEmployeeId = returnedByEmployeeId ?? shadowReturnedByEmployeeId;
+
+  if (!resolvedReturnedByEmployeeId) {
     throw new Error(`FOREIGN KEY constraint failed: missing returning employee for return ${String(payload.id || '')}`);
   }
 
@@ -2469,7 +2477,7 @@ const applyRemoteReturn = (db: Database.Database, payload: any, version: number)
     quantity: payload.quantity,
     condition: payload.condition,
     remarks: payload.remarks,
-    returned_by_employee_id: returnedByEmployeeId,
+    returned_by_employee_id: resolvedReturnedByEmployeeId,
     returned_by_position: payload.returnedByPosition ?? payload.returned_by_position,
     received_date: payload.receivedDate ?? payload.received_date,
     location: payload.location,
@@ -2498,7 +2506,7 @@ const applyRemoteReturn = (db: Database.Database, payload: any, version: number)
 
     const tx = db.transaction((entries: any[]) => {
       for (const entry of entries) {
-        const receiverEmployeeId = sanitizeEmployeeId(entry.employeeId ?? entry.employee_id ?? returnedByEmployeeId);
+        const receiverEmployeeId = sanitizeEmployeeId(entry.employeeId ?? entry.employee_id ?? resolvedReturnedByEmployeeId);
         insertReceiver.run({
           return_id: payload.id,
           employee_id: receiverEmployeeId,
@@ -2601,6 +2609,72 @@ const localRowExistsById = (db: Database.Database, tableName: string, id: string
 
 const localEmployeeExists = (db: Database.Database, employeeId: string | null | undefined): boolean =>
   localRowExistsById(db, 'employees', employeeId);
+
+const ensureShadowEmployeeReference = (
+  db: Database.Database,
+  employeeId: string | null | undefined,
+  roleHint: SyncRole = 'employee'
+): string | null => {
+  const id = String(employeeId || '').trim();
+  if (!id) return null;
+  if (localEmployeeExists(db, id)) return id;
+
+  const now = nowIso();
+  const role: SyncRole = roleHint === 'system_admin' ? 'system_admin' : 'employee';
+  const safeLocalPart = id.replace(/[^a-zA-Z0-9._-]/gu, '_').slice(0, 40) || 'unknown';
+  const shadowEmail = `sync-shadow-${safeLocalPart}@local.invalid`;
+
+  db.prepare(
+    `
+      INSERT OR IGNORE INTO employees (
+        id, full_name, email, phone, department, role, status, password_hash, password_salt,
+        supabase_user_id, auth_sync_status, auth_last_error, pending_password_enc, provisioned_at,
+        last_verified_at, verification_expires_at, hashed_session_token, supabase_refresh_token_enc,
+        created_at, location, two_factor_enabled, email_notifications, low_stock_alerts, language,
+        sync_status, is_dirty, last_modified, last_synced_at, deleted_at, version
+      ) VALUES (
+        @id, @full_name, @email, @phone, @department, @role, @status, @password_hash, @password_salt,
+        @supabase_user_id, @auth_sync_status, @auth_last_error, @pending_password_enc, @provisioned_at,
+        @last_verified_at, @verification_expires_at, @hashed_session_token, @supabase_refresh_token_enc,
+        @created_at, @location, @two_factor_enabled, @email_notifications, @low_stock_alerts, @language,
+        @sync_status, @is_dirty, @last_modified, @last_synced_at, @deleted_at, @version
+      )
+    `
+  ).run({
+    id,
+    full_name: `Remote Sync Reference (${id.slice(0, 8)})`,
+    email: shadowEmail,
+    phone: '',
+    department: 'Sync',
+    role,
+    status: 'inactive',
+    password_hash: 'sync_shadow',
+    password_salt: 'sync_shadow',
+    supabase_user_id: null,
+    auth_sync_status: 'not_required',
+    auth_last_error: null,
+    pending_password_enc: null,
+    provisioned_at: now,
+    last_verified_at: null,
+    verification_expires_at: null,
+    hashed_session_token: null,
+    supabase_refresh_token_enc: null,
+    created_at: now,
+    location: '',
+    two_factor_enabled: 0,
+    email_notifications: 0,
+    low_stock_alerts: 0,
+    language: 'English',
+    sync_status: 'synced',
+    is_dirty: 0,
+    last_modified: now,
+    last_synced_at: now,
+    deleted_at: now,
+    version: 1
+  });
+
+  return localEmployeeExists(db, id) ? id : null;
+};
 
 const normalizeEmployeeSubmissionPayloadForAdmin = (
   db: Database.Database,
@@ -3528,10 +3602,23 @@ const pullAdminChanges = async (
         version: resolvedVersion
       };
 
-      if (operation === 'delete') {
-        applyRemoteDelete(db, entityType, recordId, payload.deletedAt || rowCreatedAt || nowIso(), resolvedVersion);
-      } else {
-        applyRemoteUpsert(db, entityType, payload, resolvedVersion);
+      try {
+        if (operation === 'delete') {
+          applyRemoteDelete(db, entityType, recordId, payload.deletedAt || rowCreatedAt || nowIso(), resolvedVersion);
+        } else {
+          applyRemoteUpsert(db, entityType, payload, resolvedVersion);
+        }
+      } catch (error: any) {
+        const message = String(error?.message || '');
+        if (message.toLowerCase().includes('foreign key constraint failed')) {
+          conflicts.push(createConflictRecord({ ...row, table_name: entityType, record_id: recordId }, entityType, localVersion, remoteVersion));
+          logSyncEvent(db, {
+            eventType: 'pull',
+            message: `Deferred admin queue record ${row.id} (${entityType}:${recordId}) due to missing local dependency.`
+          });
+          continue;
+        }
+        throw error;
       }
 
       remoteIdsToDelete.push(row.id);
