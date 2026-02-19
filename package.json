@@ -31,9 +31,11 @@
             "@radix-ui/react-toggle": "^1.1.2",
             "@radix-ui/react-toggle-group": "^1.1.2",
             "@radix-ui/react-tooltip": "^1.1.8",
+            "better-sqlite3": "^11.7.0",
             "class-variance-authority": "^0.7.1",
             "clsx": "*",
             "cmdk": "^1.1.1",
+            "electron-updater": "^6.3.0",
             "embla-carousel-react": "^8.6.0",
             "exceljs": "^4.4.0",
             "input-otp": "^1.4.2",
@@ -49,12 +51,11 @@
             "recharts": "^2.15.2",
             "sonner": "^2.0.3",
             "tailwind-merge": "*",
-            "vaul": "^1.1.2",
-            "better-sqlite3": "^11.7.0",
-            "electron-updater": "^6.3.0"
+            "vaul": "^1.1.2"
       },
       "devDependencies": {
             "@electron/rebuild": "^3.6.0",
+            "@types/jest": "^30.0.0",
             "@types/node": "^20.10.0",
             "@types/react": "^19.2.13",
             "@types/react-dom": "^19.2.3",
