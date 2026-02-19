@@ -56,9 +56,48 @@ const valueOptions: ValueCategory[] = ['HV', 'MV', 'LV'];
 const articleOptions = ['Desktop', 'Chair', 'Table'];
 const unitOptions = ['pcs', 'set', 'box', 'unit', 'pack'];
 
+const getControlNumberLabel = (valueCategory: ValueCategory | '') => {
+  if (valueCategory === 'HV' || valueCategory === 'LV') return 'ICS Control Number';
+  if (valueCategory === 'MV') return 'PAR Control Number';
+  return 'Control Number';
+};
+
+const getAssetNumberLabel = (valueCategory: ValueCategory | '') => {
+  if (valueCategory === 'HV' || valueCategory === 'LV') return 'Inventory Number';
+  if (valueCategory === 'MV') return 'Property Number';
+  return 'Inventory / Property Number';
+};
+
+const getValueOptionLabel = (valueCategory: ValueCategory) => {
+  if (valueCategory === 'HV') return 'HV (High Value)';
+  if (valueCategory === 'MV') return 'PPEIR (Property, Plant and Equipment Inventory Report)';
+  return 'LV (Low Value)';
+};
+
+const getValueBadgeLabel = (valueCategory: ValueCategory) => {
+  if (valueCategory === 'MV') return 'PPEIR';
+  return valueCategory;
+};
+
+type ValueDisplayFilter = 'all' | 'hv' | 'lv' | 'ppeir';
+
+const getValueDisplayFilterLabel = (filter: ValueDisplayFilter) => {
+  switch (filter) {
+    case 'hv':
+      return 'HV';
+    case 'lv':
+      return 'LV';
+    case 'ppeir':
+      return 'PPEIR';
+    default:
+      return 'All Values';
+  }
+};
+
 export function ProductsPage({ user }: ProductsPageProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<ProductStatus | 'all'>('all');
+  const [valueDisplayFilter, setValueDisplayFilter] = useState<ValueDisplayFilter>('all');
   const [articleFilter, setArticleFilter] = useState<'all' | string>('all');
   const [showAddModal, setShowAddModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
@@ -76,6 +115,8 @@ export function ProductsPage({ user }: ProductsPageProps) {
   }, [employees]);
 
   const canManageProduct = user.role === 'system_admin';
+  const controlNumberLabel = getControlNumberLabel(formState.valueCategory);
+  const assetNumberLabel = getAssetNumberLabel(formState.valueCategory);
 
   const editArticleOptions = useMemo(() => {
     const options = [...articleOptions];
@@ -98,13 +139,31 @@ export function ProductsPage({ user }: ProductsPageProps) {
     )
     .filter((product: Product) => (statusFilter === 'all' ? true : product.status === statusFilter))
     .filter((product: Product) => {
+      if (valueDisplayFilter === 'all') return true;
+      if (valueDisplayFilter === 'ppeir') return product.valueCategory === 'MV';
+      if (valueDisplayFilter === 'hv') return product.valueCategory === 'HV';
+      return product.valueCategory === 'LV';
+    })
+    .filter((product: Product) => {
       const term = searchTerm.trim().toLowerCase();
       if (!term) return true;
+
+      const valueKeywords = [
+        product.valueCategory,
+        getValueBadgeLabel(product.valueCategory),
+        getValueOptionLabel(product.valueCategory),
+        getControlNumberLabel(product.valueCategory),
+        getAssetNumberLabel(product.valueCategory)
+      ]
+        .join(' ')
+        .toLowerCase();
+
       return (
         (product.article || '').toLowerCase().includes(term) ||
         (product.propertyNumber || '').toLowerCase().includes(term) ||
         (product.parControlNumber || '').toLowerCase().includes(term) ||
-        (product.description || '').toLowerCase().includes(term)
+        (product.description || '').toLowerCase().includes(term) ||
+        valueKeywords.includes(term)
       );
     });
 
@@ -150,7 +209,7 @@ export function ProductsPage({ user }: ProductsPageProps) {
     setFormError(null);
 
     if (!formState.valueCategory || !formState.article.trim() || !formState.date || !formState.parControlNumber.trim()) {
-      setFormError('Value, article, date, and PAR control number are required.');
+      setFormError('Value, article, date, and control number are required.');
       return;
     }
 
@@ -206,7 +265,7 @@ export function ProductsPage({ user }: ProductsPageProps) {
     setFormError(null);
 
     if (!formState.valueCategory || !formState.article.trim() || !formState.date || !formState.parControlNumber.trim()) {
-      setFormError('Value, article, date, and PAR control number are required.');
+      setFormError('Value, article, date, and control number are required.');
       return;
     }
 
@@ -287,16 +346,16 @@ export function ProductsPage({ user }: ProductsPageProps) {
     }
   };
 
-  const cycleStatusFilter = () => {
+  const cycleValueDisplayFilter = () => {
     const next =
-      statusFilter === 'all'
-        ? 'available'
-        : statusFilter === 'available'
-          ? 'assigned'
-          : statusFilter === 'assigned'
-            ? 'returned'
+      valueDisplayFilter === 'all'
+        ? 'hv'
+        : valueDisplayFilter === 'hv'
+          ? 'lv'
+          : valueDisplayFilter === 'lv'
+            ? 'ppeir'
             : 'all';
-    setStatusFilter(next);
+    setValueDisplayFilter(next);
   };
 
   const getStatusColor = (status: ProductStatus) => {
@@ -325,7 +384,114 @@ export function ProductsPage({ user }: ProductsPageProps) {
     }
   };
 
-  const columnCount = user.role !== 'employee' ? 15 : 14;
+  const hvProducts = filteredProducts.filter((product) => product.valueCategory === 'HV');
+  const lvProducts = filteredProducts.filter((product) => product.valueCategory === 'LV');
+  const ppeirProducts = filteredProducts.filter((product) => product.valueCategory === 'MV');
+  const showHvTable = hvProducts.length > 0;
+  const showLvTable = lvProducts.length > 0;
+  const showPpeirTable = ppeirProducts.length > 0;
+  const showEmptyState = !showHvTable && !showLvTable && !showPpeirTable;
+  const valueFilterLabel = getValueDisplayFilterLabel(valueDisplayFilter);
+
+  const renderProductsTable = (
+    tableProducts: Product[],
+    controlHeader: string,
+    assetHeader: string,
+    sectionLabel: string
+  ) => (
+    <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+      <div className="px-6 py-3 bg-gray-50 border-b border-gray-200">
+        <p className="text-xs font-semibold text-gray-600 uppercase tracking-wider">{sectionLabel}</p>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full">
+          <thead className="bg-gray-50 border-b border-gray-200">
+            <tr>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Value</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Article</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Description</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date Acquired</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{controlHeader}</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{assetHeader}</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">UOM</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Unit Cost</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">QTY</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Total Amount</th>
+              {user.role !== 'employee' && (
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Assigned To</th>
+              )}
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Location</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Remarks</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+              <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-200">
+            {tableProducts.map((product: Product) => (
+              <tr key={product.id} className="hover:bg-gray-50">
+                <td className="px-6 py-4">
+                  <span className={`px-2 py-1 rounded-full text-xs font-medium ${getValueColor(product.valueCategory)}`}>
+                    {getValueBadgeLabel(product.valueCategory)}
+                  </span>
+                </td>
+                <td className="px-6 py-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 bg-indigo-100 rounded-lg flex items-center justify-center">
+                      <Package className="w-5 h-5 text-indigo-600" />
+                    </div>
+                    <div>
+                      <p className="font-medium text-gray-900">{product.article}</p>
+                    </div>
+                  </div>
+                </td>
+                <td className="px-6 py-4 text-sm text-gray-600">{product.description}</td>
+                <td className="px-6 py-4 text-sm text-gray-600">{product.date}</td>
+                <td className="px-6 py-4 text-sm text-gray-600">{product.parControlNumber}</td>
+                <td className="px-6 py-4 text-sm text-gray-600">{product.propertyNumber}</td>
+                <td className="px-6 py-4 text-sm text-gray-600">{product.unit}</td>
+                <td className="px-6 py-4 text-sm text-gray-900">{formatCurrency(product.unitValue)}</td>
+                <td className="px-6 py-4 text-sm text-gray-900">{product.onHandPerCount}</td>
+                <td className="px-6 py-4 text-sm font-medium text-gray-900">{formatCurrency(product.total)}</td>
+                {user.role !== 'employee' && (
+                  <td className="px-6 py-4 text-sm text-gray-600">
+                    {product.assignedToEmployeeId ? employeeMap.get(product.assignedToEmployeeId)?.fullName || '-' : '-'}
+                  </td>
+                )}
+                <td className="px-6 py-4 text-sm text-gray-600">{product.location}</td>
+                <td className="px-6 py-4 text-sm font-medium text-gray-900">{product.remarks}</td>
+                <td className="px-6 py-4">
+                  <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusColor(product.status)}`}>
+                    {product.status}
+                  </span>
+                </td>
+                <td className="px-6 py-4 text-right">
+                  <div className="flex items-center justify-end gap-2">
+                    {canManageProduct && (
+                      <button onClick={() => openEditModal(product)} className="p-2 hover:bg-gray-100 rounded-lg transition">
+                        <Edit className="w-4 h-4 text-gray-600" />
+                      </button>
+                    )}
+                    {canManageProduct && (
+                      <button onClick={() => handleDeleteProduct(product)} className="p-2 hover:bg-red-50 rounded-lg transition">
+                        <Trash2 className="w-4 h-4 text-red-600" />
+                      </button>
+                    )}
+                    <button
+                      onClick={() => handleCopyPropertyNumber(product.propertyNumber)}
+                      title="Copy inventory number"
+                      className="p-2 hover:bg-gray-100 rounded-lg transition"
+                    >
+                      <MoreVertical className="w-4 h-4 text-gray-600" />
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
 
   return (
     <div className="p-8">
@@ -371,115 +537,36 @@ export function ProductsPage({ user }: ProductsPageProps) {
               </option>
             ))}
           </select>
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value as ProductStatus | 'all')}
+            className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
+          >
+            <option value="all">All Status</option>
+            <option value="available">Available</option>
+            <option value="assigned">Assigned</option>
+            <option value="returned">Returned</option>
+          </select>
           <button
-            onClick={cycleStatusFilter}
-            title={`Filter: ${statusFilter}`}
+            onClick={cycleValueDisplayFilter}
+            title={`Value Filter: ${valueFilterLabel}`}
             className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition flex items-center gap-2"
           >
             <Filter className="w-5 h-5" />
-            Filter
+            {valueFilterLabel}
           </button>
         </div>
       </div>
 
-      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full">
-            <thead className="bg-gray-50 border-b border-gray-200">
-              <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Value</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Article</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Description</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date Acquired</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">PAR Control No.</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Property No.</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">UOM</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Unit Cost</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">QTY</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Total Amount</th>
-                {user.role !== 'employee' && (
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Assigned To</th>
-                )}
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Location</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Remarks</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-200">
-              {filteredProducts.length === 0 && (
-                <tr>
-                  <td className="px-6 py-6 text-center text-gray-500" colSpan={columnCount}>
-                    No products available.
-                  </td>
-                </tr>
-              )}
-              {filteredProducts.map((product: Product) => (
-                <tr key={product.id} className="hover:bg-gray-50">
-                  <td className="px-6 py-4">
-                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${getValueColor(product.valueCategory)}`}>
-                      {product.valueCategory}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 bg-indigo-100 rounded-lg flex items-center justify-center">
-                        <Package className="w-5 h-5 text-indigo-600" />
-                      </div>
-                      <div>
-                        <p className="font-medium text-gray-900">{product.article}</p>
-                      </div>
-                    </div>
-                  </td>
-                  <td className="px-6 py-4 text-sm text-gray-600">{product.description}</td>
-                  <td className="px-6 py-4 text-sm text-gray-600">{product.date}</td>
-                  <td className="px-6 py-4 text-sm text-gray-600">{product.parControlNumber}</td>
-                  <td className="px-6 py-4 text-sm text-gray-600">{product.propertyNumber}</td>
-                  <td className="px-6 py-4 text-sm text-gray-600">{product.unit}</td>
-                  <td className="px-6 py-4 text-sm text-gray-900">{formatCurrency(product.unitValue)}</td>
-                  <td className="px-6 py-4 text-sm text-gray-900">{product.onHandPerCount}</td>
-                  <td className="px-6 py-4 text-sm font-medium text-gray-900">{formatCurrency(product.total)}</td>
-                  {user.role !== 'employee' && (
-                    <td className="px-6 py-4 text-sm text-gray-600">
-                      {product.assignedToEmployeeId ? employeeMap.get(product.assignedToEmployeeId)?.fullName || '-' : '-'}
-                    </td>
-                  )}
-                  <td className="px-6 py-4 text-sm text-gray-600">{product.location}</td>
-                  <td className="px-6 py-4 text-sm font-medium text-gray-900">{product.remarks}</td>
-                  <td className="px-6 py-4">
-                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusColor(product.status)}`}>
-                      {product.status}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 text-right">
-                    <div className="flex items-center justify-end gap-2">
-                      {canManageProduct && (
-                        <button
-                          onClick={() => openEditModal(product)}
-                          className="p-2 hover:bg-gray-100 rounded-lg transition"
-                        >
-                          <Edit className="w-4 h-4 text-gray-600" />
-                        </button>
-                      )}
-                      {canManageProduct && (
-                        <button onClick={() => handleDeleteProduct(product)} className="p-2 hover:bg-red-50 rounded-lg transition">
-                          <Trash2 className="w-4 h-4 text-red-600" />
-                        </button>
-                      )}
-                      <button
-                        onClick={() => handleCopyPropertyNumber(product.propertyNumber)}
-                        title="Copy property number"
-                        className="p-2 hover:bg-gray-100 rounded-lg transition"
-                      >
-                        <MoreVertical className="w-4 h-4 text-gray-600" />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+      <div className="space-y-4">
+        {showHvTable && renderProductsTable(hvProducts, 'ICS Control No.', 'Inventory No.', 'ICS Inventory (HV)')}
+        {showLvTable && renderProductsTable(lvProducts, 'ICS Control No.', 'Inventory No.', 'ICS Inventory (LV)')}
+        {showPpeirTable && renderProductsTable(ppeirProducts, 'PAR Control No.', 'Property No.', 'PPEIR')}
+        {showEmptyState && (
+          <div className="bg-white rounded-xl border border-gray-200 p-6 text-center text-gray-500">
+            No products available.
+          </div>
+        )}
       </div>
 
       {showAddModal && (
@@ -503,7 +590,7 @@ export function ProductsPage({ user }: ProductsPageProps) {
                   <option value="">Select value classification</option>
                   {valueOptions.map((value) => (
                     <option key={value} value={value}>
-                      {value} ({value === 'HV' ? 'High' : value === 'MV' ? 'Mid' : 'Low'} Value)
+                      {getValueOptionLabel(value)}
                     </option>
                   ))}
                 </select>
@@ -551,7 +638,7 @@ export function ProductsPage({ user }: ProductsPageProps) {
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">PAR Control Number *</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">{controlNumberLabel} *</label>
                   <input
                     type="text"
                     value={formState.parControlNumber}
@@ -561,7 +648,7 @@ export function ProductsPage({ user }: ProductsPageProps) {
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Property Number *</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">{assetNumberLabel} *</label>
                   <input
                     type="text"
                     value={formState.propertyNumber}
@@ -708,7 +795,7 @@ export function ProductsPage({ user }: ProductsPageProps) {
                 >
                   {valueOptions.map((value) => (
                     <option key={value} value={value}>
-                      {value} ({value === 'HV' ? 'High' : value === 'MV' ? 'Mid' : 'Low'} Value)
+                      {getValueOptionLabel(value)}
                     </option>
                   ))}
                 </select>
@@ -756,7 +843,7 @@ export function ProductsPage({ user }: ProductsPageProps) {
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">PAR Control Number *</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">{controlNumberLabel} *</label>
                   <input
                     type="text"
                     value={formState.parControlNumber}
@@ -766,7 +853,7 @@ export function ProductsPage({ user }: ProductsPageProps) {
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Property Number *</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">{assetNumberLabel} *</label>
                   <input
                     type="text"
                     value={formState.propertyNumber}

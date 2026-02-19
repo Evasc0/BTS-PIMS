@@ -58,6 +58,23 @@ const getValueColor = (value: ValueCategory) => {
   }
 };
 
+const getControlNumberLabel = (valueCategory?: ValueCategory) => {
+  if (valueCategory === 'HV' || valueCategory === 'LV') return 'ICS Control Number';
+  if (valueCategory === 'MV') return 'PAR Control Number';
+  return 'Control Number';
+};
+
+const getAssetNumberLabel = (valueCategory?: ValueCategory) => {
+  if (valueCategory === 'HV' || valueCategory === 'LV') return 'Inventory Number';
+  if (valueCategory === 'MV') return 'Property Number';
+  return 'Inventory / Property Number';
+};
+
+const getValueBadgeLabel = (valueCategory: ValueCategory) => {
+  if (valueCategory === 'MV') return 'PPEIR';
+  return valueCategory;
+};
+
 const getConditionColor = (condition: ReturnCondition) => {
   switch (condition) {
     case 'functional':
@@ -235,11 +252,11 @@ export function ReportsPage({ user }: ReportsPageProps) {
                       <p className="text-sm text-gray-900">{formatDate(item.date)}</p>
                     </div>
                     <div>
-                      <p className="text-sm text-gray-600 mb-1">PAR Control Number:</p>
+                      <p className="text-sm text-gray-600 mb-1">{getControlNumberLabel(item.valueCategory)}:</p>
                       <p className="text-sm text-gray-900">{item.parControlNumber}</p>
                     </div>
                     <div>
-                      <p className="text-sm text-gray-600 mb-1">Property Number:</p>
+                      <p className="text-sm text-gray-600 mb-1">{getAssetNumberLabel(item.valueCategory)}:</p>
                       <p className="text-sm text-gray-900">{item.propertyNumber}</p>
                     </div>
                     <div>
@@ -274,7 +291,7 @@ export function ReportsPage({ user }: ReportsPageProps) {
                         <div>
                           <p className="text-sm text-gray-600 mb-1">Value:</p>
                           <span className={`inline-flex px-3 py-1 rounded-full text-xs font-medium ${getValueColor(item.valueCategory)}`}>
-                            {item.valueCategory}
+                            {getValueBadgeLabel(item.valueCategory)}
                           </span>
                         </div>
                         <div>
@@ -340,11 +357,11 @@ export function ReportsPage({ user }: ReportsPageProps) {
                       <p className="text-sm text-gray-900">{product?.date ? formatDate(product.date) : ''}</p>
                     </div>
                     <div>
-                      <p className="text-sm text-gray-600 mb-1">PAR Control Number:</p>
+                      <p className="text-sm text-gray-600 mb-1">{getControlNumberLabel(product?.valueCategory)}:</p>
                       <p className="text-sm text-gray-900">{product?.parControlNumber || ''}</p>
                     </div>
                     <div>
-                      <p className="text-sm text-gray-600 mb-1">Property Number:</p>
+                      <p className="text-sm text-gray-600 mb-1">{getAssetNumberLabel(product?.valueCategory)}:</p>
                       <p className="text-sm text-gray-900">{product?.propertyNumber || ''}</p>
                     </div>
                     <div>

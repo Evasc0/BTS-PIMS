@@ -376,12 +376,12 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
     }
 
     if (isEmployee && !formState.productId) {
-      setFormError('Select an assigned property to return.');
+      setFormError('Select an assigned inventory item to return.');
       return;
     }
 
     if (isAdmin && formState.selectedProductIds.length === 0) {
-      setFormError('Select at least one property number.');
+      setFormError('Select at least one inventory number.');
       return;
     }
 
@@ -453,7 +453,7 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
       }
       const alreadyPending = targetProducts.some((product) => product.status === 'pending_return');
       if (alreadyPending) {
-        setFormError('One or more selected properties already have a pending return request.');
+        setFormError('One or more selected inventory items already have a pending return request.');
         return;
       }
     }
@@ -888,14 +888,14 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
 
                   {isEmployee && (
                     <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-2">Assigned Property *</label>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Assigned Inventory Item *</label>
                       <select
                         value={formState.productId}
                         onChange={(e) => setFormState({ ...formState, productId: e.target.value })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
                         required
                       >
-                        <option value="">Select assigned property</option>
+                        <option value="">Select assigned inventory item</option>
                         {availableProducts.map((product) => (
                           <option key={product.id} value={product.id}>
                             {product.propertyNumber} - {product.article}
@@ -907,12 +907,12 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
 
                   {isAdmin && (
                     <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-2">Search Property Number *</label>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Search Inventory Number *</label>
                       <input
                         type="text"
                         value={propertySearch}
                         onChange={(e) => setPropertySearch(e.target.value)}
-                        placeholder="Type property number, article, or description..."
+                        placeholder="Type inventory number, article, or description..."
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
                       />
 
@@ -941,7 +941,7 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
                         <div>
                           <p className="px-3 py-2 text-xs font-semibold text-gray-500 bg-gray-50 uppercase tracking-wide">Search Results</p>
                           {searchableAdminProducts.length === 0 ? (
-                            <p className="px-3 py-3 text-sm text-gray-500">No properties found.</p>
+                            <p className="px-3 py-3 text-sm text-gray-500">No inventory items found.</p>
                           ) : (
                             searchableAdminProducts.map((product) => (
                               <button
