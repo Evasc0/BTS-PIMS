@@ -407,34 +407,34 @@ export function ProductsPage({ user }: ProductsPageProps) {
         <table className="w-full">
           <thead className="bg-gray-50 border-b border-gray-200">
             <tr>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Value</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Article</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Description</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date Acquired</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{controlHeader}</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{assetHeader}</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">UOM</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Unit Cost</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">QTY</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Total Amount</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider border-r border-gray-200">Value</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider border-r border-gray-200">Article</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider border-r border-gray-200">Description</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider border-r border-gray-200">Date Acquired</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider border-r border-gray-200">{controlHeader}</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider border-r border-gray-200">{assetHeader}</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider border-r border-gray-200">UOM</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider border-r border-gray-200">Unit Cost</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider border-r border-gray-200">QTY</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider border-r border-gray-200">Total Amount</th>
               {user.role !== 'employee' && (
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Assigned To</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider border-r border-gray-200">Assigned To</th>
               )}
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Location</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Remarks</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider border-r border-gray-200">Location</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider border-r border-gray-200">Remarks</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider border-r border-gray-200">Status</th>
               <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-200">
             {tableProducts.map((product: Product) => (
               <tr key={product.id} className="hover:bg-gray-50">
-                <td className="px-6 py-4">
+                <td className="px-6 py-4 border-r border-gray-200">
                   <span className={`px-2 py-1 rounded-full text-xs font-medium ${getValueColor(product.valueCategory)}`}>
                     {getValueBadgeLabel(product.valueCategory)}
                   </span>
                 </td>
-                <td className="px-6 py-4">
+                <td className="px-6 py-4 border-r border-gray-200">
                   <div className="flex items-center gap-3">
                     <div className="w-10 h-10 bg-indigo-100 rounded-lg flex items-center justify-center">
                       <Package className="w-5 h-5 text-indigo-600" />
@@ -444,22 +444,22 @@ export function ProductsPage({ user }: ProductsPageProps) {
                     </div>
                   </div>
                 </td>
-                <td className="px-6 py-4 text-sm text-gray-600">{product.description}</td>
-                <td className="px-6 py-4 text-sm text-gray-600">{product.date}</td>
-                <td className="px-6 py-4 text-sm text-gray-600">{product.parControlNumber}</td>
-                <td className="px-6 py-4 text-sm text-gray-600">{product.propertyNumber}</td>
-                <td className="px-6 py-4 text-sm text-gray-600">{product.unit}</td>
-                <td className="px-6 py-4 text-sm text-gray-900">{formatCurrency(product.unitValue)}</td>
-                <td className="px-6 py-4 text-sm text-gray-900">{product.onHandPerCount}</td>
-                <td className="px-6 py-4 text-sm font-medium text-gray-900">{formatCurrency(product.total)}</td>
+                <td className="px-6 py-4 text-sm text-gray-600 border-r border-gray-200">{product.description}</td>
+                <td className="px-6 py-4 text-sm text-gray-600 border-r border-gray-200">{product.date}</td>
+                <td className="px-6 py-4 text-sm text-gray-600 border-r border-gray-200">{product.parControlNumber}</td>
+                <td className="px-6 py-4 text-sm text-gray-600 border-r border-gray-200">{product.propertyNumber}</td>
+                <td className="px-6 py-4 text-sm text-gray-600 border-r border-gray-200">{product.unit}</td>
+                <td className="px-6 py-4 text-sm text-gray-900 border-r border-gray-200">{formatCurrency(product.unitValue)}</td>
+                <td className="px-6 py-4 text-sm text-gray-900 border-r border-gray-200">{product.onHandPerCount}</td>
+                <td className="px-6 py-4 text-sm font-medium text-gray-900 border-r border-gray-200">{formatCurrency(product.total)}</td>
                 {user.role !== 'employee' && (
-                  <td className="px-6 py-4 text-sm text-gray-600">
+                  <td className="px-6 py-4 text-sm text-gray-600 border-r border-gray-200">
                     {product.assignedToEmployeeId ? employeeMap.get(product.assignedToEmployeeId)?.fullName || '-' : '-'}
                   </td>
                 )}
-                <td className="px-6 py-4 text-sm text-gray-600">{product.location}</td>
-                <td className="px-6 py-4 text-sm font-medium text-gray-900">{product.remarks}</td>
-                <td className="px-6 py-4">
+                <td className="px-6 py-4 text-sm text-gray-600 border-r border-gray-200">{product.location}</td>
+                <td className="px-6 py-4 text-sm font-medium text-gray-900 border-r border-gray-200">{product.remarks}</td>
+                <td className="px-6 py-4 border-r border-gray-200">
                   <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusColor(product.status)}`}>
                     {product.status}
                   </span>
