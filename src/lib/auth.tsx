@@ -16,9 +16,15 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 const SESSION_KEY = 'bts-pims-session-user';
-const REALTIME_SYNC_POLL_MS = 60000;
-const IDLE_SYNC_AFTER_MS = 30 * 60 * 1000;
-const IDLE_SYNC_POLL_MS = 10 * 60 * 1000;
+const readEnvMs = (key: string, fallback: number, min = 1000): number => {
+  const raw = String((import.meta as any)?.env?.[key] ?? '').trim();
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < min) return fallback;
+  return Math.floor(parsed);
+};
+const REALTIME_SYNC_POLL_MS = readEnvMs('VITE_SYNC_REALTIME_POLL_MS', 60000, 5000);
+const IDLE_SYNC_AFTER_MS = readEnvMs('VITE_SYNC_IDLE_AFTER_MS', 5 * 60 * 1000, 60000);
+const IDLE_SYNC_POLL_MS = readEnvMs('VITE_SYNC_IDLE_POLL_MS', 60 * 1000, 5000);
 const parseDateMs = (value?: string): number | null => {
   if (!value) return null;
   const parsed = Date.parse(value);
@@ -40,6 +46,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const adminSyncInFlightRef = useRef(false);
   const lastActivityAtRef = useRef(Date.now());
   const idleSyncRef = useRef(false);
+  const modeTransitionInFlightRef = useRef(false);
 
   const autoPullAssignedUpdates = async (
     user: Employee,
@@ -250,6 +257,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  const setAutomaticSyncMode = async (user: Employee, online: boolean): Promise<void> => {
+    if (!window.api?.sync) return;
+    if (modeTransitionInFlightRef.current) return;
+    modeTransitionInFlightRef.current = true;
+    try {
+      const status = await window.api.sync.getStatus(user.id);
+      if (!status.configured) return;
+      if ((status.mode === 'online') === online) return;
+      await window.api.sync.setMode(user.id, online);
+    } catch {
+      // mode transitions are best-effort for background idle handling
+    } finally {
+      modeTransitionInFlightRef.current = false;
+    }
+  };
+
   useEffect(() => {
     let isMounted = true;
     const init = async () => {
@@ -306,6 +329,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!currentUser || !window.api?.sync) return;
     const onOnline = () => {
+      if (idleSyncRef.current) return;
       if (currentUser.role === 'employee') {
         void runEmployeeRealtimeSync(currentUser, { skipPreview: true });
       } else if (currentUser.role === 'system_admin') {
@@ -328,11 +352,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       markActive();
       if (!wasIdle || !navigator.onLine) return;
       idleSyncRef.current = false;
-      if (currentUser.role === 'employee') {
-        void runEmployeeRealtimeSync(currentUser, { silent: true, skipPreview: true });
-      } else if (currentUser.role === 'system_admin') {
-        void runAdminRealtimeSync(currentUser, { silent: true });
-      }
+      void (async () => {
+        await setAutomaticSyncMode(currentUser, true);
+        if (currentUser.role === 'employee') {
+          await runEmployeeRealtimeSync(currentUser, { silent: true, skipPreview: true });
+        } else if (currentUser.role === 'system_admin') {
+          await runAdminRealtimeSync(currentUser, { silent: true });
+        }
+      })();
     };
 
     const onVisibility = () => {
@@ -376,13 +403,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       const idleForMs = Date.now() - lastActivityAtRef.current;
       const isIdle = idleForMs >= IDLE_SYNC_AFTER_MS;
+      const wasIdle = idleSyncRef.current;
       idleSyncRef.current = isIdle;
-      const intervalMs =
-        currentUser.role === 'system_admin'
-          ? REALTIME_SYNC_POLL_MS
-          : isIdle
-            ? IDLE_SYNC_POLL_MS
-            : REALTIME_SYNC_POLL_MS;
+      const intervalMs = isIdle ? IDLE_SYNC_POLL_MS : REALTIME_SYNC_POLL_MS;
+
+      if (isIdle) {
+        if (!wasIdle && navigator.onLine) {
+          await setAutomaticSyncMode(currentUser, false);
+        }
+        schedule(intervalMs);
+        return;
+      }
 
       if (!navigator.onLine) {
         schedule(intervalMs);

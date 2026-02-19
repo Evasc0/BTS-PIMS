@@ -103,6 +103,9 @@ SYNC_RETENTION_RPC_COOLDOWN_MS=14400000
 SYNC_ORPHAN_OBJECT_RETENTION_DAYS=2
 SYNC_ORPHAN_OBJECT_CLEANUP_LIMIT=1000
 AUTH_VERIFICATION_DAYS=30
+VITE_SYNC_REALTIME_POLL_MS=60000
+VITE_SYNC_IDLE_AFTER_MS=300000
+VITE_SYNC_IDLE_POLL_MS=60000
 ```
 
 2. In Supabase SQL Editor, run:
@@ -121,7 +124,7 @@ This creates:
 
 3. Sync controls:
 - System admin and employee devices auto-sync when authenticated and online (push + pull loop every ~30s).
-- Sync loop enters low-frequency idle mode after 30 minutes of no activity and wakes immediately on user activity.
+- Sync loop automatically switches sync mode offline after inactivity (`VITE_SYNC_IDLE_AFTER_MS`, default 5 minutes) and wakes online immediately on user activity.
 - Employee and admin UI are automatic-only for normal push/pull (no manual sync buttons or online/offline toggle).
 - Admin retains `Full Sync Check` only for controlled full-sync approval.
 
