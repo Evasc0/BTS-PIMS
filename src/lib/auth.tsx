@@ -321,6 +321,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setInitError('Your account has been deactivated. Contact administrator.');
         return;
       }
+
+      const previousEmail = String(currentUser.email || '').trim().toLowerCase();
+      const latestEmail = String(latest.email || '').trim().toLowerCase();
+      const emailChanged = latestEmail !== previousEmail;
+      const passwordChanged = String(latest.passwordHash || '') !== String(currentUser.passwordHash || '');
+      if (emailChanged || passwordChanged) {
+        if (window.api?.auth) {
+          void window.api.auth.logout(currentUser.id);
+        }
+        localStorage.removeItem(SESSION_KEY);
+        setCurrentUser(null);
+        setSyncNotice(null);
+        setInitError('Your credentials were updated. Please sign in again with your latest email/password.');
+        return;
+      }
       setCurrentUser(latest);
     });
     return unsubscribe;
