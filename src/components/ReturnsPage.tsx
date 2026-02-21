@@ -18,10 +18,16 @@ interface ReceiverFormState {
   location: string;
 }
 
+interface AdminReturnItem {
+  productId: string;
+  condition: ReturnCondition;
+  remarks: string;
+}
+
 interface ReturnFormState {
   rrspNumber: string;
   productId: string;
-  selectedProductIds: string[];
+  adminReturnItems: AdminReturnItem[];
   returnDate: string;
   condition: ReturnCondition | '';
   remarks: string;
@@ -38,7 +44,7 @@ const emptyReceiver: ReceiverFormState = {
 const emptyReturnForm: ReturnFormState = {
   rrspNumber: '',
   productId: '',
-  selectedProductIds: [],
+  adminReturnItems: [],
   returnDate: '',
   condition: '',
   remarks: '',
@@ -68,6 +74,13 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
   const [submitSyncMessage, setSubmitSyncMessage] = useState<string | null>(null);
   const [propertySearch, setPropertySearch] = useState('');
   const [debouncedPropertySearch, setDebouncedPropertySearch] = useState('');
+  const [showPropertyResults, setShowPropertyResults] = useState(false);
+  const [employeePropertySearch, setEmployeePropertySearch] = useState('');
+  const [debouncedEmployeePropertySearch, setDebouncedEmployeePropertySearch] = useState('');
+  const [showEmployeePropertyResults, setShowEmployeePropertyResults] = useState(false);
+  const [adminDraftProductId, setAdminDraftProductId] = useState('');
+  const [adminDraftCondition, setAdminDraftCondition] = useState<ReturnCondition | ''>('');
+  const [adminDraftRemarks, setAdminDraftRemarks] = useState('');
 
   const returns = useLiveQuery(() => db.returns.toArray(), []);
   const products = useLiveQuery(() => db.products.toArray(), []);
@@ -118,16 +131,38 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
     return () => window.clearTimeout(timer);
   }, [propertySearch]);
 
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedEmployeePropertySearch(employeePropertySearch.trim().toLowerCase());
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [employeePropertySearch]);
+
   const selectedAdminProducts = useMemo(() => {
-    if (!isAdmin) return [] as Product[];
-    return formState.selectedProductIds
-      .map((id) => productMap.get(id))
-      .filter((product): product is Product => Boolean(product));
-  }, [isAdmin, formState.selectedProductIds, productMap]);
+    if (!isAdmin) return [] as Array<{ item: AdminReturnItem; product: Product }>;
+    return formState.adminReturnItems
+      .map((item) => {
+        const product = productMap.get(item.productId);
+        if (!product) return null;
+        return { item, product };
+      })
+      .filter((entry): entry is { item: AdminReturnItem; product: Product } => Boolean(entry));
+  }, [isAdmin, formState.adminReturnItems, productMap]);
+
+  const adminDraftProduct = useMemo(() => {
+    if (!isAdmin || !adminDraftProductId) return null;
+    return productMap.get(adminDraftProductId) || null;
+  }, [isAdmin, adminDraftProductId, productMap]);
+
+  const selectedEmployeeProduct = useMemo(() => {
+    if (!isEmployee || !formState.productId) return null;
+    return availableProducts.find((product) => product.id === formState.productId) || null;
+  }, [isEmployee, formState.productId, availableProducts]);
 
   const searchableAdminProducts = useMemo(() => {
     if (!isAdmin) return [] as Product[];
-    const selected = new Set(formState.selectedProductIds);
+    const selected = new Set(formState.adminReturnItems.map((item) => item.productId));
+    if (adminDraftProductId) selected.add(adminDraftProductId);
     return (products || [])
       .filter((product) => !selected.has(product.id))
       .filter((product) => {
@@ -140,7 +175,22 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
       })
       .sort((a, b) => a.propertyNumber.localeCompare(b.propertyNumber))
       .slice(0, 50);
-  }, [isAdmin, products, formState.selectedProductIds, debouncedPropertySearch]);
+  }, [isAdmin, products, formState.adminReturnItems, adminDraftProductId, debouncedPropertySearch]);
+
+  const searchableEmployeeProducts = useMemo(() => {
+    if (!isEmployee) return [] as Product[];
+    return availableProducts
+      .filter((product) => {
+        if (!debouncedEmployeePropertySearch) return true;
+        return (
+          product.propertyNumber.toLowerCase().includes(debouncedEmployeePropertySearch) ||
+          product.article.toLowerCase().includes(debouncedEmployeePropertySearch) ||
+          product.description.toLowerCase().includes(debouncedEmployeePropertySearch)
+        );
+      })
+      .sort((a, b) => a.propertyNumber.localeCompare(b.propertyNumber))
+      .slice(0, 50);
+  }, [isEmployee, availableProducts, debouncedEmployeePropertySearch]);
 
   const filteredReturns = useMemo(() => {
     return (returns || []).filter((ret) => {
@@ -184,6 +234,9 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
     }
   };
 
+  const getConditionLabel = (condition: ReturnCondition) =>
+    conditionOptions.find((option) => option.value === condition)?.label || condition;
+
   const resetForm = () => {
     const defaultAdmin = adminEmployees[0];
     setFormState({
@@ -201,19 +254,80 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
     setFormError(null);
     setPropertySearch('');
     setDebouncedPropertySearch('');
+    setShowPropertyResults(false);
+    setEmployeePropertySearch('');
+    setDebouncedEmployeePropertySearch('');
+    setShowEmployeePropertyResults(false);
+    setAdminDraftProductId('');
+    setAdminDraftCondition('');
+    setAdminDraftRemarks('');
   };
 
-  const addSelectedAdminProperty = (productId: string) => {
+  const selectEmployeeProperty = (productId: string) => {
+    setFormState((prev) => ({ ...prev, productId }));
+    setEmployeePropertySearch('');
+    setDebouncedEmployeePropertySearch('');
+    setShowEmployeePropertyResults(false);
+    setFormError(null);
+  };
+
+  const clearEmployeePropertySelection = () => {
+    setFormState((prev) => ({ ...prev, productId: '' }));
+    setEmployeePropertySearch('');
+    setDebouncedEmployeePropertySearch('');
+    setShowEmployeePropertyResults(true);
+    setFormError(null);
+  };
+
+  const selectAdminDraftProperty = (productId: string) => {
+    setAdminDraftProductId(productId);
+    setAdminDraftCondition('');
+    setAdminDraftRemarks('');
+    setShowPropertyResults(false);
+    setFormError(null);
+  };
+
+  const clearAdminDraftProperty = () => {
+    setAdminDraftProductId('');
+    setAdminDraftCondition('');
+    setAdminDraftRemarks('');
+    setShowPropertyResults(true);
+  };
+
+  const addSelectedAdminProperty = () => {
+    if (!adminDraftProductId) {
+      setFormError('Select a property from search results first.');
+      return;
+    }
+    if (!adminDraftCondition) {
+      setFormError('Select condition for the selected property.');
+      return;
+    }
     setFormState((prev) => {
-      if (prev.selectedProductIds.includes(productId)) return prev;
-      return { ...prev, selectedProductIds: [productId, ...prev.selectedProductIds] };
+      if (prev.adminReturnItems.some((item) => item.productId === adminDraftProductId)) return prev;
+      return {
+        ...prev,
+        adminReturnItems: [
+          {
+            productId: adminDraftProductId,
+            condition: adminDraftCondition,
+            remarks: adminDraftRemarks.trim()
+          },
+          ...prev.adminReturnItems
+        ]
+      };
     });
+    clearAdminDraftProperty();
+    setPropertySearch('');
+    setDebouncedPropertySearch('');
+    setShowPropertyResults(false);
+    setFormError(null);
   };
 
   const removeSelectedAdminProperty = (productId: string) => {
     setFormState((prev) => ({
       ...prev,
-      selectedProductIds: prev.selectedProductIds.filter((id) => id !== productId)
+      adminReturnItems: prev.adminReturnItems.filter((item) => item.productId !== productId)
     }));
   };
 
@@ -367,7 +481,7 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
     setFormError(null);
     setSubmitSyncMessage(null);
 
-    if (!formState.returnDate || !formState.condition) {
+    if (!formState.returnDate || (isEmployee && !formState.condition)) {
       setFormError('Return date and condition are required.');
       return;
     }
@@ -382,8 +496,23 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
       return;
     }
 
-    if (isAdmin && formState.selectedProductIds.length === 0) {
-      setFormError('Select at least one inventory number.');
+    if (isAdmin && adminDraftProductId) {
+      setFormError('Finish the selected property card by clicking "Add Product" before submitting.');
+      return;
+    }
+
+    const submissionItems: AdminReturnItem[] = isAdmin
+      ? formState.adminReturnItems
+      : [
+          {
+            productId: formState.productId,
+            condition: formState.condition as ReturnCondition,
+            remarks: formState.remarks
+          }
+        ];
+
+    if (isAdmin && submissionItems.length === 0) {
+      setFormError('Add at least one property to the return list.');
       return;
     }
 
@@ -437,15 +566,18 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
     const primaryReceiver = receiverEntries[0];
     const rrspNumber = isAdmin ? formState.rrspNumber.trim() : '';
 
-    const targetProductIds = isAdmin ? formState.selectedProductIds : [formState.productId];
-    const targetProducts = targetProductIds
-      .map((productId) => productMap.get(productId))
-      .filter((product): product is Product => Boolean(product));
-
-    if (!targetProducts.length) {
+    const submissionEntries = submissionItems.map((item) => ({
+      item,
+      product: productMap.get(item.productId)
+    }));
+    const missingProducts = submissionEntries.some((entry) => !entry.product);
+    if (missingProducts) {
       setFormError('Selected properties were not found locally.');
       return;
     }
+
+    const resolvedEntries = submissionEntries as Array<{ item: AdminReturnItem; product: Product }>;
+    const targetProducts = resolvedEntries.map((entry) => entry.product);
 
     if (isEmployee) {
       const invalidSelection = targetProducts.some((product) => product.assignedToEmployeeId !== user.id);
@@ -460,7 +592,10 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
       }
     }
 
-    for (const product of targetProducts) {
+    for (const entry of resolvedEntries) {
+      const product = entry.product;
+      const itemCondition = entry.item.condition;
+      const itemRemarks = entry.item.remarks.trim();
       const returnId = createId();
       const returnQuantity = 1;
       const quantityBefore = product.onHandPerCount;
@@ -472,8 +607,8 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
         productId: product.id,
         returnDate: formState.returnDate,
         quantity: returnQuantity,
-        condition: formState.condition as ReturnCondition,
-        remarks: formState.remarks.trim(),
+        condition: itemCondition,
+        remarks: itemRemarks,
         returnedByEmployeeId: user.id,
         returnedByPosition: user.role,
         receivedDate: primaryReceiver.receivedDate,
@@ -901,106 +1036,240 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
 
                   {isEmployee && (
                     <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-2">Assigned Inventory Item *</label>
-                      <select
-                        value={formState.productId}
-                        onChange={(e) => setFormState({ ...formState, productId: e.target.value })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
-                        required
-                      >
-                        <option value="">Select assigned inventory item</option>
-                        {availableProducts.map((product) => (
-                          <option key={product.id} value={product.id}>
-                            {product.propertyNumber} - {product.article}
-                          </option>
-                        ))}
-                      </select>
+                      {!selectedEmployeeProduct ? (
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-2">Search Assigned Inventory Item *</label>
+                          <div>
+                            <input
+                              type="text"
+                              value={employeePropertySearch}
+                              onChange={(e) => {
+                                setEmployeePropertySearch(e.target.value);
+                                setShowEmployeePropertyResults(true);
+                              }}
+                              onFocus={() => setShowEmployeePropertyResults(true)}
+                              onBlur={() => {
+                                window.setTimeout(() => setShowEmployeePropertyResults(false), 120);
+                              }}
+                              placeholder="Search your assigned property number, article, or description..."
+                              className={`w-full px-3 py-2 border border-gray-300 focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none ${
+                                showEmployeePropertyResults ? 'rounded-t-2xl rounded-b-none border-b-0' : 'rounded-2xl'
+                              }`}
+                              required
+                            />
+                            {showEmployeePropertyResults && (
+                              <div className="border border-indigo-200 border-t-0 rounded-b-2xl max-h-60 overflow-y-auto divide-y divide-indigo-100 bg-indigo-50 shadow-sm">
+                                {searchableEmployeeProducts.length === 0 ? (
+                                  <p className="px-3 py-3 text-sm text-indigo-700">No assigned inventory items found.</p>
+                                ) : (
+                                  searchableEmployeeProducts.map((product) => (
+                                    <button
+                                      key={`employee-result-${product.id}`}
+                                      type="button"
+                                      onMouseDown={(event) => event.preventDefault()}
+                                      onClick={() => selectEmployeeProperty(product.id)}
+                                      className="w-full px-3 py-2 text-left hover:bg-indigo-100 transition"
+                                    >
+                                      <p className="text-sm font-medium text-gray-900">{product.propertyNumber}</p>
+                                      <p className="text-xs text-gray-600">
+                                        {product.article} | {product.description}
+                                      </p>
+                                    </button>
+                                  ))
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-4">
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <p className="text-xs text-indigo-700 font-semibold uppercase tracking-wide mb-1">Selected Assigned Property</p>
+                              <p className="text-sm font-semibold text-gray-900">{selectedEmployeeProduct.propertyNumber}</p>
+                              <p className="text-xs text-gray-600">
+                                {selectedEmployeeProduct.article} | {selectedEmployeeProduct.description}
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={clearEmployeePropertySelection}
+                              className="text-xs text-indigo-700 hover:text-indigo-800"
+                            >
+                              Change
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
 
                   {isAdmin && (
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-2">Search Inventory Number *</label>
-                      <input
-                        type="text"
-                        value={propertySearch}
-                        onChange={(e) => setPropertySearch(e.target.value)}
-                        placeholder="Type inventory number, article, or description..."
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
-                      />
-
-                      <div className="mt-3 border border-gray-200 rounded-lg max-h-72 overflow-y-auto divide-y divide-gray-100">
-                        {selectedAdminProducts.length > 0 && (
-                          <div>
-                            <p className="px-3 py-2 text-xs font-semibold text-gray-500 bg-gray-50 uppercase tracking-wide">Selected</p>
-                            {selectedAdminProducts.map((product) => (
-                              <div key={`selected-${product.id}`} className="px-3 py-2 flex items-center justify-between gap-3">
-                                <div>
-                                  <p className="text-sm font-medium text-gray-900">{product.propertyNumber}</p>
-                                  <p className="text-xs text-gray-600">{product.article}</p>
-                                </div>
-                                <button
-                                  type="button"
-                                  onClick={() => removeSelectedAdminProperty(product.id)}
-                                  className="text-red-600 hover:text-red-700 text-xs"
-                                >
-                                  Remove
-                                </button>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-
+                    <div className="space-y-4">
+                      {!adminDraftProduct && (
                         <div>
-                          <p className="px-3 py-2 text-xs font-semibold text-gray-500 bg-gray-50 uppercase tracking-wide">Search Results</p>
-                          {searchableAdminProducts.length === 0 ? (
-                            <p className="px-3 py-3 text-sm text-gray-500">No inventory items found.</p>
-                          ) : (
-                            searchableAdminProducts.map((product) => (
-                              <button
-                                key={`result-${product.id}`}
-                                type="button"
-                                onClick={() => addSelectedAdminProperty(product.id)}
-                                className="w-full px-3 py-2 text-left hover:bg-indigo-50 transition"
-                              >
-                                <p className="text-sm font-medium text-gray-900">{product.propertyNumber}</p>
-                                <p className="text-xs text-gray-600">
-                                  {product.article} | {product.description}
-                                </p>
-                              </button>
-                            ))
-                          )}
+                          <label className="block text-sm font-medium text-gray-700 mb-2">Step 1: Search Inventory Number *</label>
+                          <div>
+                            <input
+                              type="text"
+                              value={propertySearch}
+                              onChange={(e) => {
+                                setPropertySearch(e.target.value);
+                                setShowPropertyResults(true);
+                              }}
+                              onFocus={() => setShowPropertyResults(true)}
+                              onBlur={() => {
+                                window.setTimeout(() => setShowPropertyResults(false), 120);
+                              }}
+                              placeholder="Type inventory number, article, or description..."
+                              className={`w-full px-3 py-2 border border-gray-300 focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none ${
+                                showPropertyResults ? 'rounded-t-2xl rounded-b-none border-b-0' : 'rounded-2xl'
+                              }`}
+                            />
+                            {showPropertyResults && (
+                              <div className="border border-indigo-200 border-t-0 rounded-b-2xl max-h-60 overflow-y-auto divide-y divide-indigo-100 bg-indigo-50 shadow-sm">
+                                {searchableAdminProducts.length === 0 ? (
+                                  <p className="px-3 py-3 text-sm text-indigo-700">No inventory items found.</p>
+                                ) : (
+                                  searchableAdminProducts.map((product) => (
+                                    <button
+                                      key={`result-${product.id}`}
+                                      type="button"
+                                      onMouseDown={(event) => event.preventDefault()}
+                                      onClick={() => selectAdminDraftProperty(product.id)}
+                                      className="w-full px-3 py-2 text-left hover:bg-indigo-100 transition"
+                                    >
+                                      <p className="text-sm font-medium text-gray-900">{product.propertyNumber}</p>
+                                      <p className="text-xs text-gray-600">
+                                        {product.article} | {product.description}
+                                      </p>
+                                    </button>
+                                  ))
+                                )}
+                              </div>
+                            )}
+                          </div>
                         </div>
+                      )}
+
+                      {adminDraftProduct && (
+                        <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-4 space-y-4">
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <p className="text-xs text-indigo-700 font-semibold uppercase tracking-wide mb-1">Step 2: Selected Property</p>
+                              <p className="text-sm font-semibold text-gray-900">{adminDraftProduct.propertyNumber}</p>
+                              <p className="text-xs text-gray-600">
+                                {adminDraftProduct.article} | {adminDraftProduct.description}
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={clearAdminDraftProperty}
+                              className="text-xs text-indigo-700 hover:text-indigo-800"
+                            >
+                              Change
+                            </button>
+                          </div>
+
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-2">Step 3: Condition *</label>
+                            <select
+                              value={adminDraftCondition}
+                              onChange={(e) => setAdminDraftCondition(e.target.value as ReturnCondition)}
+                              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
+                            >
+                              <option value="">Select condition</option>
+                              {conditionOptions.map((option) => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-2">Step 4: Remarks</label>
+                            <textarea
+                              rows={3}
+                              value={adminDraftRemarks}
+                              onChange={(e) => setAdminDraftRemarks(e.target.value)}
+                              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
+                            />
+                          </div>
+
+                          <div className="flex justify-end">
+                            <button
+                              type="button"
+                              onClick={addSelectedAdminProperty}
+                              className="px-3 py-1.5 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition"
+                            >
+                              Add Product
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="border border-gray-200 rounded-lg divide-y divide-gray-100">
+                        <p className="px-3 py-2 text-xs font-semibold text-gray-500 bg-gray-50 uppercase tracking-wide">
+                          Step 5: Added Products
+                        </p>
+                        {selectedAdminProducts.length === 0 ? (
+                          <p className="px-3 py-3 text-sm text-gray-500">No added properties yet.</p>
+                        ) : (
+                          selectedAdminProducts.map(({ item, product }) => (
+                            <div key={`selected-${product.id}`} className="px-3 py-3 flex items-start justify-between gap-3">
+                              <div className="space-y-1">
+                                <p className="text-sm font-medium text-gray-900">{product.propertyNumber}</p>
+                                <p className="text-xs text-gray-600">{product.article}</p>
+                                <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${getConditionColor(item.condition)}`}>
+                                  {getConditionLabel(item.condition)}
+                                </span>
+                                {item.remarks && <p className="text-xs text-gray-600">Remarks: {item.remarks}</p>}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => removeSelectedAdminProperty(product.id)}
+                                className="text-red-600 hover:text-red-700 text-xs"
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          ))
+                        )}
                       </div>
                     </div>
                   )}
 
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">Condition *</label>
-                    <select
-                      value={formState.condition}
-                      onChange={(e) => setFormState({ ...formState, condition: e.target.value as ReturnCondition })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
-                      required
-                    >
-                      <option value="">Select condition</option>
-                      {conditionOptions.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
+                  {isEmployee && (
+                    <>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Condition *</label>
+                        <select
+                          value={formState.condition}
+                          onChange={(e) => setFormState({ ...formState, condition: e.target.value as ReturnCondition })}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
+                          required
+                        >
+                          <option value="">Select condition</option>
+                          {conditionOptions.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
 
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">Remarks</label>
-                    <textarea
-                      rows={3}
-                      value={formState.remarks}
-                      onChange={(e) => setFormState({ ...formState, remarks: e.target.value })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
-                    />
-                  </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Remarks</label>
+                        <textarea
+                          rows={3}
+                          value={formState.remarks}
+                          onChange={(e) => setFormState({ ...formState, remarks: e.target.value })}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
+                        />
+                      </div>
+                    </>
+                  )}
                 </div>
               </div>
 
