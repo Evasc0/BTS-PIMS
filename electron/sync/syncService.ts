@@ -52,6 +52,7 @@ const RELAY_RECIPIENT_ALL = '__all__';
 const getAdminQueueTable = (): string =>
   process.env.SUPABASE_ADMIN_QUEUE_TABLE || process.env.SUPABASE_SYNC_QUEUE_TABLE || 'admin_sync_queue';
 const getEmployeeQueueTable = (): string => process.env.SUPABASE_EMPLOYEE_QUEUE_TABLE || 'employee_sync_queue';
+const getProfileQueueTable = (): string => process.env.SUPABASE_PROFILE_SYNC_QUEUE_TABLE || 'profile_sync_queue';
 const getAppUsersTable = (): string => process.env.SUPABASE_APP_USERS_TABLE || 'app_users';
 const getSupabaseUrl = (): string => (process.env.SUPABASE_URL || '').replace(/\/+$/u, '');
 const getSupabaseAnonKey = (): string => process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_PUBLISHABLE_KEY || '';
@@ -157,6 +158,16 @@ interface RemoteQueueRow {
   data?: any;
   timestamp?: string;
   recipient_key?: string | null;
+}
+interface ProfileImageQueueRow {
+  id: string;
+  employee_id: string;
+  origin_device_id?: string | null;
+  origin_user_id?: string | null;
+  image_data?: string | null;
+  image_format?: string | null;
+  updated_at?: string | null;
+  created_at?: string | null;
 }
 
 interface AppUserPresenceRow {
@@ -324,12 +335,12 @@ const canRequestFullSync = (actor: SyncActor): boolean => actor.role === 'system
 const canPushEntityType = (actor: SyncActor, entityType: string): boolean => {
   if (canAdminSync(actor)) return entityType === 'employees' || entityType === 'products' || entityType === 'returns';
   if (actor.role !== 'employee') return false;
-  return entityType === 'returns' || entityType === 'products';
+  return entityType === 'returns' || entityType === 'products' || entityType === 'employees';
 };
 
 const getPushableEntityTypes = (actor: SyncActor): Set<string> => {
   if (canAdminSync(actor)) return new Set(['employees', 'products', 'returns']);
-  if (actor.role === 'employee') return new Set(['products', 'returns']);
+  if (actor.role === 'employee') return new Set(['employees', 'products', 'returns']);
   return new Set<string>();
 };
 
@@ -351,6 +362,15 @@ const readVersion = (value: unknown, fallback = 1): number => {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return Math.floor(parsed);
+};
+const splitFullName = (fullName: string): { firstName: string; lastName: string } => {
+  const normalized = String(fullName || '').trim();
+  if (!normalized) return { firstName: '', lastName: '' };
+  const [firstName, ...rest] = normalized.split(/\s+/u);
+  return {
+    firstName: firstName || '',
+    lastName: rest.join(' ')
+  };
 };
 
 const parseTimestamp = (value: string | null | undefined): number | null => {
@@ -838,6 +858,18 @@ const logSyncEvent = (
   ).run(MAX_STORED_EVENTS);
 };
 
+const canActorPushOutboxRow = (
+  actor: SyncActor,
+  row: {
+    entity_type: string;
+    entity_id: string;
+  }
+): boolean => {
+  if (actor.role !== 'employee') return true;
+  if (row.entity_type !== 'employees') return true;
+  return String(row.entity_id || '').trim() === String(actor.userId || '').trim();
+};
+
 const getPendingLocalChangeCount = (db: Database.Database, actor: SyncActor): number => {
   const pushableEntityTypes = getPushableEntityTypes(actor);
   if (!pushableEntityTypes.size) return 0;
@@ -852,7 +884,11 @@ const getPendingLocalChangeCount = (db: Database.Database, actor: SyncActor): nu
     )
     .all() as Array<{ entity_type: string; entity_id: string }>;
 
-  return pendingRows.reduce((count, row) => (pushableEntityTypes.has(row.entity_type) ? count + 1 : count), 0);
+  return pendingRows.reduce((count, row) => {
+    if (!pushableEntityTypes.has(row.entity_type)) return count;
+    if (!canActorPushOutboxRow(actor, row)) return count;
+    return count + 1;
+  }, 0);
 };
 
 const getRecentEvents = (db: Database.Database): SyncEventRow[] => {
@@ -878,6 +914,7 @@ const getPendingOutboxRows = (db: Database.Database, actor: SyncActor): OutboxRo
 
   for (const row of rows) {
     if (!pushableEntityTypes.has(row.entity_type)) continue;
+    if (!canActorPushOutboxRow(actor, row)) continue;
     latestByEntity.set(`${row.entity_type}:${row.entity_id}`, row);
   }
 
@@ -909,6 +946,9 @@ const getLocalChangeCategory = (
   }
 
   if (entityType === 'returns' && actor.role === 'employee') {
+    return 'employee_submissions';
+  }
+  if (entityType === 'employees' && actor.role === 'employee') {
     return 'employee_submissions';
   }
 
@@ -1585,6 +1625,140 @@ const deleteRemoteQueueRowsWithRetry = async (
   );
 };
 
+const pushProfileImageQueueRows = async (rows: Array<Record<string, unknown>>): Promise<void> => {
+  if (!rows.length) return;
+  await supabaseRequest(getProfileQueueTable(), {
+    method: 'POST',
+    headers: {
+      Prefer: 'return=minimal'
+    },
+    body: JSON.stringify(rows)
+  });
+};
+
+const fetchProfileImageQueueRows = async (
+  actor: SyncActor,
+  excludeOriginDeviceId: string | null
+): Promise<ProfileImageQueueRow[]> => {
+  const rows: ProfileImageQueueRow[] = [];
+  const pageSize = getPullPageSize();
+  let offset = 0;
+
+  while (true) {
+    const params = new URLSearchParams();
+    params.set('select', 'id,employee_id,origin_device_id,origin_user_id,image_data,image_format,updated_at,created_at');
+    params.set('order', 'updated_at.asc,id.asc');
+    params.set('limit', String(pageSize));
+    params.set('offset', String(offset));
+    if (!canAdminSync(actor)) {
+      params.set('employee_id', `eq.${actor.userId}`);
+    }
+    if (excludeOriginDeviceId) {
+      params.set('or', `(origin_device_id.is.null,origin_device_id.neq.${excludeOriginDeviceId})`);
+    }
+    const response = await supabaseRequest(`${getProfileQueueTable()}?${params.toString()}`, { method: 'GET' });
+    const page = (await response.json()) as ProfileImageQueueRow[];
+    if (!Array.isArray(page) || page.length === 0) {
+      break;
+    }
+    rows.push(...page);
+    if (page.length < pageSize) {
+      break;
+    }
+    offset += pageSize;
+  }
+
+  return rows;
+};
+
+const getProfileImageUpdatedAtCandidate = (value: unknown): string | null => {
+  const candidate = String(value ?? '').trim();
+  if (!candidate) return null;
+  return candidate;
+};
+
+const getProfileImageFormat = (imageDataUrl: string | null, fallback: string | null = null): string | null => {
+  const value = String(imageDataUrl || '').trim();
+  if (!value.startsWith('data:')) return fallback;
+  const marker = value.slice(5, value.indexOf(';') > 0 ? value.indexOf(';') : undefined);
+  return marker || fallback;
+};
+
+const pullProfileImageRelayChanges = async (
+  db: Database.Database,
+  actor: SyncActor,
+  currentDeviceId: string
+): Promise<{ pulled: number; skipped: number }> => {
+  const rows = await fetchProfileImageQueueRows(actor, currentDeviceId);
+  if (!rows.length) return { pulled: 0, skipped: 0 };
+
+  const rowIdsToDelete: string[] = [];
+  let pulled = 0;
+  let skipped = 0;
+
+  const tx = db.transaction(() => {
+    for (const row of rows) {
+      const employeeId = String(row.employee_id || '').trim();
+      if (!employeeId) continue;
+      const local = db
+        .prepare('SELECT profile_image_updated_at FROM employees WHERE id = ? LIMIT 1')
+        .get(employeeId) as { profile_image_updated_at?: string | null } | undefined;
+      if (!local) {
+        skipped += 1;
+        continue;
+      }
+
+      const remoteUpdatedAt =
+        getProfileImageUpdatedAtCandidate(row.updated_at) ||
+        getProfileImageUpdatedAtCandidate(row.created_at) ||
+        nowIso();
+      const localUpdatedAt = getProfileImageUpdatedAtCandidate(local.profile_image_updated_at);
+      const remoteUpdatedMs = parseTimestamp(remoteUpdatedAt);
+      const localUpdatedMs = parseTimestamp(localUpdatedAt);
+
+      if (localUpdatedMs != null && remoteUpdatedMs != null && remoteUpdatedMs <= localUpdatedMs) {
+        rowIdsToDelete.push(row.id);
+        skipped += 1;
+        continue;
+      }
+
+      const imageDataUrl = row.image_data == null ? null : String(row.image_data);
+      const imageFormat = row.image_format ? String(row.image_format) : getProfileImageFormat(imageDataUrl, null);
+
+      db.prepare(
+        `
+          UPDATE employees
+          SET
+            profile_image_data = @profile_image_data,
+            profile_image_format = @profile_image_format,
+            profile_image_updated_at = @profile_image_updated_at,
+            last_modified = CASE
+              WHEN last_modified IS NULL OR last_modified = '' OR last_modified < @last_modified
+                THEN @last_modified
+              ELSE last_modified
+            END
+          WHERE id = @id
+        `
+      ).run({
+        id: employeeId,
+        profile_image_data: imageDataUrl,
+        profile_image_format: imageFormat,
+        profile_image_updated_at: remoteUpdatedAt,
+        last_modified: remoteUpdatedAt
+      });
+
+      rowIdsToDelete.push(row.id);
+      pulled += 1;
+    }
+  });
+  tx();
+
+  if (rowIdsToDelete.length) {
+    await deleteRemoteQueueRowsWithRetry(getProfileQueueTable(), rowIdsToDelete, currentDeviceId);
+  }
+  return { pulled, skipped };
+};
+
 const deleteQueueRowsOlderThan = async (tableName: string, cutoffIso: string): Promise<void> => {
   const params = new URLSearchParams();
   params.set('created_at', `lt.${cutoffIso}`);
@@ -1815,7 +1989,17 @@ const getLocalInventoryRecordCount = (db: Database.Database): number => {
 };
 
 const readInventorySnapshot = (db: Database.Database) => {
-  const employees = db.prepare('SELECT * FROM employees WHERE deleted_at IS NULL ORDER BY created_at ASC').all();
+  const employees = db
+    .prepare('SELECT * FROM employees WHERE deleted_at IS NULL ORDER BY created_at ASC')
+    .all()
+    .map((row: any) => ({
+      ...row,
+      password_hash: 'remote_managed',
+      password_salt: 'remote_managed',
+      pending_password_enc: null,
+      hashed_session_token: null,
+      supabase_refresh_token_enc: null
+    }));
   const products = db.prepare('SELECT * FROM products WHERE deleted_at IS NULL ORDER BY rowid ASC').all();
   const returns = db.prepare('SELECT * FROM returns WHERE deleted_at IS NULL ORDER BY created_at ASC').all();
   const returnReceivers = db
@@ -2082,28 +2266,35 @@ const rebuildLocalInventoryFromDataset = (db: Database.Database, dataset: any): 
     const insertEmployee = db.prepare(
       `
         INSERT INTO employees (
-          id, full_name, email, phone, department, role, status, password_hash, password_salt,
+          id, first_name, last_name, full_name, email, phone, position, department, address, role, status, password_hash, password_salt,
           supabase_user_id, auth_sync_status, auth_last_error, pending_password_enc, provisioned_at,
           last_verified_at, verification_expires_at, hashed_session_token,
-          created_at, location, two_factor_enabled, email_notifications, low_stock_alerts, language,
+          created_at, location, profile_image_data, profile_image_format, profile_image_updated_at,
+          two_factor_enabled, email_notifications, low_stock_alerts, language,
           sync_status, is_dirty, last_modified, last_synced_at, deleted_at, version
         ) VALUES (
-          @id, @full_name, @email, @phone, @department, @role, @status, @password_hash, @password_salt,
+          @id, @first_name, @last_name, @full_name, @email, @phone, @position, @department, @address, @role, @status, @password_hash, @password_salt,
           @supabase_user_id, @auth_sync_status, @auth_last_error, @pending_password_enc, @provisioned_at,
           @last_verified_at, @verification_expires_at, @hashed_session_token,
-          @created_at, @location, @two_factor_enabled, @email_notifications, @low_stock_alerts, @language,
+          @created_at, @location, @profile_image_data, @profile_image_format, @profile_image_updated_at,
+          @two_factor_enabled, @email_notifications, @low_stock_alerts, @language,
           'synced', 0, @last_modified, @last_synced_at, NULL, @version
         )
       `
     );
 
     for (const row of employees) {
+      const fallbackSplit = splitFullName(row.full_name ?? row.fullName ?? '');
       insertEmployee.run({
         id: row.id,
+        first_name: row.first_name ?? row.firstName ?? fallbackSplit.firstName,
+        last_name: row.last_name ?? row.lastName ?? fallbackSplit.lastName,
         full_name: row.full_name ?? row.fullName ?? '',
         email: row.email ?? '',
         phone: row.phone ?? '',
+        position: row.position ?? '',
         department: row.department ?? '',
+        address: row.address ?? row.location ?? '',
         role: row.role ?? 'employee',
         status: row.status ?? 'active',
         password_hash: row.password_hash ?? row.passwordHash ?? '',
@@ -2118,6 +2309,9 @@ const rebuildLocalInventoryFromDataset = (db: Database.Database, dataset: any): 
         hashed_session_token: row.hashed_session_token ?? row.hashedSessionToken ?? null,
         created_at: row.created_at ?? row.createdAt ?? now,
         location: row.location ?? '',
+        profile_image_data: row.profile_image_data ?? row.profileImageDataUrl ?? null,
+        profile_image_format: row.profile_image_format ?? row.profileImageFormat ?? null,
+        profile_image_updated_at: row.profile_image_updated_at ?? row.profileImageUpdatedAt ?? null,
         two_factor_enabled: toBoolInt(row.two_factor_enabled ?? row.twoFactorEnabled),
         email_notifications: toBoolInt(row.email_notifications ?? row.emailNotifications),
         low_stock_alerts: toBoolInt(row.low_stock_alerts ?? row.lowStockAlerts),
@@ -2283,26 +2477,78 @@ const toBoolInt = (value: unknown): number => (value ? 1 : 0);
 
 const applyRemoteEmployee = (db: Database.Database, payload: any, version: number): void => {
   const now = nowIso();
+  const existing = db
+    .prepare(
+      `SELECT
+        first_name, last_name, position, address, location, password_hash, password_salt,
+        profile_image_data, profile_image_format, profile_image_updated_at
+       FROM employees
+       WHERE id = ?
+       LIMIT 1`
+    )
+    .get(payload.id) as
+    | {
+        first_name?: string | null;
+        last_name?: string | null;
+        position?: string | null;
+        address?: string | null;
+        location?: string | null;
+        password_hash?: string | null;
+        password_salt?: string | null;
+        profile_image_data?: string | null;
+        profile_image_format?: string | null;
+        profile_image_updated_at?: string | null;
+      }
+    | undefined;
+  const fullName = String(payload.fullName ?? payload.full_name ?? '').trim();
+  const splitName = splitFullName(fullName);
+  const firstName = String(payload.firstName ?? payload.first_name ?? '').trim() || splitName.firstName || existing?.first_name || '';
+  const lastName = String(payload.lastName ?? payload.last_name ?? '').trim() || splitName.lastName || existing?.last_name || '';
+  const passwordHash =
+    String(payload.passwordHash ?? payload.password_hash ?? '').trim() || existing?.password_hash || 'remote_managed';
+  const passwordSalt =
+    String(payload.passwordSalt ?? payload.password_salt ?? '').trim() || existing?.password_salt || 'remote_managed';
+  const profileImageDataUrl =
+    Object.prototype.hasOwnProperty.call(payload, 'profileImageDataUrl') ||
+    Object.prototype.hasOwnProperty.call(payload, 'profile_image_data')
+      ? payload.profileImageDataUrl ?? payload.profile_image_data ?? null
+      : existing?.profile_image_data ?? null;
+  const profileImageFormat =
+    Object.prototype.hasOwnProperty.call(payload, 'profileImageFormat') ||
+    Object.prototype.hasOwnProperty.call(payload, 'profile_image_format')
+      ? payload.profileImageFormat ?? payload.profile_image_format ?? null
+      : existing?.profile_image_format ?? null;
+  const profileImageUpdatedAt =
+    Object.prototype.hasOwnProperty.call(payload, 'profileImageUpdatedAt') ||
+    Object.prototype.hasOwnProperty.call(payload, 'profile_image_updated_at')
+      ? payload.profileImageUpdatedAt ?? payload.profile_image_updated_at ?? null
+      : existing?.profile_image_updated_at ?? null;
   db.prepare(
     `
       INSERT INTO employees (
-        id, full_name, email, phone, department, role, status, password_hash, password_salt,
+        id, first_name, last_name, full_name, email, phone, position, department, address, role, status, password_hash, password_salt,
         supabase_user_id, auth_sync_status, auth_last_error, pending_password_enc, provisioned_at,
         last_verified_at, verification_expires_at, hashed_session_token,
-        created_at, location, two_factor_enabled, email_notifications, low_stock_alerts, language,
+        created_at, location, profile_image_data, profile_image_format, profile_image_updated_at,
+        two_factor_enabled, email_notifications, low_stock_alerts, language,
         sync_status, is_dirty, last_modified, last_synced_at, deleted_at, version
       ) VALUES (
-        @id, @full_name, @email, @phone, @department, @role, @status, @password_hash, @password_salt,
+        @id, @first_name, @last_name, @full_name, @email, @phone, @position, @department, @address, @role, @status, @password_hash, @password_salt,
         @supabase_user_id, @auth_sync_status, @auth_last_error, @pending_password_enc, @provisioned_at,
         @last_verified_at, @verification_expires_at, @hashed_session_token,
-        @created_at, @location, @two_factor_enabled, @email_notifications, @low_stock_alerts, @language,
+        @created_at, @location, @profile_image_data, @profile_image_format, @profile_image_updated_at,
+        @two_factor_enabled, @email_notifications, @low_stock_alerts, @language,
         @sync_status, @is_dirty, @last_modified, @last_synced_at, @deleted_at, @version
       )
       ON CONFLICT(id) DO UPDATE SET
+        first_name = excluded.first_name,
+        last_name = excluded.last_name,
         full_name = excluded.full_name,
         email = excluded.email,
         phone = excluded.phone,
+        position = excluded.position,
         department = excluded.department,
+        address = excluded.address,
         role = excluded.role,
         status = excluded.status,
         password_hash = excluded.password_hash,
@@ -2317,6 +2563,9 @@ const applyRemoteEmployee = (db: Database.Database, payload: any, version: numbe
         hashed_session_token = excluded.hashed_session_token,
         created_at = excluded.created_at,
         location = excluded.location,
+        profile_image_data = excluded.profile_image_data,
+        profile_image_format = excluded.profile_image_format,
+        profile_image_updated_at = excluded.profile_image_updated_at,
         two_factor_enabled = excluded.two_factor_enabled,
         email_notifications = excluded.email_notifications,
         low_stock_alerts = excluded.low_stock_alerts,
@@ -2330,14 +2579,18 @@ const applyRemoteEmployee = (db: Database.Database, payload: any, version: numbe
     `
   ).run({
     id: payload.id,
-    full_name: payload.fullName,
-    email: payload.email,
-    phone: payload.phone,
-    department: payload.department,
-    role: payload.role,
-    status: payload.status,
-    password_hash: payload.passwordHash,
-    password_salt: payload.passwordSalt,
+    first_name: firstName,
+    last_name: lastName,
+    full_name: fullName || [firstName, lastName].filter(Boolean).join(' ') || payload.id,
+    email: payload.email ?? '',
+    phone: payload.phone ?? '',
+    position: payload.position ?? existing?.position ?? '',
+    department: payload.department ?? '',
+    address: payload.address ?? existing?.address ?? payload.location ?? existing?.location ?? '',
+    role: payload.role ?? 'employee',
+    status: payload.status ?? 'active',
+    password_hash: passwordHash,
+    password_salt: passwordSalt,
     supabase_user_id: payload.supabaseUserId ?? null,
     auth_sync_status: payload.authSyncStatus ?? null,
     auth_last_error: null,
@@ -2348,6 +2601,9 @@ const applyRemoteEmployee = (db: Database.Database, payload: any, version: numbe
     hashed_session_token: null,
     created_at: payload.createdAt ?? now,
     location: payload.location ?? '',
+    profile_image_data: profileImageDataUrl,
+    profile_image_format: profileImageFormat,
+    profile_image_updated_at: profileImageUpdatedAt,
     two_factor_enabled: toBoolInt(payload.twoFactorEnabled),
     email_notifications: toBoolInt(payload.emailNotifications),
     low_stock_alerts: toBoolInt(payload.lowStockAlerts),
@@ -2873,6 +3129,10 @@ const sanitizeQueueData = (input: any) => {
   if (!input || typeof input !== 'object') return input;
   const output = { ...input };
   delete output._meta;
+  delete output.passwordHash;
+  delete output.passwordSalt;
+  delete output.password_hash;
+  delete output.password_salt;
   delete output.pendingPasswordPlain;
   delete output.pendingPasswordEncrypted;
   delete output.hashedSessionToken;
@@ -2884,6 +3144,8 @@ const sanitizeQueueData = (input: any) => {
   delete output.last_verified_at;
   delete output.verification_expires_at;
   delete output.auth_last_error;
+  delete output.profileImageDataUrl;
+  delete output.profile_image_data;
   return output;
 };
 
@@ -2940,6 +3202,24 @@ const buildEmployeeQueueRecords = (
     return [
       {
         employee_id: String(returnedByEmployeeId),
+        payload: {
+          table_name: entry.entityType,
+          operation: entry.queueRecord.operation,
+          record_id: entry.entityId,
+          data
+        }
+      }
+    ];
+  }
+
+  if (entry.entityType === 'employees') {
+    const employeeId = String(payload.id || entry.entityId || '').trim();
+    if (!employeeId) return [];
+
+    const data = sanitizeQueueData(payload);
+    return [
+      {
+        employee_id: employeeId,
         payload: {
           table_name: entry.entityType,
           operation: entry.queueRecord.operation,
@@ -3239,7 +3519,10 @@ export async function pushLocalChanges(actor: SyncActor, stage?: PushStageOption
     }>;
 
     const pushablePrepared = preparedAll.filter((entry) => canPushEntityType(actor, entry.entityType));
-    const prepared = filterPreparedEntriesByStage(pushablePrepared, stage, categoryByOutboxId);
+    const actorScopedPrepared = pushablePrepared.filter(
+      (entry) => actor.role !== 'employee' || entry.entityType !== 'employees' || entry.entityId === actor.userId
+    );
+    const prepared = filterPreparedEntriesByStage(actorScopedPrepared, stage, categoryByOutboxId);
 
     if (!prepared.length) {
       return { status: 'idle', pushedCount: 0 };
@@ -3321,6 +3604,38 @@ export async function pushLocalChanges(actor: SyncActor, stage?: PushStageOption
         }))
       : [];
 
+    const profileImageRelayRows = prepared
+      .filter((entry) => entry.entityType === 'employees' && entry.queueRecord.operation !== 'delete')
+      .map((entry) => {
+        const data = entry.queueRecord.data || {};
+        const hasImageData =
+          Object.prototype.hasOwnProperty.call(data, 'profileImageDataUrl') ||
+          Object.prototype.hasOwnProperty.call(data, 'profile_image_data');
+        const hasImageUpdatedAt =
+          Object.prototype.hasOwnProperty.call(data, 'profileImageUpdatedAt') ||
+          Object.prototype.hasOwnProperty.call(data, 'profile_image_updated_at');
+        if (!hasImageData && !hasImageUpdatedAt) return null;
+        const imageData = hasImageData ? data.profileImageDataUrl ?? data.profile_image_data ?? null : null;
+        const updatedAtRaw = data.profileImageUpdatedAt ?? data.profile_image_updated_at ?? null;
+        const updatedAt = String(updatedAtRaw ?? data.updatedAt ?? data.lastModified ?? nowIso());
+        const imageUpdatedMs = parseTimestamp(updatedAtRaw);
+        const rowLastModifiedMs = parseTimestamp(data.lastModified ?? data.updatedAt ?? null);
+        if (imageUpdatedMs == null) return null;
+        if (rowLastModifiedMs != null && imageUpdatedMs + 1000 < rowLastModifiedMs) {
+          return null;
+        }
+        return {
+          employee_id: entry.entityId,
+          origin_device_id: originDeviceId,
+          origin_user_id: originUserId,
+          image_data: imageData,
+          image_format: getProfileImageFormat(imageData, data.profileImageFormat ?? data.profile_image_format ?? null),
+          created_at: nowIso(),
+          updated_at: updatedAt
+        };
+      })
+      .filter((value): value is NonNullable<typeof value> => value !== null);
+
     if (!canAdminSync(actor) && employeePayloadRecords.length) {
       const freshAdminAvailable = await hasRecentAdminPresence();
       if (freshAdminAvailable === false) {
@@ -3348,7 +3663,8 @@ export async function pushLocalChanges(actor: SyncActor, stage?: PushStageOption
     const projectedPushBytes =
       adminQueueRecords.reduce((sum, row) => sum + sizeBytesForJson(row), 0) +
       targetedAdminQueueRecords.reduce((sum, row) => sum + sizeBytesForJson(row), 0) +
-      employeeQueueRecords.reduce((sum, row) => sum + sizeBytesForJson(row), 0);
+      employeeQueueRecords.reduce((sum, row) => sum + sizeBytesForJson(row), 0) +
+      profileImageRelayRows.reduce((sum, row) => sum + sizeBytesForJson(row), 0);
 
     let relayWarning: string | null = null;
     const relayUsage = await fetchRelayUsageStats();
@@ -3391,10 +3707,26 @@ export async function pushLocalChanges(actor: SyncActor, stage?: PushStageOption
           });
         }
       };
+      const pushProfileImageBatches = async (records: Array<Record<string, unknown>>) => {
+        const batches = chunkRecordsBySize(records, SYNC_PUSH_MAX_BATCH_BYTES, SYNC_PUSH_MAX_BATCH_RECORDS);
+        for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+          const batch = batches[batchIndex];
+          await pushProfileImageQueueRows(batch.rows);
+          uploadedBatchCount += 1;
+          uploadedBytes += batch.bytes;
+          logSyncEvent(db, {
+            eventType: 'push_batch',
+            message:
+              `Uploading profile-image batch ${batchIndex + 1}/${batches.length} ` +
+              `to ${getProfileQueueTable()} (${(batch.bytes / 1024 / 1024).toFixed(2)} MB)`
+          });
+        }
+      };
 
       await pushBatches(getAdminQueueTable(), adminQueueRecords);
       await pushBatches(getAdminQueueTable(), targetedAdminQueueRecords);
       await pushBatches(getEmployeeQueueTable(), employeeQueueRecords);
+      await pushProfileImageBatches(profileImageRelayRows);
 
       const syncedAt = nowIso();
       const tx = db.transaction(() => {
@@ -3759,7 +4091,7 @@ const pullEmployeeAssignedChanges = async (
     for (const row of rowsOrdered) {
       const entityType = normalizeEntityType(readRemoteTableName(row) || '');
       const rowCreatedAt = readRemoteTimestamp(row);
-      if (entityType !== 'products' && entityType !== 'returns') {
+      if (entityType !== 'products' && entityType !== 'returns' && entityType !== 'employees') {
         remoteIdsToDelete.push(row.id);
         if (!latestAppliedTimestamp || rowCreatedAt > latestAppliedTimestamp) {
           latestAppliedTimestamp = rowCreatedAt;
@@ -3819,7 +4151,7 @@ const pullEmployeeAssignedChanges = async (
           } else {
             applyRemoteProduct(db, payload, resolvedVersion);
           }
-        } else {
+        } else if (entityType === 'returns') {
           if (operation === 'delete') {
             const deletedAt = payload.deletedAt ?? payload.deleted_at ?? rowCreatedAt ?? nowIso();
             applyRemoteDelete(db, 'returns', recordId, deletedAt, resolvedVersion);
@@ -3835,6 +4167,13 @@ const pullEmployeeAssignedChanges = async (
               continue;
             }
             applyRemoteReturn(db, payload, resolvedVersion);
+          }
+        } else {
+          if (operation === 'delete') {
+            const deletedAt = payload.deletedAt ?? payload.deleted_at ?? rowCreatedAt ?? nowIso();
+            applyRemoteDelete(db, 'employees', recordId, deletedAt, resolvedVersion);
+          } else {
+            applyRemoteEmployee(db, payload, resolvedVersion);
           }
         }
       } catch (error: any) {
@@ -4126,8 +4465,16 @@ export async function pullRemoteChanges(actor: SyncActor, conflictStrategy: Conf
       const result = canAdminSync(actor)
         ? await pullAdminChanges(db, actor, state, conflictStrategy, currentDeviceId)
         : await pullEmployeeAssignedChanges(db, actor, state, conflictStrategy, currentDeviceId);
+      let profileImageResult: { pulled: number; skipped: number } = { pulled: 0, skipped: 0 };
 
       if (result.status === 'synced' || result.status === 'idle' || result.status === 'conflict') {
+        profileImageResult = await pullProfileImageRelayChanges(db, actor, currentDeviceId);
+        if (profileImageResult.pulled > 0) {
+          logSyncEvent(db, {
+            eventType: 'pull',
+            message: `${actor.role} pulled ${profileImageResult.pulled} profile image update(s).`
+          });
+        }
         await touchActorPresence(db, actor);
         const relayUsage = await fetchRelayUsageStats();
         if (relayUsage) {
@@ -4135,7 +4482,11 @@ export async function pullRemoteChanges(actor: SyncActor, conflictStrategy: Conf
         }
       }
 
-      return result;
+      return {
+        ...result,
+        profileImagePulled: profileImageResult.pulled,
+        profileImageSkipped: profileImageResult.skipped
+      };
     } catch (error: any) {
       const message = error?.message ?? 'Pull failed';
       writeSyncState(db, actor, { last_status: 'error', last_error: message });
@@ -4186,14 +4537,26 @@ export async function autoPullEmployeeSubmissions(actor: SyncActor) {
       await cleanupQueueRetention(actor);
       const currentDeviceId = getLocalDeviceId(db);
       const result = await pullEmployeeSubmissionsForAdmin(db, actor, 'skip', currentDeviceId);
+      let profileImageResult: { pulled: number; skipped: number } = { pulled: 0, skipped: 0 };
       if (result.status === 'synced' || result.status === 'idle' || result.status === 'conflict') {
+        profileImageResult = await pullProfileImageRelayChanges(db, actor, currentDeviceId);
+        if (profileImageResult.pulled > 0) {
+          logSyncEvent(db, {
+            eventType: 'auto_pull_employee_submissions',
+            message: `System admin pulled ${profileImageResult.pulled} employee profile image update(s).`
+          });
+        }
         await touchActorPresence(db, actor);
         const relayUsage = await fetchRelayUsageStats();
         if (relayUsage) {
           persistRelayUsageSnapshot(db, actor, relayUsage, readSyncState(db, actor).last_warning);
         }
       }
-      return result;
+      return {
+        ...result,
+        profileImagePulled: profileImageResult.pulled,
+        profileImageSkipped: profileImageResult.skipped
+      };
     } catch (error: any) {
       const message = error?.message ?? 'Failed to auto pull employee submissions.';
       writeSyncState(db, actor, { last_status: 'error', last_error: message });

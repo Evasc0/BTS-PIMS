@@ -36,6 +36,9 @@ export type InstantUserCreateResult =
 export type RefreshSessionResult =
   | { success: true; refreshed: boolean; accessToken: string; expiresAt: string | null }
   | { success: false; error: string; requiresInternet?: boolean };
+export type ChangePasswordResult =
+  | { success: true; accessToken: string; expiresAt: string | null }
+  | { success: false; error: string; requiresInternet?: boolean };
 
 interface EmployeeRow {
   id: string;
@@ -195,6 +198,15 @@ const setStoredRefreshToken = (db: Database.Database, userId: string, refreshTok
     userId
   );
 };
+const validatePasswordStrength = (password: string): string | null => {
+  const value = String(password || '');
+  if (value.length < 8) return 'Password must be at least 8 characters.';
+  if (!/[a-z]/u.test(value)) return 'Password must include at least one lowercase letter.';
+  if (!/[A-Z]/u.test(value)) return 'Password must include at least one uppercase letter.';
+  if (!/[0-9]/u.test(value)) return 'Password must include at least one number.';
+  if (!/[^A-Za-z0-9]/u.test(value)) return 'Password must include at least one special character.';
+  return null;
+};
 
 const refreshCachedSessionToken = async (userId: string): Promise<RefreshSessionResult> => {
   const db = dataStore.getDb();
@@ -235,6 +247,15 @@ const refreshCachedSessionToken = async (userId: string): Promise<RefreshSession
 const deriveFullName = (email: string): string => {
   const username = email.split('@')[0] || 'User';
   return username.replace(/[._-]+/gu, ' ').trim() || 'User';
+};
+const splitFullName = (fullName: string): { firstName: string; lastName: string } => {
+  const normalized = String(fullName || '').trim();
+  if (!normalized) return { firstName: '', lastName: '' };
+  const [firstName, ...rest] = normalized.split(/\s+/u);
+  return {
+    firstName: firstName || '',
+    lastName: rest.join(' ')
+  };
 };
 
 const updateAuthVerificationCache = (
@@ -345,13 +366,13 @@ const upsertLocalEmployeeFromOnline = (
   db.prepare(
     `
       INSERT INTO employees (
-        id, full_name, email, phone, department, role, status, password_hash, password_salt,
+        id, first_name, last_name, full_name, email, phone, position, department, address, role, status, password_hash, password_salt,
         supabase_user_id, auth_sync_status, auth_last_error, pending_password_enc, provisioned_at,
         last_verified_at, verification_expires_at, hashed_session_token,
         created_at, location, two_factor_enabled, email_notifications, low_stock_alerts, language,
         sync_status, is_dirty, last_modified, last_synced_at, deleted_at, version
       ) VALUES (
-        @id, @full_name, @email, @phone, @department, @role, @status, @password_hash, @password_salt,
+        @id, @first_name, @last_name, @full_name, @email, @phone, @position, @department, @address, @role, @status, @password_hash, @password_salt,
         @supabase_user_id, @auth_sync_status, @auth_last_error, @pending_password_enc, @provisioned_at,
         @last_verified_at, @verification_expires_at, @hashed_session_token,
         @created_at, @location, @two_factor_enabled, @email_notifications, @low_stock_alerts, @language,
@@ -360,10 +381,14 @@ const upsertLocalEmployeeFromOnline = (
     `
   ).run({
     id: employeeId,
+    first_name: splitFullName(deriveFullName(input.email)).firstName,
+    last_name: splitFullName(deriveFullName(input.email)).lastName,
     full_name: deriveFullName(input.email),
     email: input.email,
     phone: '',
+    position: '',
     department: '',
+    address: '',
     role,
     status,
     password_hash: hash,
@@ -400,7 +425,9 @@ const insertLocalUserProvision = (
     fullName: string;
     email: string;
     phone: string;
+    position: string;
     department: string;
+    address: string;
     role: EmployeeRole;
     status: EmployeeStatus;
     password: string;
@@ -411,16 +438,17 @@ const insertLocalUserProvision = (
 ): void => {
   const now = nowIso();
   const { hash, salt } = createPasswordHash(input.password);
+  const splitName = splitFullName(input.fullName);
   db.prepare(
     `
       INSERT INTO employees (
-        id, full_name, email, phone, department, role, status, password_hash, password_salt,
+        id, first_name, last_name, full_name, email, phone, position, department, address, role, status, password_hash, password_salt,
         supabase_user_id, auth_sync_status, auth_last_error, pending_password_enc, provisioned_at,
         last_verified_at, verification_expires_at, hashed_session_token,
         created_at, location, two_factor_enabled, email_notifications, low_stock_alerts, language,
         sync_status, is_dirty, last_modified, last_synced_at, deleted_at, version
       ) VALUES (
-        @id, @full_name, @email, @phone, @department, @role, @status, @password_hash, @password_salt,
+        @id, @first_name, @last_name, @full_name, @email, @phone, @position, @department, @address, @role, @status, @password_hash, @password_salt,
         @supabase_user_id, @auth_sync_status, @auth_last_error, @pending_password_enc, @provisioned_at,
         @last_verified_at, @verification_expires_at, @hashed_session_token,
         @created_at, @location, @two_factor_enabled, @email_notifications, @low_stock_alerts, @language,
@@ -429,10 +457,14 @@ const insertLocalUserProvision = (
     `
   ).run({
     id: input.employeeId,
+    first_name: splitName.firstName,
+    last_name: splitName.lastName,
     full_name: input.fullName,
     email: input.email,
     phone: input.phone,
+    position: input.position,
     department: input.department,
+    address: input.address,
     role: input.role,
     status: input.status,
     password_hash: hash,
@@ -669,7 +701,9 @@ export const authService = {
     fullName: string;
     email: string;
     phone?: string;
+    position?: string;
     department?: string;
+    address?: string;
     role: EmployeeRole;
     status: EmployeeStatus;
     password: string;
@@ -733,12 +767,14 @@ export const authService = {
         fullName,
         email,
         phone: (input.phone || '').trim(),
+        position: (input.position || '').trim(),
         department: (input.department || '').trim(),
+        address: (input.address || '').trim(),
         role,
         status,
         password,
         supabaseUserId: provisioned.supabaseUserId,
-        location: input.location,
+        location: input.location || input.address,
         language: input.language
       });
 
@@ -790,6 +826,94 @@ export const authService = {
     }
 
     return refreshCachedSessionToken(userId);
+  },
+
+  async changeOwnPassword(input: {
+    userId: string;
+    currentPassword: string;
+    newPassword: string;
+  }): Promise<ChangePasswordResult> {
+    const db = dataStore.getDb();
+    const employee = getEmployeeById(db, input.userId);
+    if (!employee) {
+      return { success: false, error: 'User profile was not found locally.' };
+    }
+    if (normalizeStatus(employee.status) !== 'active') {
+      return { success: false, error: 'Account is inactive. Contact administrator.' };
+    }
+    if (!supabaseAuth.isConfigured()) {
+      return {
+        success: false,
+        error: 'Supabase auth is not configured. Set SUPABASE_URL and SUPABASE_ANON_KEY (or SUPABASE_PUBLISHABLE_KEY).'
+      };
+    }
+
+    const currentPassword = String(input.currentPassword || '');
+    const newPassword = String(input.newPassword || '');
+    if (!currentPassword || !newPassword) {
+      return { success: false, error: 'Current password and new password are required.' };
+    }
+    const strengthError = validatePasswordStrength(newPassword);
+    if (strengthError) {
+      return { success: false, error: strengthError };
+    }
+    if (currentPassword === newPassword) {
+      return { success: false, error: 'New password must be different from your current password.' };
+    }
+
+    try {
+      const verifiedSession = await supabaseAuth.onlineLogin(employee.email, currentPassword);
+      await supabaseAuth.updateUserPassword(verifiedSession.accessToken, newPassword);
+      const refreshedSession = await supabaseAuth.onlineLogin(employee.email, newPassword);
+      const verifiedAt = nowIso();
+      const expiresAt = new Date(Date.now() + AUTH_VERIFICATION_DAYS * DAY_MS).toISOString();
+      const { hash, salt } = createPasswordHash(newPassword);
+
+      db.prepare(
+        `
+          UPDATE employees
+          SET
+            password_hash = @password_hash,
+            password_salt = @password_salt,
+            auth_sync_status = 'synced',
+            auth_last_error = NULL,
+            pending_password_enc = NULL,
+            last_verified_at = @last_verified_at,
+            verification_expires_at = @verification_expires_at,
+            hashed_session_token = @hashed_session_token
+          WHERE id = @id
+        `
+      ).run({
+        id: employee.id,
+        password_hash: hash,
+        password_salt: salt,
+        last_verified_at: verifiedAt,
+        verification_expires_at: expiresAt,
+        hashed_session_token: hashSessionToken(refreshedSession.accessToken)
+      });
+
+      setCachedSession(employee.id, refreshedSession.accessToken, refreshedSession.expiresAt, refreshedSession.refreshToken);
+      setStoredRefreshToken(db, employee.id, refreshedSession.refreshToken);
+
+      return {
+        success: true,
+        accessToken: refreshedSession.accessToken,
+        expiresAt: refreshedSession.expiresAt
+      };
+    } catch (error: unknown) {
+      const message = normalizeLoginError(error);
+      if (isInvalidCredentialsError(message)) {
+        return { success: false, error: 'Current password is incorrect.' };
+      }
+      if (isConnectivityError(message)) {
+        return {
+          success: false,
+          error: 'Internet connection required to update your password.',
+          requiresInternet: true
+        };
+      }
+      return { success: false, error: message };
+    }
   },
 
   clearLocalSessionCache(userId: string): void {

@@ -136,6 +136,11 @@ interface AuthCreateUserResult {
   error?: string;
   requiresInternet?: boolean;
 }
+interface AuthChangePasswordResult {
+  success: boolean;
+  error?: string;
+  requiresInternet?: boolean;
+}
 
 declare global {
   interface Window {
@@ -197,13 +202,20 @@ declare global {
           fullName: string;
           email: string;
           phone?: string;
+          position?: string;
           department?: string;
+          address?: string;
           role: 'system_admin' | 'employee';
           status: 'active' | 'inactive';
           password: string;
           location?: string;
           language?: string;
         }) => Promise<AuthCreateUserResult>;
+        changePassword: (payload: {
+          userId: string;
+          currentPassword: string;
+          newPassword: string;
+        }) => Promise<AuthChangePasswordResult>;
         logout: (userId: string) => Promise<boolean>;
       };
       migration: {

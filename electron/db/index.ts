@@ -16,6 +16,15 @@ const nowIso = (): string => new Date().toISOString();
 
 const toInt = (value: boolean | number): number => (value ? 1 : 0);
 const fromInt = (value: number): boolean => Boolean(value);
+const splitFullName = (fullName: string): { firstName: string; lastName: string } => {
+  const normalized = String(fullName || '').trim();
+  if (!normalized) return { firstName: '', lastName: '' };
+  const [firstName, ...rest] = normalized.split(/\s+/u);
+  return {
+    firstName: firstName || '',
+    lastName: rest.join(' ')
+  };
+};
 
 const getTableColumns = (db: Database.Database, tableName: string): Set<string> => {
   try {
@@ -52,6 +61,13 @@ const ensureCoreSchema = (db: Database.Database): void => {
   ensureTableColumn(db, 'employees', employeesColumns, 'verification_expires_at', 'TEXT');
   ensureTableColumn(db, 'employees', employeesColumns, 'hashed_session_token', 'TEXT');
   ensureTableColumn(db, 'employees', employeesColumns, 'supabase_refresh_token_enc', 'TEXT');
+  ensureTableColumn(db, 'employees', employeesColumns, 'first_name', 'TEXT');
+  ensureTableColumn(db, 'employees', employeesColumns, 'last_name', 'TEXT');
+  ensureTableColumn(db, 'employees', employeesColumns, 'position', "TEXT NOT NULL DEFAULT ''");
+  ensureTableColumn(db, 'employees', employeesColumns, 'address', "TEXT NOT NULL DEFAULT ''");
+  ensureTableColumn(db, 'employees', employeesColumns, 'profile_image_data', 'TEXT');
+  ensureTableColumn(db, 'employees', employeesColumns, 'profile_image_format', 'TEXT');
+  ensureTableColumn(db, 'employees', employeesColumns, 'profile_image_updated_at', 'TEXT');
 
   db.exec(
     "UPDATE employees SET auth_sync_status = COALESCE(NULLIF(auth_sync_status, ''), 'pending_upload') WHERE 1 = 1"
@@ -67,6 +83,7 @@ const ensureCoreSchema = (db: Database.Database): void => {
       WHERE role IS NOT NULL
     `
   );
+  db.exec("UPDATE employees SET address = COALESCE(NULLIF(address, ''), location, '') WHERE 1 = 1");
   db.exec('CREATE INDEX IF NOT EXISTS idx_employees_auth_sync_status ON employees(auth_sync_status)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_employees_supabase_user_id ON employees(supabase_user_id)');
 
@@ -181,6 +198,8 @@ const normalizeAuthSyncStatus = (value: unknown): 'pending_upload' | 'synced' | 
 
 const mapEmployeeOutboxPayload = (employee: Employee) => {
   const {
+    passwordHash,
+    passwordSalt,
     pendingPasswordPlain,
     pendingPasswordEncrypted,
     hashedSessionToken,
@@ -189,6 +208,8 @@ const mapEmployeeOutboxPayload = (employee: Employee) => {
     verificationExpiresAt,
     ...rest
   } = employee;
+  void passwordHash;
+  void passwordSalt;
   void pendingPasswordPlain;
   void pendingPasswordEncrypted;
   void hashedSessionToken;
@@ -200,10 +221,14 @@ const mapEmployeeOutboxPayload = (employee: Employee) => {
 
 const mapEmployee = (row: any): Employee => ({
   id: row.id,
+  firstName: row.first_name ?? splitFullName(row.full_name || '').firstName,
+  lastName: row.last_name ?? splitFullName(row.full_name || '').lastName,
   fullName: row.full_name,
   email: row.email,
   phone: row.phone,
+  position: row.position ?? '',
   department: row.department,
+  address: row.address ?? row.location ?? '',
   role: row.role,
   status: row.status,
   passwordHash: row.password_hash,
@@ -216,6 +241,9 @@ const mapEmployee = (row: any): Employee => ({
   lastVerifiedAt: row.last_verified_at ?? undefined,
   verificationExpiresAt: row.verification_expires_at ?? undefined,
   hashedSessionToken: row.hashed_session_token ?? undefined,
+  profileImageDataUrl: row.profile_image_data ?? undefined,
+  profileImageFormat: row.profile_image_format ?? undefined,
+  profileImageUpdatedAt: row.profile_image_updated_at ?? undefined,
   createdAt: row.created_at,
   location: row.location,
   twoFactorEnabled: fromInt(row.two_factor_enabled),
@@ -400,25 +428,31 @@ export const dataStore = {
       db.prepare(
         `
         INSERT INTO employees (
-          id, full_name, email, phone, department, role, status, password_hash, password_salt,
+          id, first_name, last_name, full_name, email, phone, position, department, address, role, status, password_hash, password_salt,
           supabase_user_id, auth_sync_status, auth_last_error, pending_password_enc, provisioned_at,
           last_verified_at, verification_expires_at, hashed_session_token,
-          created_at, location, two_factor_enabled, email_notifications, low_stock_alerts, language,
+          created_at, location, profile_image_data, profile_image_format, profile_image_updated_at,
+          two_factor_enabled, email_notifications, low_stock_alerts, language,
           sync_status, is_dirty, last_modified, last_synced_at, deleted_at, version
         ) VALUES (
-          @id, @full_name, @email, @phone, @department, @role, @status, @password_hash, @password_salt,
+          @id, @first_name, @last_name, @full_name, @email, @phone, @position, @department, @address, @role, @status, @password_hash, @password_salt,
           @supabase_user_id, @auth_sync_status, @auth_last_error, @pending_password_enc, @provisioned_at,
           @last_verified_at, @verification_expires_at, @hashed_session_token,
-          @created_at, @location, @two_factor_enabled, @email_notifications, @low_stock_alerts, @language,
+          @created_at, @location, @profile_image_data, @profile_image_format, @profile_image_updated_at,
+          @two_factor_enabled, @email_notifications, @low_stock_alerts, @language,
           @sync_status, @is_dirty, @last_modified, @last_synced_at, @deleted_at, @version
         )
       `
       ).run({
+        first_name: employee.firstName ?? splitFullName(employee.fullName).firstName,
+        last_name: employee.lastName ?? splitFullName(employee.fullName).lastName,
         id: employee.id,
         full_name: employee.fullName,
         email: employee.email,
         phone: employee.phone,
+        position: employee.position ?? '',
         department: employee.department,
+        address: employee.address ?? employee.location ?? '',
         role: employee.role,
         status: employee.status,
         password_hash: employee.passwordHash,
@@ -433,6 +467,9 @@ export const dataStore = {
         hashed_session_token: employee.hashedSessionToken ?? null,
         created_at: employee.createdAt,
         location: employee.location,
+        profile_image_data: employee.profileImageDataUrl ?? null,
+        profile_image_format: employee.profileImageFormat ?? null,
+        profile_image_updated_at: employee.profileImageUpdatedAt ?? null,
         two_factor_enabled: toInt(employee.twoFactorEnabled),
         email_notifications: toInt(employee.emailNotifications),
         low_stock_alerts: toInt(employee.lowStockAlerts),
@@ -451,6 +488,7 @@ export const dataStore = {
           authSyncStatus,
           version: 1
         } as Employee),
+        lastModified: now,
         version: 1
       });
     },
@@ -494,10 +532,14 @@ export const dataStore = {
       db.prepare(
         `
         UPDATE employees SET
+          first_name = @first_name,
+          last_name = @last_name,
           full_name = @full_name,
           email = @email,
           phone = @phone,
+          position = @position,
           department = @department,
+          address = @address,
           role = @role,
           status = @status,
           password_hash = @password_hash,
@@ -512,6 +554,9 @@ export const dataStore = {
           hashed_session_token = @hashed_session_token,
           created_at = @created_at,
           location = @location,
+          profile_image_data = @profile_image_data,
+          profile_image_format = @profile_image_format,
+          profile_image_updated_at = @profile_image_updated_at,
           two_factor_enabled = @two_factor_enabled,
           email_notifications = @email_notifications,
           low_stock_alerts = @low_stock_alerts,
@@ -524,10 +569,14 @@ export const dataStore = {
       `
       ).run({
         id,
+        first_name: updated.firstName ?? splitFullName(updated.fullName).firstName,
+        last_name: updated.lastName ?? splitFullName(updated.fullName).lastName,
         full_name: updated.fullName,
         email: updated.email,
         phone: updated.phone,
+        position: updated.position ?? '',
         department: updated.department,
+        address: updated.address ?? updated.location ?? '',
         role: updated.role,
         status: updated.status,
         password_hash: updated.passwordHash,
@@ -542,6 +591,9 @@ export const dataStore = {
         hashed_session_token: updated.hashedSessionToken ?? null,
         created_at: updated.createdAt,
         location: updated.location,
+        profile_image_data: updated.profileImageDataUrl ?? null,
+        profile_image_format: updated.profileImageFormat ?? null,
+        profile_image_updated_at: updated.profileImageUpdatedAt ?? null,
         two_factor_enabled: toInt(updated.twoFactorEnabled),
         email_notifications: toInt(updated.emailNotifications),
         low_stock_alerts: toInt(updated.lowStockAlerts),
@@ -551,7 +603,10 @@ export const dataStore = {
         last_modified: now,
         version: nextVersion
       });
-      enqueueOutbox(db, 'employees', id, 'update', mapEmployeeOutboxPayload(updated));
+      enqueueOutbox(db, 'employees', id, 'update', {
+        ...mapEmployeeOutboxPayload(updated),
+        lastModified: now
+      });
     },
     remove: (id: string): void => {
       const db = ensureDb();

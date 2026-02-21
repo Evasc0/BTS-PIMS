@@ -4,10 +4,14 @@ export type EmployeeAuthSyncStatus = 'pending_upload' | 'synced' | 'failed' | 'n
 
 export interface Employee {
   id: string;
+  firstName?: string;
+  lastName?: string;
   fullName: string;
   email: string;
   phone: string;
+  position?: string;
   department: string;
+  address?: string;
   role: EmployeeRole;
   status: EmployeeStatus;
   passwordHash: string;
@@ -21,6 +25,9 @@ export interface Employee {
   lastVerifiedAt?: string;
   verificationExpiresAt?: string;
   hashedSessionToken?: string;
+  profileImageDataUrl?: string | null;
+  profileImageFormat?: string | null;
+  profileImageUpdatedAt?: string | null;
   createdAt: string;
   location: string;
   twoFactorEnabled: boolean;

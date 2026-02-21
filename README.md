@@ -81,6 +81,7 @@ SUPABASE_ANON_KEY=sb_publishable_xxx
 # SUPABASE_PUBLISHABLE_KEY=sb_publishable_xxx
 SUPABASE_ADMIN_QUEUE_TABLE=admin_sync_queue
 SUPABASE_EMPLOYEE_QUEUE_TABLE=employee_sync_queue
+SUPABASE_PROFILE_SYNC_QUEUE_TABLE=profile_sync_queue
 SUPABASE_FULL_SYNC_REQUESTS_TABLE=full_sync_requests
 SUPABASE_FULL_SYNC_CHUNKS_TABLE=full_sync_chunks
 SUPABASE_FULL_SYNC_STORAGE_BUCKET=full-sync-temp
@@ -115,6 +116,7 @@ This creates:
 - `app_users` for Supabase identity metadata (role/status/employee mapping)
 - `admin_sync_queue` for global system-admin changes
 - `employee_sync_queue` for assigned employee updates
+- `profile_sync_queue` for temporary profile image relay
 - `full_sync_requests` for stale-device full-sync approval workflow
 - `full_sync_chunks` for chunk metadata (5MB max/chunk)
 - indexes + RLS policies

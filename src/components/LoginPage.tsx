@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { LogIn, Shield, UserCircle } from 'lucide-react';
+import { Eye, EyeOff, LogIn, Shield, UserCircle } from 'lucide-react';
 import { useAuth } from '../lib/auth';
 import { DEFAULT_ADMIN_CREDENTIALS } from '../lib/db';
 
@@ -11,6 +11,7 @@ export function LoginPage({ initError }: LoginPageProps) {
   const { login } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -57,15 +58,25 @@ export function LoginPage({ initError }: LoginPageProps) {
               <label htmlFor="password" className="block text-sm font-medium text-gray-700 mb-2">
                 Password
               </label>
-              <input
-                id="password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition"
-                placeholder="********"
-                required
-              />
+              <div className="flex items-center border border-gray-300 rounded-lg focus-within:ring-2 focus-within:ring-indigo-500 focus-within:border-transparent transition">
+                <input
+                  id="password"
+                  type={showPassword ? 'text' : 'password'}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className="w-full flex-1 bg-transparent px-4 py-3 outline-none"
+                  placeholder="********"
+                  required
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((prev) => !prev)}
+                  className="mr-2 inline-flex h-8 w-8 items-center justify-center text-gray-500 hover:text-gray-700"
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
+                >
+                  {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                </button>
+              </div>
             </div>
 
             {initError && (

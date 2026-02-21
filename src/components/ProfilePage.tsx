@@ -1,12 +1,12 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { Mail, Phone, MapPin, Calendar, Save, Camera, Key, Sun, Moon } from 'lucide-react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Mail, Phone, MapPin, Calendar, Save, Camera, Key, Sun, Moon, Trash2, Eye, EyeOff } from 'lucide-react';
 import { useLiveQuery } from '../lib/useLiveQuery';
 import type { Employee } from '../lib/types';
 import { db } from '../lib/db';
-import { createPasswordHash } from '../lib/security';
 import { formatDate } from '../lib/utils';
 import { logActivity } from '../lib/activity';
 import { useAuth } from '../lib/auth';
+import { buildFullName, getInitials, optimizeProfileImage, splitFullName } from '../lib/profile';
 import {
   applyThemePreference,
   getStoredThemePreference,
@@ -18,18 +18,55 @@ interface ProfilePageProps {
   user: Employee;
 }
 
+interface ProfileFormState {
+  firstName: string;
+  lastName: string;
+  email: string;
+  phone: string;
+  position: string;
+  department: string;
+  address: string;
+}
+
+const passwordStrengthError = (value: string): string | null => {
+  const password = String(value || '');
+  if (password.length < 8) return 'Password must be at least 8 characters.';
+  if (!/[a-z]/u.test(password)) return 'Password must include a lowercase letter.';
+  if (!/[A-Z]/u.test(password)) return 'Password must include an uppercase letter.';
+  if (!/[0-9]/u.test(password)) return 'Password must include a number.';
+  if (!/[^A-Za-z0-9]/u.test(password)) return 'Password must include a special character.';
+  return null;
+};
+
 export function ProfilePage({ user }: ProfilePageProps) {
   const { refreshUser } = useAuth();
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [formSuccess, setFormSuccess] = useState<string | null>(null);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [passwordSuccess, setPasswordSuccess] = useState<string | null>(null);
+  const [passwordForm, setPasswordForm] = useState({
+    currentPassword: '',
+    newPassword: '',
+    confirmPassword: ''
+  });
+  const [showPasswordFields, setShowPasswordFields] = useState({
+    current: false,
+    next: false,
+    confirm: false
+  });
+  const [passwordBusy, setPasswordBusy] = useState(false);
+  const [imageBusy, setImageBusy] = useState(false);
   const [themePreference, setThemePreference] = useState<ThemePreference>(() => getStoredThemePreference(user.id));
-  const [profileState, setProfileState] = useState({
+  const [profileState, setProfileState] = useState<ProfileFormState>({
     firstName: '',
     lastName: '',
     email: '',
     phone: '',
+    position: '',
     department: '',
-    location: ''
+    address: ''
   });
 
   const products = useLiveQuery(() => db.products.toArray(), []);
@@ -46,39 +83,51 @@ export function ProfilePage({ user }: ProfilePageProps) {
   );
 
   useEffect(() => {
-    const [firstName, ...rest] = user.fullName.split(' ');
+    const split = splitFullName(user.fullName);
     setProfileState({
-      firstName: firstName || '',
-      lastName: rest.join(' '),
+      firstName: user.firstName ?? split.firstName,
+      lastName: user.lastName ?? split.lastName,
       email: user.email,
       phone: user.phone,
+      position: user.position ?? (user.role === 'system_admin' ? 'System Admin' : 'Employee'),
       department: user.department,
-      location: user.location
+      address: user.address ?? user.location ?? ''
     });
     setThemePreference(getStoredThemePreference(user.id));
   }, [user]);
 
   const handleSave = async () => {
     setFormError(null);
-    const fullName = `${profileState.firstName} ${profileState.lastName}`.trim();
-    if (!fullName || !profileState.email.trim()) {
-      setFormError('Name and email are required.');
+    setFormSuccess(null);
+    const fullName = buildFullName(profileState.firstName, profileState.lastName);
+    if (!fullName) {
+      setFormError('First name and last name are required.');
       return;
     }
 
     const normalizedEmail = profileState.email.trim().toLowerCase();
+    if (!normalizedEmail) {
+      setFormError('Email is required.');
+      return;
+    }
+
     const existing = await db.employees.where('email').equals(normalizedEmail).first();
     if (existing && existing.id !== user.id) {
       setFormError('Another employee already uses this email.');
       return;
     }
 
+    const trimmedAddress = profileState.address.trim();
     await db.employees.update(user.id, {
+      firstName: profileState.firstName.trim(),
+      lastName: profileState.lastName.trim(),
       fullName,
       email: normalizedEmail,
       phone: profileState.phone.trim(),
+      position: profileState.position.trim(),
       department: profileState.department.trim(),
-      location: profileState.location.trim()
+      address: trimmedAddress,
+      location: trimmedAddress
     });
 
     await logActivity({
@@ -89,41 +138,148 @@ export function ProfilePage({ user }: ProfilePageProps) {
       details: 'Profile updated'
     });
 
-    await refreshUser();
     setIsEditing(false);
+    setFormSuccess('Profile updated successfully.');
+    await refreshUser();
+
+    if (navigator.onLine && window.api?.sync?.push) {
+      void window.api.sync.push(user.id);
+    }
   };
 
   const handleChangePassword = async () => {
-    const newPassword = window.prompt('Enter a new password:');
-    if (!newPassword) return;
-    if (newPassword.length < 6) {
-      setFormError('Password must be at least 6 characters.');
+    setPasswordError(null);
+    setPasswordSuccess(null);
+
+    if (!window.api?.auth?.changePassword) {
+      setPasswordError('Secure password update API is unavailable.');
       return;
     }
-    const confirmPassword = window.prompt('Confirm the new password:');
+
+    const currentPassword = passwordForm.currentPassword;
+    const newPassword = passwordForm.newPassword;
+    const confirmPassword = passwordForm.confirmPassword;
+
+    if (!currentPassword) {
+      setPasswordError('Current password is required.');
+      return;
+    }
+    const strengthError = passwordStrengthError(newPassword);
+    if (strengthError) {
+      setPasswordError(strengthError);
+      return;
+    }
     if (newPassword !== confirmPassword) {
-      setFormError('Passwords do not match.');
+      setPasswordError('Password confirmation does not match.');
       return;
     }
-    const { hash, salt } = await createPasswordHash(newPassword);
-    await db.employees.update(user.id, {
-      passwordHash: hash,
-      passwordSalt: salt,
-      authSyncStatus: 'pending_upload',
-      pendingPasswordPlain: newPassword
-    });
-    await logActivity({
-      action: 'UPDATE',
-      entityType: 'employee',
-      entityId: user.id,
-      performedByEmployeeId: user.id,
-      details: 'Password updated'
-    });
+
+    setPasswordBusy(true);
+    try {
+      const result = await window.api.auth.changePassword({
+        userId: user.id,
+        currentPassword,
+        newPassword
+      });
+      if (!result.success) {
+        setPasswordError(result.error || 'Unable to update password.');
+        return;
+      }
+
+      await logActivity({
+        action: 'UPDATE',
+        entityType: 'employee',
+        entityId: user.id,
+        performedByEmployeeId: user.id,
+        details: 'Password updated in Supabase Auth'
+      });
+
+      setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
+      setPasswordSuccess('Password updated successfully.');
+      await refreshUser();
+    } finally {
+      setPasswordBusy(false);
+    }
+  };
+
+  const handleImageUploadClick = () => {
+    if (imageBusy) return;
+    fileInputRef.current?.click();
+  };
+
+  const handleImageFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      setFormError('Please select a valid image file.');
+      return;
+    }
+
+    setImageBusy(true);
     setFormError(null);
+    setFormSuccess(null);
+    try {
+      const optimized = await optimizeProfileImage(file);
+      const updatedAt = new Date().toISOString();
+      await db.employees.update(user.id, {
+        profileImageDataUrl: optimized.dataUrl,
+        profileImageFormat: optimized.format,
+        profileImageUpdatedAt: updatedAt
+      });
+      await logActivity({
+        action: 'UPDATE',
+        entityType: 'employee',
+        entityId: user.id,
+        performedByEmployeeId: user.id,
+        details: 'Profile image updated'
+      });
+      setFormSuccess('Profile image updated.');
+      await refreshUser();
+
+      if (navigator.onLine && window.api?.sync?.push) {
+        void window.api.sync.push(user.id);
+      }
+    } catch (error: any) {
+      setFormError(error?.message || 'Unable to process and save profile image.');
+    } finally {
+      setImageBusy(false);
+    }
+  };
+
+  const handleRemoveImage = async () => {
+    if (imageBusy) return;
+    setImageBusy(true);
+    setFormError(null);
+    setFormSuccess(null);
+    try {
+      const updatedAt = new Date().toISOString();
+      await db.employees.update(user.id, {
+        profileImageDataUrl: null,
+        profileImageFormat: null,
+        profileImageUpdatedAt: updatedAt
+      });
+      await logActivity({
+        action: 'UPDATE',
+        entityType: 'employee',
+        entityId: user.id,
+        performedByEmployeeId: user.id,
+        details: 'Profile image removed'
+      });
+      setFormSuccess('Profile image removed.');
+      await refreshUser();
+
+      if (navigator.onLine && window.api?.sync?.push) {
+        void window.api.sync.push(user.id);
+      }
+    } finally {
+      setImageBusy(false);
+    }
   };
 
   const handleViewSessions = () => {
-    window.alert('Active session: current browser session.');
+    window.alert('Active session: current device session.');
   };
 
   const handleThemeChange = (theme: ThemePreference) => {
@@ -144,21 +300,40 @@ export function ProfilePage({ user }: ProfilePageProps) {
           <div className="bg-white rounded-xl border border-gray-200 p-6">
             <div className="text-center mb-6">
               <div className="relative inline-block">
-                <div className="w-24 h-24 bg-indigo-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                  <span className="text-3xl font-bold text-indigo-600">
-                    {user.fullName
-                      .split(' ')
-                      .filter(Boolean)
-                      .map((n) => n[0])
-                      .join('')}
-                  </span>
+                <div className="w-24 h-24 bg-indigo-100 rounded-full flex items-center justify-center mx-auto mb-4 overflow-hidden">
+                  {user.profileImageDataUrl ? (
+                    <img src={user.profileImageDataUrl} alt={`${user.fullName} profile`} className="w-full h-full object-cover" />
+                  ) : (
+                    <span className="text-3xl font-bold text-indigo-600">{getInitials(user.fullName)}</span>
+                  )}
                 </div>
-                <button className="absolute bottom-3 right-0 w-8 h-8 bg-indigo-600 rounded-full flex items-center justify-center hover:bg-indigo-700 transition">
+                <button
+                  onClick={handleImageUploadClick}
+                  disabled={imageBusy}
+                  className="absolute bottom-3 right-0 w-8 h-8 bg-indigo-600 rounded-full flex items-center justify-center hover:bg-indigo-700 transition disabled:opacity-60"
+                >
                   <Camera className="w-4 h-4 text-white" />
                 </button>
               </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp,image/jpg"
+                hidden
+                onChange={handleImageFileChange}
+              />
               <h2 className="font-bold text-gray-900 mb-1">{user.fullName}</h2>
-              <p className="text-sm text-gray-600 capitalize">{user.role}</p>
+              <p className="text-sm text-gray-600">{profileState.position || user.role}</p>
+              {user.profileImageDataUrl && (
+                <button
+                  onClick={handleRemoveImage}
+                  disabled={imageBusy}
+                  className="mt-3 inline-flex items-center gap-2 text-xs text-red-600 hover:text-red-700 disabled:opacity-60"
+                >
+                  <Trash2 className="w-3 h-3" />
+                  Remove image
+                </button>
+              )}
             </div>
 
             <div className="space-y-4 pt-6 border-t border-gray-200">
@@ -168,11 +343,11 @@ export function ProfilePage({ user }: ProfilePageProps) {
               </div>
               <div className="flex items-center gap-3 text-sm">
                 <Phone className="w-4 h-4 text-gray-400" />
-                <span className="text-gray-600">{user.phone || 'No phone number'}</span>
+                <span className="text-gray-600">{user.phone || 'No contact number set'}</span>
               </div>
               <div className="flex items-center gap-3 text-sm">
                 <MapPin className="w-4 h-4 text-gray-400" />
-                <span className="text-gray-600">{user.location || 'No location set'}</span>
+                <span className="text-gray-600">{user.address || user.location || 'No address set'}</span>
               </div>
               <div className="flex items-center gap-3 text-sm">
                 <Calendar className="w-4 h-4 text-gray-400" />
@@ -206,7 +381,11 @@ export function ProfilePage({ user }: ProfilePageProps) {
             <div className="flex items-center justify-between mb-6">
               <h2 className="font-bold text-gray-900">Personal Information</h2>
               <button
-                onClick={() => setIsEditing(!isEditing)}
+                onClick={() => {
+                  setFormError(null);
+                  setFormSuccess(null);
+                  setIsEditing(!isEditing);
+                }}
                 className="px-4 py-2 text-indigo-600 hover:bg-indigo-50 rounded-lg transition text-sm font-medium"
               >
                 {isEditing ? 'Cancel' : 'Edit'}
@@ -243,7 +422,16 @@ export function ProfilePage({ user }: ProfilePageProps) {
                 <input
                   type="email"
                   value={profileState.email}
-                  onChange={(e) => setProfileState({ ...profileState, email: e.target.value })}
+                  disabled
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg outline-none bg-gray-50 text-gray-600"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Contact Number</label>
+                <input
+                  type="tel"
+                  value={profileState.phone}
+                  onChange={(e) => setProfileState({ ...profileState, phone: e.target.value })}
                   disabled={!isEditing}
                   className={`w-full px-4 py-2 border border-gray-300 rounded-lg outline-none ${
                     isEditing ? 'focus:ring-2 focus:ring-indigo-500 focus:border-transparent' : 'bg-gray-50 text-gray-600'
@@ -251,11 +439,11 @@ export function ProfilePage({ user }: ProfilePageProps) {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Phone</label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Position</label>
                 <input
-                  type="tel"
-                  value={profileState.phone}
-                  onChange={(e) => setProfileState({ ...profileState, phone: e.target.value })}
+                  type="text"
+                  value={profileState.position}
+                  onChange={(e) => setProfileState({ ...profileState, position: e.target.value })}
                   disabled={!isEditing}
                   className={`w-full px-4 py-2 border border-gray-300 rounded-lg outline-none ${
                     isEditing ? 'focus:ring-2 focus:ring-indigo-500 focus:border-transparent' : 'bg-gray-50 text-gray-600'
@@ -274,13 +462,13 @@ export function ProfilePage({ user }: ProfilePageProps) {
                   }`}
                 />
               </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Location</label>
-                <input
-                  type="text"
-                  value={profileState.location}
-                  onChange={(e) => setProfileState({ ...profileState, location: e.target.value })}
+              <div className="md:col-span-2">
+                <label className="block text-sm font-medium text-gray-700 mb-2">Address</label>
+                <textarea
+                  value={profileState.address}
+                  onChange={(e) => setProfileState({ ...profileState, address: e.target.value })}
                   disabled={!isEditing}
+                  rows={3}
                   className={`w-full px-4 py-2 border border-gray-300 rounded-lg outline-none ${
                     isEditing ? 'focus:ring-2 focus:ring-indigo-500 focus:border-transparent' : 'bg-gray-50 text-gray-600'
                   }`}
@@ -289,6 +477,7 @@ export function ProfilePage({ user }: ProfilePageProps) {
             </div>
 
             {formError && <p className="text-sm text-red-600 mt-4">{formError}</p>}
+            {formSuccess && <p className="text-sm text-emerald-700 mt-4">{formSuccess}</p>}
 
             {isEditing && (
               <div className="mt-6 pt-6 border-t border-gray-200">
@@ -307,21 +496,81 @@ export function ProfilePage({ user }: ProfilePageProps) {
             <h2 className="font-bold text-gray-900 mb-6">Security Settings</h2>
 
             <div className="space-y-4">
-              <div className="flex items-center justify-between py-4 border-b border-gray-100">
-                <div className="flex items-center gap-3">
+              <div className="py-4 border-b border-gray-100">
+                <div className="flex items-start gap-3 mb-4">
                   <div className="w-10 h-10 bg-indigo-100 rounded-lg flex items-center justify-center">
                     <Key className="w-5 h-5 text-indigo-600" />
                   </div>
                   <div>
                     <p className="font-medium text-gray-900">Change Password</p>
-                    <p className="text-sm text-gray-600">Update your password regularly for security</p>
+                    <p className="text-sm text-gray-600">Password updates are applied directly in Supabase Auth.</p>
                   </div>
                 </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div className="flex items-center border border-gray-300 rounded-lg focus-within:ring-2 focus-within:ring-indigo-500 focus-within:border-transparent">
+                    <input
+                      type={showPasswordFields.current ? 'text' : 'password'}
+                      placeholder="Current password"
+                      value={passwordForm.currentPassword}
+                      onChange={(e) => setPasswordForm({ ...passwordForm, currentPassword: e.target.value })}
+                      className="w-full flex-1 bg-transparent px-3 py-2 outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPasswordFields((prev) => ({ ...prev, current: !prev.current }))}
+                      className="mr-2 inline-flex h-8 w-8 items-center justify-center text-gray-500 hover:text-gray-700"
+                      aria-label={showPasswordFields.current ? 'Hide current password' : 'Show current password'}
+                    >
+                      {showPasswordFields.current ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                  <div className="flex items-center border border-gray-300 rounded-lg focus-within:ring-2 focus-within:ring-indigo-500 focus-within:border-transparent">
+                    <input
+                      type={showPasswordFields.next ? 'text' : 'password'}
+                      placeholder="New password"
+                      value={passwordForm.newPassword}
+                      onChange={(e) => setPasswordForm({ ...passwordForm, newPassword: e.target.value })}
+                      className="w-full flex-1 bg-transparent px-3 py-2 outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPasswordFields((prev) => ({ ...prev, next: !prev.next }))}
+                      className="mr-2 inline-flex h-8 w-8 items-center justify-center text-gray-500 hover:text-gray-700"
+                      aria-label={showPasswordFields.next ? 'Hide new password' : 'Show new password'}
+                    >
+                      {showPasswordFields.next ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                  <div className="flex items-center border border-gray-300 rounded-lg focus-within:ring-2 focus-within:ring-indigo-500 focus-within:border-transparent">
+                    <input
+                      type={showPasswordFields.confirm ? 'text' : 'password'}
+                      placeholder="Confirm new password"
+                      value={passwordForm.confirmPassword}
+                      onChange={(e) => setPasswordForm({ ...passwordForm, confirmPassword: e.target.value })}
+                      className="w-full flex-1 bg-transparent px-3 py-2 outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPasswordFields((prev) => ({ ...prev, confirm: !prev.confirm }))}
+                      className="mr-2 inline-flex h-8 w-8 items-center justify-center text-gray-500 hover:text-gray-700"
+                      aria-label={showPasswordFields.confirm ? 'Hide confirm password' : 'Show confirm password'}
+                    >
+                      {showPasswordFields.confirm ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+                <p className="text-xs text-gray-500 mt-2">
+                  Minimum 8 chars with uppercase, lowercase, number, and special character.
+                </p>
+                {passwordError && <p className="text-sm text-red-600 mt-3">{passwordError}</p>}
+                {passwordSuccess && <p className="text-sm text-emerald-700 mt-3">{passwordSuccess}</p>}
                 <button
                   onClick={handleChangePassword}
-                  className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition text-sm"
+                  disabled={passwordBusy}
+                  className="mt-4 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition text-sm disabled:opacity-60"
                 >
-                  Change
+                  {passwordBusy ? 'Updating...' : 'Update Password'}
                 </button>
               </div>
 
@@ -351,9 +600,7 @@ export function ProfilePage({ user }: ProfilePageProps) {
                   <button
                     onClick={() => handleThemeChange('light')}
                     className={`px-3 py-2 rounded-md text-sm transition flex items-center gap-2 ${
-                      themePreference === 'light'
-                        ? 'bg-indigo-600 text-white'
-                        : 'text-gray-700 hover:bg-gray-100'
+                      themePreference === 'light' ? 'bg-indigo-600 text-white' : 'text-gray-700 hover:bg-gray-100'
                     }`}
                   >
                     <Sun className="w-4 h-4" />
@@ -362,9 +609,7 @@ export function ProfilePage({ user }: ProfilePageProps) {
                   <button
                     onClick={() => handleThemeChange('dark')}
                     className={`px-3 py-2 rounded-md text-sm transition flex items-center gap-2 ${
-                      themePreference === 'dark'
-                        ? 'bg-indigo-600 text-white'
-                        : 'text-gray-700 hover:bg-gray-100'
+                      themePreference === 'dark' ? 'bg-indigo-600 text-white' : 'text-gray-700 hover:bg-gray-100'
                     }`}
                   >
                     <Moon className="w-4 h-4" />

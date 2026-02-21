@@ -23,6 +23,18 @@ import {
 import { checkForUpdates, installUpdate } from '../update/updater';
 
 export function registerIpc(mainWindow: BrowserWindow): void {
+  const sanitizeEmployeeForRenderer = <T extends Record<string, any> | null | undefined>(employee: T): T => {
+    if (!employee || typeof employee !== 'object') return employee;
+    const output = { ...employee };
+    delete output.passwordHash;
+    delete output.passwordSalt;
+    delete output.pendingPasswordPlain;
+    delete output.pendingPasswordEncrypted;
+    delete output.hashedSessionToken;
+    delete output.authLastError;
+    return output as T;
+  };
+
   const resolveSyncActor = (userId: string) => {
     if (!userId) {
       throw new Error('Missing user id for sync operation.');
@@ -40,13 +52,18 @@ export function registerIpc(mainWindow: BrowserWindow): void {
     if (mainWindow.isDestroyed()) return;
     mainWindow.webContents.send('db:changed', { table, ids });
   };
+  const notifyInventoryRefresh = () => {
+    notify('employees', []);
+    notify('products', []);
+    notify('returns', []);
+  };
 
   ipcMain.handle('db:initialize', () => dataStore.initialize());
 
-  ipcMain.handle('db:employees:list', () => dataStore.employees.list());
+  ipcMain.handle('db:employees:list', () => dataStore.employees.list().map((employee) => sanitizeEmployeeForRenderer(employee)));
   ipcMain.handle('db:employees:count', () => dataStore.employees.count());
-  ipcMain.handle('db:employees:get', (_evt, id) => dataStore.employees.get(id));
-  ipcMain.handle('db:employees:findBy', (_evt, field, value) => dataStore.employees.findBy(field, value));
+  ipcMain.handle('db:employees:get', (_evt, id) => sanitizeEmployeeForRenderer(dataStore.employees.get(id)));
+  ipcMain.handle('db:employees:findBy', (_evt, field, value) => sanitizeEmployeeForRenderer(dataStore.employees.findBy(field, value)));
   ipcMain.handle('db:employees:add', (_evt, record) => {
     dataStore.employees.add(record);
     notify('employees', [record.id]);
@@ -180,7 +197,9 @@ export function registerIpc(mainWindow: BrowserWindow): void {
         fullName: string;
         email: string;
         phone?: string;
+        position?: string;
         department?: string;
+        address?: string;
         role: 'system_admin' | 'employee';
         status: 'active' | 'inactive';
         password: string;
@@ -193,6 +212,28 @@ export function registerIpc(mainWindow: BrowserWindow): void {
         notify('employees', [result.employeeId]);
       }
       return result;
+    }
+  );
+
+  ipcMain.handle(
+    'auth:change-password',
+    async (
+      _evt,
+      payload: {
+        userId: string;
+        currentPassword: string;
+        newPassword: string;
+      }
+    ) => {
+      const result = await authService.changeOwnPassword(payload);
+      if (result.success) {
+        setSyncActorAccessToken(payload.userId, result.accessToken, result.expiresAt || null);
+        notify('employees', [payload.userId]);
+      }
+      const sanitized = { ...result } as any;
+      delete sanitized.accessToken;
+      delete sanitized.expiresAt;
+      return sanitized;
     }
   );
 
@@ -233,6 +274,9 @@ export function registerIpc(mainWindow: BrowserWindow): void {
   ipcMain.handle('sync:auto-pull-employee-submissions', async (_evt, userId: string) => {
     const actor = resolveSyncActor(userId);
     const result = await autoPullEmployeeSubmissions(actor);
+    if (result.status === 'synced' || result.status === 'conflict' || result.status === 'idle') {
+      notifyInventoryRefresh();
+    }
     notify('sync_state', [`sync:${actor.userId}`]);
     return result;
   });
@@ -243,6 +287,9 @@ export function registerIpc(mainWindow: BrowserWindow): void {
   ipcMain.handle('sync:pull', async (_evt, userId: string, conflictStrategy: 'skip' | 'remote_wins' = 'skip') => {
     const actor = resolveSyncActor(userId);
     const result = await pullRemoteChanges(actor, conflictStrategy);
+    if (result.status === 'synced' || result.status === 'conflict' || result.status === 'idle') {
+      notifyInventoryRefresh();
+    }
     notify('sync_state', [`sync:${actor.userId}`]);
     return result;
   });
@@ -263,6 +310,9 @@ export function registerIpc(mainWindow: BrowserWindow): void {
   ipcMain.handle('sync:full:pull-next', async (_evt, userId: string) => {
     const actor = resolveSyncActor(userId);
     const result = await pullNextFullSyncChunk(actor);
+    if (result.status === 'pulled' || result.status === 'completed') {
+      notifyInventoryRefresh();
+    }
     notify('sync_state', [`sync:${actor.userId}`]);
     return result;
   });

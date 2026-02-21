@@ -1,9 +1,10 @@
-import React, { useMemo, useState } from 'react';
-import { Users, Plus, Search, Edit, Trash2, Mail, Phone, X, Shield } from 'lucide-react';
+import React, { useMemo, useRef, useState } from 'react';
+import { Users, Plus, Search, Edit, Trash2, Mail, Phone, X, Shield, Camera, Eye, EyeOff } from 'lucide-react';
 import { useLiveQuery } from '../lib/useLiveQuery';
 import type { Employee, EmployeeRole } from '../lib/types';
 import { db } from '../lib/db';
 import { logActivity } from '../lib/activity';
+import { getInitials, optimizeProfileImage, splitFullName } from '../lib/profile';
 
 interface EmployeesPageProps {
   user: Employee;
@@ -13,28 +14,41 @@ interface EmployeeFormState {
   fullName: string;
   email: string;
   phone: string;
+  position: string;
   department: string;
+  address: string;
   role: EmployeeRole;
   status: 'active' | 'inactive';
   password: string;
+  profileImageDataUrl: string | null;
+  profileImageFormat: string | null;
 }
 
 const emptyFormState: EmployeeFormState = {
   fullName: '',
   email: '',
   phone: '',
+  position: '',
   department: '',
+  address: '',
   role: 'employee',
   status: 'active',
-  password: ''
+  password: '',
+  profileImageDataUrl: null,
+  profileImageFormat: null
 };
 
 export function EmployeesPage({ user }: EmployeesPageProps) {
+  const editPhotoInputRef = useRef<HTMLInputElement | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
   const [selectedEmployee, setSelectedEmployee] = useState<Employee | null>(null);
   const [formState, setFormState] = useState<EmployeeFormState>(emptyFormState);
   const [formError, setFormError] = useState<string | null>(null);
+  const [formSuccess, setFormSuccess] = useState<string | null>(null);
+  const [imageBusy, setImageBusy] = useState(false);
+  const [imageChangedAt, setImageChangedAt] = useState<string | null>(null);
+  const [showCreatePassword, setShowCreatePassword] = useState(false);
 
   const employees = useLiveQuery(() => db.employees.toArray(), []);
   const products = useLiveQuery(() => db.products.toArray(), []);
@@ -56,7 +70,8 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
     return (
       employee.fullName.toLowerCase().includes(term) ||
       employee.email.toLowerCase().includes(term) ||
-      employee.department.toLowerCase().includes(term)
+      (employee.department || '').toLowerCase().includes(term) ||
+      (employee.position || '').toLowerCase().includes(term)
     );
   });
 
@@ -72,6 +87,9 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
   const resetForm = () => {
     setFormState(emptyFormState);
     setFormError(null);
+    setFormSuccess(null);
+    setImageChangedAt(null);
+    setShowCreatePassword(false);
   };
 
   const openAddModal = () => {
@@ -85,18 +103,25 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
       fullName: employee.fullName,
       email: employee.email,
       phone: employee.phone,
+      position: employee.position ?? '',
       department: employee.department,
+      address: employee.address ?? employee.location ?? '',
       role: employee.role,
       status: employee.status,
-      password: ''
+      password: '',
+      profileImageDataUrl: employee.profileImageDataUrl ?? null,
+      profileImageFormat: employee.profileImageFormat ?? null
     });
     setFormError(null);
+    setFormSuccess(null);
+    setImageChangedAt(null);
   };
 
   const handleAddEmployee = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!canManageEmployees) return;
     setFormError(null);
+    setFormSuccess(null);
 
     const normalizedEmail = formState.email.trim().toLowerCase();
     if (!formState.fullName.trim() || !normalizedEmail || !formState.password) {
@@ -125,7 +150,9 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
       fullName: formState.fullName.trim(),
       email: normalizedEmail,
       phone: formState.phone.trim(),
+      position: formState.position.trim(),
       department: formState.department.trim(),
+      address: formState.address.trim(),
       role: formState.role,
       status: formState.status,
       password: formState.password
@@ -136,6 +163,14 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
       return;
     }
 
+    if (formState.profileImageDataUrl) {
+      await db.employees.update(createResult.employeeId, {
+        profileImageDataUrl: formState.profileImageDataUrl,
+        profileImageFormat: formState.profileImageFormat,
+        profileImageUpdatedAt: new Date().toISOString()
+      });
+    }
+
     await logActivity({
       action: 'CREATE',
       entityType: 'employee',
@@ -143,6 +178,10 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
       performedByEmployeeId: user.id,
       details: `Employee created: ${formState.fullName.trim()}`
     });
+
+    if (navigator.onLine && window.api?.sync?.push) {
+      void window.api.sync.push(user.id);
+    }
 
     setShowAddModal(false);
     resetForm();
@@ -152,6 +191,7 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
     event.preventDefault();
     if (!canManageEmployees || !selectedEmployee) return;
     setFormError(null);
+    setFormSuccess(null);
 
     const normalizedEmail = formState.email.trim().toLowerCase();
     if (!formState.fullName.trim() || !normalizedEmail) {
@@ -165,14 +205,28 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
       return;
     }
 
-    await db.employees.update(selectedEmployee.id, {
+    const split = splitFullName(formState.fullName);
+    const payload: Partial<Employee> = {
       fullName: formState.fullName.trim(),
+      firstName: split.firstName,
+      lastName: split.lastName,
       email: normalizedEmail,
       phone: formState.phone.trim(),
+      position: formState.position.trim(),
       department: formState.department.trim(),
+      address: formState.address.trim(),
+      location: formState.address.trim(),
       role: formState.role,
       status: formState.status
-    });
+    };
+
+    if (imageChangedAt) {
+      payload.profileImageDataUrl = formState.profileImageDataUrl;
+      payload.profileImageFormat = formState.profileImageFormat;
+      payload.profileImageUpdatedAt = imageChangedAt;
+    }
+
+    await db.employees.update(selectedEmployee.id, payload);
 
     await logActivity({
       action: 'UPDATE',
@@ -182,7 +236,13 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
       details: `Employee updated: ${formState.fullName.trim()}`
     });
 
+    if (navigator.onLine && window.api?.sync?.push) {
+      void window.api.sync.push(user.id);
+    }
+
     setSelectedEmployee(null);
+    setFormSuccess('Employee updated.');
+    setImageChangedAt(null);
   };
 
   const handleDeleteEmployee = async (employeeId: string, employeeName: string) => {
@@ -203,6 +263,39 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
       performedByEmployeeId: user.id,
       details: `Employee removed: ${employeeName}`
     });
+    if (navigator.onLine && window.api?.sync?.push) {
+      void window.api.sync.push(user.id);
+    }
+  };
+
+  const handleEditImageClick = () => {
+    if (imageBusy) return;
+    editPhotoInputRef.current?.click();
+  };
+
+  const handleEditImageChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      setFormError('Please select a valid image file.');
+      return;
+    }
+    setImageBusy(true);
+    setFormError(null);
+    try {
+      const optimized = await optimizeProfileImage(file);
+      setFormState((prev) => ({
+        ...prev,
+        profileImageDataUrl: optimized.dataUrl,
+        profileImageFormat: optimized.format
+      }));
+      setImageChangedAt(new Date().toISOString());
+    } catch (error: any) {
+      setFormError(error?.message || 'Unable to process profile image.');
+    } finally {
+      setImageBusy(false);
+    }
   };
 
   return (
@@ -236,9 +329,8 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
             className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
           />
         </div>
-        {formError && !showAddModal && !selectedEmployee && (
-          <p className="mt-3 text-sm text-red-600">{formError}</p>
-        )}
+        {formError && !showAddModal && !selectedEmployee && <p className="mt-3 text-sm text-red-600">{formError}</p>}
+        {formSuccess && !showAddModal && !selectedEmployee && <p className="mt-3 text-sm text-emerald-700">{formSuccess}</p>}
       </div>
 
       {filteredEmployees.length === 0 ? (
@@ -256,25 +348,24 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
               <div key={employee.id} className="bg-white rounded-xl border border-gray-200 p-6 hover:shadow-lg transition">
                 <div className="flex items-start justify-between mb-4">
                   <div className="flex items-center gap-3">
-                    <div className="w-12 h-12 bg-indigo-100 rounded-full flex items-center justify-center">
-                      <span className="font-bold text-indigo-600">
-                        {employee.fullName
-                          .split(' ')
-                          .filter(Boolean)
-                          .map((n) => n[0])
-                          .join('')}
-                      </span>
+                    <div className="w-12 h-12 bg-indigo-100 rounded-full flex items-center justify-center overflow-hidden">
+                      {employee.profileImageDataUrl ? (
+                        <img
+                          src={employee.profileImageDataUrl}
+                          alt={`${employee.fullName} profile`}
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <span className="font-bold text-indigo-600">{getInitials(employee.fullName)}</span>
+                      )}
                     </div>
                     <div>
                       <p className="font-medium text-gray-900">{employee.fullName}</p>
-                      <p className="text-sm text-gray-600">{employee.department || 'No department set'}</p>
+                      <p className="text-sm text-gray-600">{employee.position || employee.department || 'No position set'}</p>
                     </div>
                   </div>
                   {canManageEmployees && (
-                    <button
-                      onClick={() => openEditModal(employee)}
-                      className="p-2 hover:bg-gray-100 rounded-lg transition"
-                    >
+                    <button onClick={() => openEditModal(employee)} className="p-2 hover:bg-gray-100 rounded-lg transition">
                       <Edit className="w-4 h-4 text-gray-600" />
                     </button>
                   )}
@@ -292,9 +383,7 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
                 </div>
 
                 <div className="flex items-center justify-between pt-4 border-t border-gray-200">
-                  <span
-                    className={`px-3 py-1 rounded-full text-xs font-medium flex items-center gap-1 ${roleBadge.color}`}
-                  >
+                  <span className={`px-3 py-1 rounded-full text-xs font-medium flex items-center gap-1 ${roleBadge.color}`}>
                     <RoleIcon className="w-3 h-3" />
                     {roleBadge.label}
                   </span>
@@ -353,7 +442,7 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Phone</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Contact Number</label>
                   <input
                     type="tel"
                     value={formState.phone}
@@ -362,11 +451,31 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
                   />
                 </div>
                 <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Position</label>
+                  <input
+                    type="text"
+                    value={formState.position}
+                    onChange={(e) => setFormState({ ...formState, position: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">Department</label>
                   <input
                     type="text"
                     value={formState.department}
                     onChange={(e) => setFormState({ ...formState, department: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Address</label>
+                  <input
+                    type="text"
+                    value={formState.address}
+                    onChange={(e) => setFormState({ ...formState, address: e.target.value })}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
                   />
                 </div>
@@ -387,9 +496,7 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
                   <label className="block text-sm font-medium text-gray-700 mb-2">Status</label>
                   <select
                     value={formState.status}
-                    onChange={(e) =>
-                      setFormState({ ...formState, status: e.target.value as 'active' | 'inactive' })
-                    }
+                    onChange={(e) => setFormState({ ...formState, status: e.target.value as 'active' | 'inactive' })}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
                   >
                     <option value="active">Active</option>
@@ -399,13 +506,23 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Password</label>
-                <input
-                  type="password"
-                  value={formState.password}
-                  onChange={(e) => setFormState({ ...formState, password: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
-                  required
-                />
+                <div className="flex items-center border border-gray-300 rounded-lg focus-within:ring-2 focus-within:ring-indigo-500 focus-within:border-transparent">
+                  <input
+                    type={showCreatePassword ? 'text' : 'password'}
+                    value={formState.password}
+                    onChange={(e) => setFormState({ ...formState, password: e.target.value })}
+                    className="w-full flex-1 bg-transparent px-3 py-2 outline-none"
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowCreatePassword((prev) => !prev)}
+                    className="mr-2 inline-flex h-8 w-8 items-center justify-center text-gray-500 hover:text-gray-700"
+                    aria-label={showCreatePassword ? 'Hide password' : 'Show password'}
+                  >
+                    {showCreatePassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
               </div>
               {formError && <p className="text-sm text-red-600">{formError}</p>}
               <div className="flex justify-end gap-3 pt-4">
@@ -435,6 +552,43 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
               </button>
             </div>
             <form className="space-y-4" onSubmit={handleEditEmployee}>
+              <div className="flex items-center gap-3 pb-2 border-b border-gray-100">
+                <div className="w-14 h-14 bg-indigo-100 rounded-full flex items-center justify-center overflow-hidden">
+                  {formState.profileImageDataUrl ? (
+                    <img src={formState.profileImageDataUrl} alt="Employee profile" className="w-full h-full object-cover" />
+                  ) : (
+                    <span className="font-bold text-indigo-600">{getInitials(formState.fullName)}</span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleEditImageClick}
+                    disabled={imageBusy}
+                    className="px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50 transition disabled:opacity-60 flex items-center gap-2"
+                  >
+                    <Camera className="w-4 h-4" />
+                    {imageBusy ? 'Processing...' : 'Change Photo'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFormState((prev) => ({ ...prev, profileImageDataUrl: null, profileImageFormat: null }));
+                      setImageChangedAt(new Date().toISOString());
+                    }}
+                    className="px-3 py-2 border border-red-200 text-red-600 rounded-lg text-sm hover:bg-red-50 transition"
+                  >
+                    Remove Photo
+                  </button>
+                  <input
+                    ref={editPhotoInputRef}
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,image/jpg"
+                    hidden
+                    onChange={handleEditImageChange}
+                  />
+                </div>
+              </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">Full Name</label>
@@ -459,7 +613,7 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Phone</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Contact Number</label>
                   <input
                     type="tel"
                     value={formState.phone}
@@ -468,11 +622,31 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
                   />
                 </div>
                 <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Position</label>
+                  <input
+                    type="text"
+                    value={formState.position}
+                    onChange={(e) => setFormState({ ...formState, position: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">Department</label>
                   <input
                     type="text"
                     value={formState.department}
                     onChange={(e) => setFormState({ ...formState, department: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Address</label>
+                  <input
+                    type="text"
+                    value={formState.address}
+                    onChange={(e) => setFormState({ ...formState, address: e.target.value })}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
                   />
                 </div>
@@ -493,9 +667,7 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
                   <label className="block text-sm font-medium text-gray-700 mb-2">Status</label>
                   <select
                     value={formState.status}
-                    onChange={(e) =>
-                      setFormState({ ...formState, status: e.target.value as 'active' | 'inactive' })
-                    }
+                    onChange={(e) => setFormState({ ...formState, status: e.target.value as 'active' | 'inactive' })}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
                   >
                     <option value="active">Active</option>

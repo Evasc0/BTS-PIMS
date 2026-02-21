@@ -341,6 +341,33 @@ export const supabaseAuth = {
     };
   },
 
+  async updateUserPassword(accessToken: string, newPassword: string): Promise<void> {
+    if (!isConfigured()) {
+      throw new Error(
+        'Supabase auth is not configured. Set SUPABASE_URL and SUPABASE_ANON_KEY (or SUPABASE_PUBLISHABLE_KEY).'
+      );
+    }
+    if (!accessToken) {
+      throw new Error('Missing authenticated access token for password update.');
+    }
+    const password = String(newPassword || '');
+    if (!password) {
+      throw new Error('New password is required.');
+    }
+
+    const response = await authRequest('user', {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${accessToken}`
+      },
+      body: JSON.stringify({ password })
+    });
+
+    if (!response.ok) {
+      throw new Error(await parseSupabaseError(response));
+    }
+  },
+
   async registerUserWithPassword(input: {
     email: string;
     password: string;

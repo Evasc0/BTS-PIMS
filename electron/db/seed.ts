@@ -1,6 +1,5 @@
 import crypto from 'crypto';
 import type Database from 'better-sqlite3';
-import { encryptLocalSecret } from '../auth/localSecrets';
 
 export const DEFAULT_ADMIN_CREDENTIALS = {
   email: 'btsadmin@gmail.com',
@@ -71,7 +70,7 @@ export function seedIfNeeded(db: Database.Database): void {
       supabase_user_id: null,
       auth_sync_status: 'pending_upload',
       auth_last_error: null,
-      pending_password_enc: encryptLocalSecret(DEFAULT_ADMIN_CREDENTIALS.password),
+      pending_password_enc: null,
       provisioned_at: null,
       last_verified_at: null,
       verification_expires_at: null,

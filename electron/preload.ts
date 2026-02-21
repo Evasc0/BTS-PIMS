@@ -61,13 +61,17 @@ contextBridge.exposeInMainWorld('api', {
       fullName: string;
       email: string;
       phone?: string;
+      position?: string;
       department?: string;
+      address?: string;
       role: 'system_admin' | 'employee';
       status: 'active' | 'inactive';
       password: string;
       location?: string;
       language?: string;
     }) => ipcRenderer.invoke('auth:create-user', payload),
+    changePassword: (payload: { userId: string; currentPassword: string; newPassword: string }) =>
+      ipcRenderer.invoke('auth:change-password', payload),
     logout: (userId: string) => ipcRenderer.invoke('auth:logout', userId)
   },
   migration: {
