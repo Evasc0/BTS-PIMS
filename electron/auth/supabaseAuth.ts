@@ -74,6 +74,15 @@ const buildRestHeaders = (accessToken?: string): Record<string, string> => {
   };
 };
 
+const buildServiceRoleHeaders = (): Record<string, string> => {
+  const serviceRoleKey = getSupabaseServiceRoleKey();
+  return {
+    apikey: serviceRoleKey,
+    Authorization: `Bearer ${serviceRoleKey}`,
+    'content-type': 'application/json'
+  };
+};
+
 const authRequest = async (pathAndQuery: string, init: RequestInit): Promise<Response> => {
   if (!isConfigured()) {
     throw new Error(
@@ -85,6 +94,25 @@ const authRequest = async (pathAndQuery: string, init: RequestInit): Promise<Res
     ...init,
     headers: {
       ...buildAuthHeaders(),
+      ...(init.headers as Record<string, string> | undefined)
+    }
+  });
+};
+
+const restRequestAsServiceRole = async (pathAndQuery: string, init: RequestInit): Promise<Response> => {
+  const supabaseUrl = getSupabaseUrl();
+  if (!supabaseUrl) {
+    throw new Error('Supabase auth is not configured. Set SUPABASE_URL first.');
+  }
+  const serviceRoleKey = getSupabaseServiceRoleKey();
+  if (!serviceRoleKey) {
+    throw new Error('SUPABASE_SERVICE_ROLE_KEY is required for service-role app_users updates.');
+  }
+
+  return fetch(`${supabaseUrl}/rest/v1/${pathAndQuery}`, {
+    ...init,
+    headers: {
+      ...buildServiceRoleHeaders(),
       ...(init.headers as Record<string, string> | undefined)
     }
   });
@@ -172,6 +200,26 @@ const upsertAppUser = async (
     },
     accessToken
   );
+
+  if (!response.ok) {
+    throw new Error(await parseSupabaseError(response));
+  }
+};
+
+const upsertAppUserWithServiceRole = async (payload: {
+  user_id: string;
+  employee_id: string;
+  email: string;
+  role: EmployeeRole;
+  account_status: EmployeeStatus;
+}): Promise<void> => {
+  const response = await restRequestAsServiceRole(`${getAppUsersTable()}?on_conflict=user_id`, {
+    method: 'POST',
+    headers: {
+      Prefer: 'resolution=merge-duplicates,return=minimal'
+    },
+    body: JSON.stringify([{ ...payload, updated_at: nowIso() }])
+  });
 
   if (!response.ok) {
     throw new Error(await parseSupabaseError(response));
@@ -340,6 +388,35 @@ export const supabaseAuth = {
       refreshToken: nextRefreshToken,
       expiresAt
     };
+  },
+
+  async getCurrentUser(accessToken: string): Promise<{ id: string; email: string | null }> {
+    if (!isConfigured()) {
+      throw new Error(
+        'Supabase auth is not configured. Set SUPABASE_URL and SUPABASE_ANON_KEY (or SUPABASE_PUBLISHABLE_KEY).'
+      );
+    }
+    if (!accessToken) {
+      throw new Error('Missing authenticated access token for current-user lookup.');
+    }
+
+    const response = await authRequest('user', {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${accessToken}`
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(await parseSupabaseError(response));
+    }
+
+    const payload = (await response.json()) as { id?: string; email?: string | null };
+    const id = String(payload?.id || '').trim();
+    if (!id) {
+      throw new Error('Supabase user lookup returned no user id.');
+    }
+    return { id, email: payload?.email ?? null };
   },
 
   async updateUserPassword(accessToken: string, newPassword: string): Promise<void> {
@@ -530,12 +607,31 @@ export const supabaseAuth = {
     role: EmployeeRole;
     status: EmployeeStatus;
   }): Promise<void> {
-    await upsertAppUser(input.adminAccessToken, {
+    const payload = {
       user_id: input.supabaseUserId,
       employee_id: input.employeeId,
       email: input.email.trim().toLowerCase(),
       role: input.role,
       account_status: input.status
-    });
+    };
+
+    try {
+      await upsertAppUser(input.adminAccessToken, payload);
+      return;
+    } catch (scopedError: unknown) {
+      if (!getSupabaseServiceRoleKey()) {
+        throw scopedError instanceof Error ? scopedError : new Error(String(scopedError || 'app_users upsert failed.'));
+      }
+
+      try {
+        await upsertAppUserWithServiceRole(payload);
+        return;
+      } catch (serviceRoleError: unknown) {
+        const scopedMessage = scopedError instanceof Error ? scopedError.message : String(scopedError || 'unknown');
+        const serviceMessage =
+          serviceRoleError instanceof Error ? serviceRoleError.message : String(serviceRoleError || 'unknown');
+        throw new Error(`app_users upsert failed (scoped + service-role): ${scopedMessage}; ${serviceMessage}`);
+      }
+    }
   }
 };

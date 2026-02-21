@@ -956,11 +956,26 @@ export const authService = {
 
       await supabaseAuth.updateUserEmail(refreshed.accessToken, normalizedEmail);
 
-      if (employee.supabase_user_id) {
+      let resolvedSupabaseUserId = String(employee.supabase_user_id || '').trim();
+      if (!resolvedSupabaseUserId) {
+        try {
+          const currentUser = await supabaseAuth.getCurrentUser(refreshed.accessToken);
+          resolvedSupabaseUserId = currentUser.id;
+          if (resolvedSupabaseUserId) {
+            db
+              .prepare('UPDATE employees SET supabase_user_id = ? WHERE id = ? AND deleted_at IS NULL')
+              .run(resolvedSupabaseUserId, employee.id);
+          }
+        } catch {
+          resolvedSupabaseUserId = '';
+        }
+      }
+
+      if (resolvedSupabaseUserId) {
         try {
           await supabaseAuth.upsertAppUserStatus({
             adminAccessToken: refreshed.accessToken,
-            supabaseUserId: employee.supabase_user_id,
+            supabaseUserId: resolvedSupabaseUserId,
             employeeId: employee.id,
             email: normalizedEmail,
             role: normalizeRole(employee.role),
