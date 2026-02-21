@@ -106,6 +106,17 @@ const normalizeStatus = (value: unknown): EmployeeStatus => {
   return 'active';
 };
 
+const canUseLocalBootstrapLogin = (employee: EmployeeRow): boolean => {
+  if (!employee) return false;
+  if (normalizeStatus(employee.status) !== 'active') return false;
+  if (normalizeRole(employee.role) !== 'system_admin') return false;
+  if (String(employee.supabase_user_id || '').trim()) return false;
+  const syncStatus = String(employee.auth_sync_status || '')
+    .trim()
+    .toLowerCase();
+  return syncStatus === '' || syncStatus === 'pending_upload' || syncStatus === 'failed' || syncStatus === 'not_required';
+};
+
 const hashWithSalt = (password: string, salt: string): string =>
   createHash('sha256')
     .update(`${salt}:${password}`)
@@ -684,6 +695,27 @@ export const authService = {
     }
 
     if (needsOnline) {
+      if (canUseLocalBootstrapLogin(employee)) {
+        const verifiedAt = nowIso();
+        const expiresAt = new Date(Date.now() + AUTH_VERIFICATION_DAYS * DAY_MS).toISOString();
+        updateAuthVerificationCache(db, {
+          employeeId: employee.id,
+          role: normalizeRole(employee.role),
+          status: normalizeStatus(employee.status),
+          authSyncStatus: 'pending_upload',
+          authLastError: employee.auth_last_error || null,
+          lastVerifiedAt: verifiedAt,
+          verificationExpiresAt: expiresAt,
+          hashedSessionToken: null
+        });
+        return {
+          success: true,
+          userId: employee.id,
+          verifiedOnline: false,
+          verificationExpiresAt: expiresAt,
+          warning: 'Logged in with local bootstrap admin account. Connect online to complete Supabase verification.'
+        };
+      }
       return {
         success: false,
         error: 'Internet connection required to verify your account.',
