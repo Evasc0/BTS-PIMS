@@ -802,7 +802,7 @@ export const authService = {
     return emptyProvisioningSummary();
   },
 
-  async refreshSession(userId: string): Promise<RefreshSessionResult> {
+  async refreshSession(userId: string, options?: { forceRefresh?: boolean }): Promise<RefreshSessionResult> {
     const db = dataStore.getDb();
     const employee = getEmployeeById(db, userId);
     if (!employee) {
@@ -818,7 +818,8 @@ export const authService = {
       };
     }
 
-    const cachedToken = getCachedSessionToken(userId);
+    const forceRefresh = Boolean(options?.forceRefresh);
+    const cachedToken = forceRefresh ? null : getCachedSessionToken(userId);
     if (cachedToken) {
       return {
         success: true,
@@ -944,7 +945,7 @@ export const authService = {
     }
 
     try {
-      const refreshed = await authService.refreshSession(employee.id);
+      const refreshed = await authService.refreshSession(employee.id, { forceRefresh: true });
       if (!refreshed.success) {
         const failure = refreshed as Extract<RefreshSessionResult, { success: false }>;
         return {
@@ -988,6 +989,13 @@ export const authService = {
       return { success: true };
     } catch (error: unknown) {
       const message = normalizeLoginError(error);
+      if (message.toLowerCase().includes('user from sub claim in jwt does not exist')) {
+        authService.clearLocalSessionCache(employee.id);
+        return {
+          success: false,
+          error: 'Session became invalid after email update. Please sign in again online, then retry.'
+        };
+      }
       if (isConnectivityError(message)) {
         return {
           success: false,
@@ -1039,19 +1047,16 @@ export const authService = {
       };
     }
 
-    let adminAccessToken = getCachedSessionToken(admin.id);
-    if (!adminAccessToken) {
-      const refreshed = await refreshCachedSessionToken(admin.id);
-      if (!refreshed.success) {
-        const failure = refreshed as Extract<RefreshSessionResult, { success: false }>;
-        return {
-          success: false,
-          error: failure.error || 'Internet connection required to update employee email.',
-          requiresInternet: failure.requiresInternet
-        };
-      }
-      adminAccessToken = refreshed.accessToken;
+    const refreshedAdminSession = await authService.refreshSession(admin.id, { forceRefresh: true });
+    if (!refreshedAdminSession.success) {
+      const failure = refreshedAdminSession as Extract<RefreshSessionResult, { success: false }>;
+      return {
+        success: false,
+        error: failure.error || 'Internet connection required to update employee email.',
+        requiresInternet: failure.requiresInternet
+      };
     }
+    const adminAccessToken = refreshedAdminSession.accessToken;
 
     try {
       await supabaseAuth.adminUpdateUserEmail({

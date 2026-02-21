@@ -1173,6 +1173,15 @@ const parseSupabaseError = (raw: string): { code?: string; message: string } => 
   }
 };
 
+const isRetryableAuthError = (status: number, parsed: { code?: string; message: string }): boolean => {
+  const message = String(parsed.message || '').toLowerCase();
+  if (status === 401 || status === 403) return true;
+  if (message.includes('user from sub claim in jwt does not exist')) return true;
+  if (message.includes('jwt')) return true;
+  if (parsed.code === 'PGRST301') return true;
+  return false;
+};
+
 const ensureScopedAccessToken = async (): Promise<string> => {
   if (scopedSupabaseAccessToken) return scopedSupabaseAccessToken;
   if (!scopedActorUserId) {
@@ -1368,27 +1377,45 @@ const supabaseRequest = async (pathAndQuery: string, init?: RequestInit): Promis
   const supabaseUrl = getSupabaseUrl();
   const accessToken = await ensureScopedAccessToken();
 
-  const headers: Record<string, string> = {
-    apikey: supabaseAnonKey,
-    Authorization: `Bearer ${accessToken}`
+  const executeRequest = async (token: string): Promise<Response> => {
+    const headers: Record<string, string> = {
+      apikey: supabaseAnonKey,
+      Authorization: `Bearer ${token}`
+    };
+    if (init?.body) {
+      headers['content-type'] = 'application/json';
+      headers.Prefer = 'return=minimal';
+    }
+    return fetch(`${supabaseUrl}/rest/v1/${pathAndQuery}`, {
+      ...init,
+      headers: {
+        ...headers,
+        ...(init?.headers as Record<string, string> | undefined)
+      }
+    });
   };
 
-  if (init?.body) {
-    headers['content-type'] = 'application/json';
-    headers.Prefer = 'return=minimal';
-  }
-
-  const response = await fetch(`${supabaseUrl}/rest/v1/${pathAndQuery}`, {
-    ...init,
-    headers: {
-      ...headers,
-      ...(init?.headers as Record<string, string> | undefined)
-    }
-  });
-
+  let response = await executeRequest(accessToken);
   if (!response.ok) {
-    const raw = (await response.text()) || `Supabase request failed with status ${response.status}`;
-    const parsed = parseSupabaseError(raw);
+    let raw = (await response.text()) || `Supabase request failed with status ${response.status}`;
+    let parsed = parseSupabaseError(raw);
+
+    if (scopedActorUserId && isRetryableAuthError(response.status, parsed)) {
+      const refreshed = await authService.refreshSession(scopedActorUserId, { forceRefresh: true });
+      if (!refreshed.success) {
+        const failure = refreshed as { success: false; error: string };
+        throw new Error(failure.error || parsed.message || raw);
+      }
+      setSyncActorAccessToken(scopedActorUserId, refreshed.accessToken, refreshed.expiresAt);
+      scopedSupabaseAccessToken = refreshed.accessToken;
+      response = await executeRequest(refreshed.accessToken);
+      if (response.ok) {
+        return response;
+      }
+      raw = (await response.text()) || `Supabase request failed with status ${response.status}`;
+      parsed = parseSupabaseError(raw);
+    }
+
     if (parsed.code === '42501' && pathAndQuery.startsWith(getAdminQueueTable())) {
       throw new Error(
         'RLS denied push to admin queue. Ensure app_users has this Supabase user as active system_admin, then retry.'
