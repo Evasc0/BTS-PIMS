@@ -650,7 +650,89 @@ export const authService = {
             });
             return applyOnlineLogin(db, employee, online);
           } catch (bootstrapError: unknown) {
-            return { success: false, error: normalizeLoginError(bootstrapError) };
+            const bootstrapMessage = normalizeLoginError(bootstrapError);
+
+            if (supabaseAuth.isServiceRoleConfigured()) {
+              try {
+                const created = await supabaseAuth.adminCreateUser({
+                  email,
+                  password,
+                  employeeId: employee.id,
+                  role: 'system_admin',
+                  status: normalizeStatus(employee.status)
+                });
+                const online = await supabaseAuth.onlineLogin(email, password);
+                try {
+                  await supabaseAuth.upsertAppUserStatus({
+                    adminAccessToken: online.accessToken,
+                    supabaseUserId: created.supabaseUserId || online.supabaseUserId,
+                    employeeId: employee.id,
+                    email,
+                    role: 'system_admin',
+                    status: normalizeStatus(employee.status)
+                  });
+                } catch {
+                  // Metadata upsert is best-effort during bootstrap.
+                }
+                employee = upsertLocalEmployeeFromOnline(db, {
+                  email,
+                  password,
+                  role: 'system_admin',
+                  status: normalizeStatus(employee.status),
+                  supabaseUserId: online.supabaseUserId,
+                  profileEmployeeId: employee.id
+                });
+                return applyOnlineLogin(db, employee, online);
+              } catch (serviceBootstrapError: unknown) {
+                if (localPasswordValid && canUseLocalBootstrapLogin(employee)) {
+                  const verifiedAt = nowIso();
+                  const expiresAt = new Date(Date.now() + AUTH_VERIFICATION_DAYS * DAY_MS).toISOString();
+                  updateAuthVerificationCache(db, {
+                    employeeId: employee.id,
+                    role: normalizeRole(employee.role),
+                    status: normalizeStatus(employee.status),
+                    authSyncStatus: 'pending_upload',
+                    authLastError: normalizeLoginError(serviceBootstrapError),
+                    lastVerifiedAt: verifiedAt,
+                    verificationExpiresAt: expiresAt,
+                    hashedSessionToken: null
+                  });
+                  return {
+                    success: true,
+                    userId: employee.id,
+                    verifiedOnline: false,
+                    verificationExpiresAt: expiresAt,
+                    warning:
+                      'Logged in locally, but Supabase Auth bootstrap failed. Configure service-role and retry sync.'
+                  };
+                }
+                return { success: false, error: normalizeLoginError(serviceBootstrapError) };
+              }
+            }
+
+            if (localPasswordValid && canUseLocalBootstrapLogin(employee)) {
+              const verifiedAt = nowIso();
+              const expiresAt = new Date(Date.now() + AUTH_VERIFICATION_DAYS * DAY_MS).toISOString();
+              updateAuthVerificationCache(db, {
+                employeeId: employee.id,
+                role: normalizeRole(employee.role),
+                status: normalizeStatus(employee.status),
+                authSyncStatus: 'pending_upload',
+                authLastError: bootstrapMessage,
+                lastVerifiedAt: verifiedAt,
+                verificationExpiresAt: expiresAt,
+                hashedSessionToken: null
+              });
+              return {
+                success: true,
+                userId: employee.id,
+                verifiedOnline: false,
+                verificationExpiresAt: expiresAt,
+                warning: 'Logged in locally. Supabase Auth bootstrap is pending.'
+              };
+            }
+
+            return { success: false, error: bootstrapMessage };
           }
         }
 

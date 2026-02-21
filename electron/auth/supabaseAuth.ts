@@ -286,6 +286,7 @@ const signUpWithPassword = async (
 
 export const supabaseAuth = {
   isConfigured,
+  isServiceRoleConfigured: (): boolean => Boolean(getSupabaseServiceRoleKey()),
 
   async onlineLogin(email: string, password: string): Promise<OnlineLoginResult> {
     if (!isConfigured()) {
@@ -537,6 +538,63 @@ export const supabaseAuth = {
     if (!response.ok) {
       throw new Error(await parseSupabaseError(response));
     }
+  },
+
+  async adminCreateUser(input: {
+    email: string;
+    password: string;
+    employeeId: string;
+    role: EmployeeRole;
+    status: EmployeeStatus;
+  }): Promise<{ supabaseUserId: string }> {
+    const supabaseUrl = getSupabaseUrl();
+    if (!supabaseUrl) {
+      throw new Error('Supabase auth is not configured. Set SUPABASE_URL first.');
+    }
+    const serviceRoleKey = getSupabaseServiceRoleKey();
+    if (!serviceRoleKey) {
+      throw new Error('SUPABASE_SERVICE_ROLE_KEY is required to create users via service role.');
+    }
+
+    const email = String(input.email || '').trim().toLowerCase();
+    const password = String(input.password || '');
+    if (!email) {
+      throw new Error('Email is required.');
+    }
+    if (!password) {
+      throw new Error('Password is required.');
+    }
+
+    const response = await fetch(`${supabaseUrl}/auth/v1/admin/users`, {
+      method: 'POST',
+      headers: {
+        apikey: serviceRoleKey,
+        Authorization: `Bearer ${serviceRoleKey}`,
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({
+        email,
+        password,
+        email_confirm: true,
+        user_metadata: {
+          employee_id: input.employeeId,
+          app_role: input.role,
+          account_status: input.status
+        }
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(await parseSupabaseError(response));
+    }
+
+    const payload = (await response.json()) as { id?: string; user?: { id?: string } };
+    const supabaseUserId = String(payload?.id || payload?.user?.id || '').trim();
+    if (!supabaseUserId) {
+      throw new Error('Supabase admin user creation returned no user id.');
+    }
+
+    return { supabaseUserId };
   },
 
   async registerUserWithPassword(input: {
