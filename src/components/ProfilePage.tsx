@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { UserCircle, Mail, Phone, MapPin, Calendar, Save, Camera, Key } from 'lucide-react';
+import { Mail, Phone, MapPin, Calendar, Save, Camera, Key, Sun, Moon } from 'lucide-react';
 import { useLiveQuery } from '../lib/useLiveQuery';
 import type { Employee } from '../lib/types';
 import { db } from '../lib/db';
@@ -7,6 +7,12 @@ import { createPasswordHash } from '../lib/security';
 import { formatDate } from '../lib/utils';
 import { logActivity } from '../lib/activity';
 import { useAuth } from '../lib/auth';
+import {
+  applyThemePreference,
+  getStoredThemePreference,
+  setStoredThemePreference,
+  type ThemePreference
+} from '../lib/theme';
 
 interface ProfilePageProps {
   user: Employee;
@@ -16,6 +22,7 @@ export function ProfilePage({ user }: ProfilePageProps) {
   const { refreshUser } = useAuth();
   const [isEditing, setIsEditing] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [themePreference, setThemePreference] = useState<ThemePreference>(() => getStoredThemePreference(user.id));
   const [profileState, setProfileState] = useState({
     firstName: '',
     lastName: '',
@@ -23,12 +30,6 @@ export function ProfilePage({ user }: ProfilePageProps) {
     phone: '',
     department: '',
     location: ''
-  });
-  const [preferenceState, setPreferenceState] = useState({
-    emailNotifications: false,
-    lowStockAlerts: false,
-    language: 'English',
-    twoFactorEnabled: false
   });
 
   const products = useLiveQuery(() => db.products.toArray(), []);
@@ -54,12 +55,7 @@ export function ProfilePage({ user }: ProfilePageProps) {
       department: user.department,
       location: user.location
     });
-    setPreferenceState({
-      emailNotifications: !!user.emailNotifications,
-      lowStockAlerts: !!user.lowStockAlerts,
-      language: user.language || 'English',
-      twoFactorEnabled: !!user.twoFactorEnabled
-    });
+    setThemePreference(getStoredThemePreference(user.id));
   }, [user]);
 
   const handleSave = async () => {
@@ -82,11 +78,7 @@ export function ProfilePage({ user }: ProfilePageProps) {
       email: normalizedEmail,
       phone: profileState.phone.trim(),
       department: profileState.department.trim(),
-      location: profileState.location.trim(),
-      emailNotifications: preferenceState.emailNotifications,
-      lowStockAlerts: preferenceState.lowStockAlerts,
-      language: preferenceState.language,
-      twoFactorEnabled: preferenceState.twoFactorEnabled
+      location: profileState.location.trim()
     });
 
     await logActivity({
@@ -132,6 +124,12 @@ export function ProfilePage({ user }: ProfilePageProps) {
 
   const handleViewSessions = () => {
     window.alert('Active session: current browser session.');
+  };
+
+  const handleThemeChange = (theme: ThemePreference) => {
+    const normalizedTheme = setStoredThemePreference(theme, user.id);
+    setThemePreference(normalizedTheme);
+    applyThemePreference(normalizedTheme);
   };
 
   return (
@@ -327,24 +325,6 @@ export function ProfilePage({ user }: ProfilePageProps) {
                 </button>
               </div>
 
-              <div className="flex items-center justify-between py-4 border-b border-gray-100">
-                <div>
-                  <p className="font-medium text-gray-900">Two-Factor Authentication</p>
-                  <p className="text-sm text-gray-600">Add an extra layer of security to your account</p>
-                </div>
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={preferenceState.twoFactorEnabled}
-                    onChange={(e) =>
-                      setPreferenceState({ ...preferenceState, twoFactorEnabled: e.target.checked })
-                    }
-                    className="sr-only peer"
-                  />
-                  <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-indigo-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
-                </label>
-              </div>
-
               <div className="flex items-center justify-between py-4">
                 <div>
                   <p className="font-medium text-gray-900">Active Sessions</p>
@@ -364,64 +344,33 @@ export function ProfilePage({ user }: ProfilePageProps) {
             <h2 className="font-bold text-gray-900 mb-6">Preferences</h2>
 
             <div className="space-y-4">
-              <div className="flex items-center justify-between py-3">
-                <div>
-                  <p className="font-medium text-gray-900">Email Notifications</p>
-                  <p className="text-sm text-gray-600">Receive email updates about your activity</p>
+              <div className="py-3">
+                <p className="font-medium text-gray-900 mb-1">Theme Mode</p>
+                <p className="text-sm text-gray-600 mb-3">Choose how the interface looks for your account.</p>
+                <div className="inline-flex rounded-lg border border-gray-200 p-1 gap-1">
+                  <button
+                    onClick={() => handleThemeChange('light')}
+                    className={`px-3 py-2 rounded-md text-sm transition flex items-center gap-2 ${
+                      themePreference === 'light'
+                        ? 'bg-indigo-600 text-white'
+                        : 'text-gray-700 hover:bg-gray-100'
+                    }`}
+                  >
+                    <Sun className="w-4 h-4" />
+                    Light
+                  </button>
+                  <button
+                    onClick={() => handleThemeChange('dark')}
+                    className={`px-3 py-2 rounded-md text-sm transition flex items-center gap-2 ${
+                      themePreference === 'dark'
+                        ? 'bg-indigo-600 text-white'
+                        : 'text-gray-700 hover:bg-gray-100'
+                    }`}
+                  >
+                    <Moon className="w-4 h-4" />
+                    Dark
+                  </button>
                 </div>
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={preferenceState.emailNotifications}
-                    onChange={(e) =>
-                      setPreferenceState({ ...preferenceState, emailNotifications: e.target.checked })
-                    }
-                    className="sr-only peer"
-                  />
-                  <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-indigo-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
-                </label>
-              </div>
-
-              <div className="flex items-center justify-between py-3">
-                <div>
-                  <p className="font-medium text-gray-900">Low Stock Alerts</p>
-                  <p className="text-sm text-gray-600">Get notified when assigned products are low</p>
-                </div>
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={preferenceState.lowStockAlerts}
-                    onChange={(e) =>
-                      setPreferenceState({ ...preferenceState, lowStockAlerts: e.target.checked })
-                    }
-                    className="sr-only peer"
-                  />
-                  <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-indigo-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
-                </label>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Language</label>
-                <select
-                  value={preferenceState.language}
-                  onChange={(e) => setPreferenceState({ ...preferenceState, language: e.target.value })}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
-                >
-                  <option>English</option>
-                  <option>Spanish</option>
-                  <option>French</option>
-                  <option>German</option>
-                </select>
-              </div>
-
-              <div className="pt-4">
-                <button
-                  onClick={handleSave}
-                  className="px-6 py-3 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition flex items-center gap-2"
-                >
-                  <Save className="w-5 h-5" />
-                  Save Preferences
-                </button>
               </div>
             </div>
           </div>

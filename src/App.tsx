@@ -11,6 +11,7 @@ import { ProfilePage } from './components/ProfilePage';
 import { Sidebar } from './components/Sidebar';
 import { useAuth } from './lib/auth';
 import type { EmployeeRole } from './lib/types';
+import { applyThemePreference, getStoredThemePreference } from './lib/theme';
 
 export default function App() {
   const { currentUser, loading, initError, logout, syncNotice, refreshAssignedUpdates, clearSyncNotice } = useAuth();
@@ -37,6 +38,10 @@ export default function App() {
       setCurrentPage('dashboard');
     }
   }, [currentPage, currentUser, pagePermissions]);
+
+  useEffect(() => {
+    applyThemePreference(getStoredThemePreference(currentUser?.id));
+  }, [currentUser?.id]);
 
   if (loading) {
     return (
