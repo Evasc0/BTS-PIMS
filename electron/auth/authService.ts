@@ -1069,20 +1069,34 @@ export const authService = {
         };
       }
 
-      await supabaseAuth.updateUserEmail(refreshed.accessToken, normalizedEmail);
-
       let resolvedSupabaseUserId = String(employee.supabase_user_id || '').trim();
       if (!resolvedSupabaseUserId) {
-        try {
-          const currentUser = await supabaseAuth.getCurrentUser(refreshed.accessToken);
-          resolvedSupabaseUserId = currentUser.id;
-          if (resolvedSupabaseUserId) {
-            db
-              .prepare('UPDATE employees SET supabase_user_id = ? WHERE id = ? AND deleted_at IS NULL')
-              .run(resolvedSupabaseUserId, employee.id);
-          }
-        } catch {
-          resolvedSupabaseUserId = '';
+        const currentUser = await supabaseAuth.getCurrentUser(refreshed.accessToken);
+        resolvedSupabaseUserId = currentUser.id;
+        if (resolvedSupabaseUserId) {
+          db
+            .prepare('UPDATE employees SET supabase_user_id = ? WHERE id = ? AND deleted_at IS NULL')
+            .run(resolvedSupabaseUserId, employee.id);
+        }
+      }
+
+      // Prefer service-role admin update for immediate Auth email replacement (no pending email-change state).
+      if (resolvedSupabaseUserId && supabaseAuth.isServiceRoleConfigured()) {
+        await supabaseAuth.adminUpdateUserEmail({
+          supabaseUserId: resolvedSupabaseUserId,
+          newEmail: normalizedEmail,
+          confirmEmail: true
+        });
+      } else {
+        await supabaseAuth.updateUserEmail(refreshed.accessToken, normalizedEmail);
+        const currentUser = await supabaseAuth.getCurrentUser(refreshed.accessToken);
+        const effectiveEmail = String(currentUser.email || '').trim().toLowerCase();
+        if (effectiveEmail !== normalizedEmail) {
+          return {
+            success: false,
+            error:
+              'Supabase did not apply the new email yet. Confirm the email change first, or configure SUPABASE_SERVICE_ROLE_KEY for immediate admin-managed updates.'
+          };
         }
       }
 
@@ -1100,6 +1114,7 @@ export const authService = {
           // Email update already succeeded in auth; keep app_users upsert best-effort.
         }
       }
+
       return { success: true };
     } catch (error: unknown) {
       const message = normalizeLoginError(error);
@@ -1175,7 +1190,8 @@ export const authService = {
     try {
       await supabaseAuth.adminUpdateUserEmail({
         supabaseUserId: target.supabase_user_id,
-        newEmail: normalizedEmail
+        newEmail: normalizedEmail,
+        confirmEmail: true
       });
 
       try {

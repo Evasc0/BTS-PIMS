@@ -507,7 +507,11 @@ export const supabaseAuth = {
     }
   },
 
-  async adminUpdateUserEmail(input: { supabaseUserId: string; newEmail: string }): Promise<void> {
+  async adminUpdateUserEmail(input: {
+    supabaseUserId: string;
+    newEmail: string;
+    confirmEmail?: boolean;
+  }): Promise<void> {
     const supabaseUrl = getSupabaseUrl();
     if (!supabaseUrl) {
       throw new Error('Supabase auth is not configured. Set SUPABASE_URL first.');
@@ -532,7 +536,10 @@ export const supabaseAuth = {
         Authorization: `Bearer ${serviceRoleKey}`,
         'content-type': 'application/json'
       },
-      body: JSON.stringify({ email })
+      body: JSON.stringify({
+        email,
+        email_confirm: input.confirmEmail ?? true
+      })
     });
 
     if (!response.ok) {
