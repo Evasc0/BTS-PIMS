@@ -1,10 +1,12 @@
 import React, { useMemo, useState } from 'react';
-import { Download, Calendar, Eye, EyeOff, ChevronDown, ChevronUp } from 'lucide-react';
+import { Download, Calendar } from 'lucide-react';
 import { useLiveQuery } from '../lib/useLiveQuery';
-import type { Employee, ReturnCondition, ValueCategory } from '../lib/types';
+import type { Employee, ValueCategory } from '../lib/types';
 import { db } from '../lib/db';
 import { formatCurrency, formatDate } from '../lib/utils';
 import {
+  RETURN_PURPOSE_OPTIONS,
+  RETURN_SUBMITTER_OPTIONS,
   buildInventoryReportRows,
   buildReturnReportRows,
   createInventoryExcelBlob,
@@ -12,7 +14,9 @@ import {
   downloadBlob,
   exportInventoryToPDF,
   exportReturnsToPDF,
-  type InventoryReportFilter
+  type InventoryReportFilter,
+  type ReturnPurposeFilter,
+  type ReturnSubmitterFilter
 } from '../lib/reportExports';
 
 interface ReportsPageProps {
@@ -46,18 +50,6 @@ const getRangeStart = (range: DateRange, customStart?: string) => {
   return start;
 };
 
-const getControlNumberLabel = (valueCategory?: ValueCategory) => {
-  if (valueCategory === 'HV' || valueCategory === 'LV') return 'PAR Control Number';
-  if (valueCategory === 'MV') return 'ICS Control Number';
-  return 'Control Number';
-};
-
-const getAssetNumberLabel = (valueCategory?: ValueCategory) => {
-  if (valueCategory === 'HV' || valueCategory === 'LV') return 'Property Number';
-  if (valueCategory === 'MV') return 'Inventory Number';
-  return 'Inventory / Property Number';
-};
-
 const getInventoryControlHeader = (inventoryFilter: InventoryReportFilter) =>
   inventoryFilter === 'PPEIR' ? 'ICS CONTROL NO.' : 'PAR CONTROL NO.';
 
@@ -69,26 +61,12 @@ const isMatchingInventoryFilter = (valueCategory: ValueCategory, inventoryFilter
   return valueCategory === inventoryFilter;
 };
 
-const getConditionColor = (condition: ReturnCondition) => {
-  switch (condition) {
-    case 'functional':
-      return 'bg-green-100 text-green-700';
-    case 'destroyed':
-    case 'for disposal':
-      return 'bg-red-100 text-red-700';
-    case 'need repair':
-    case 'damaged':
-      return 'bg-orange-100 text-orange-700';
-    default:
-      return 'bg-gray-100 text-gray-700';
-  }
-};
-
 export function ReportsPage({ user }: ReportsPageProps) {
   const [reportType, setReportType] = useState<'inventory' | 'returns'>('inventory');
   const [inventoryFilter, setInventoryFilter] = useState<InventoryReportFilter>('HV');
+  const [returnsSubmitterFilter, setReturnsSubmitterFilter] = useState<ReturnSubmitterFilter>('employee');
+  const [returnsPurposeFilter, setReturnsPurposeFilter] = useState<ReturnPurposeFilter>('functional');
   const [dateRange, setDateRange] = useState<DateRange>('month');
-  const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
   const [customRange, setCustomRange] = useState<{ start: string; end: string } | null>(null);
 
   const products = useLiveQuery(() => db.products.toArray(), []);
@@ -123,17 +101,31 @@ export function ReportsPage({ user }: ReportsPageProps) {
     });
   }, [returns, rangeStart, rangeEnd]);
 
-  const canExportData = user.role === 'system_admin';
+  const returnReportRows = useMemo(
+    () =>
+      buildReturnReportRows(
+        filteredReturns,
+        products || [],
+        employees || [],
+        returnsSubmitterFilter,
+        returnsPurposeFilter
+      ),
+    [filteredReturns, products, employees, returnsSubmitterFilter, returnsPurposeFilter]
+  );
 
-  const toggleExpand = (id: string) => {
-    const newExpanded = new Set(expandedItems);
-    if (newExpanded.has(id)) {
-      newExpanded.delete(id);
-    } else {
-      newExpanded.add(id);
-    }
-    setExpandedItems(newExpanded);
-  };
+  const returnsRrspDisplay = useMemo(() => {
+    if (returnsSubmitterFilter !== 'system_admin') return '';
+    const values = Array.from(
+      new Set(
+        returnReportRows
+          .map((row) => String(row.rrspNumber || '').trim())
+          .filter((value) => value.length > 0)
+      )
+    );
+    return values.length > 0 ? values.join(', ') : 'N/A';
+  }, [returnReportRows, returnsSubmitterFilter]);
+
+  const canExportData = user.role === 'system_admin';
 
   const handleExportPdf = () => {
     if (reportType === 'inventory') {
@@ -142,8 +134,7 @@ export function ReportsPage({ user }: ReportsPageProps) {
       return;
     }
 
-    const rows = buildReturnReportRows(filteredReturns, products || [], employees || []);
-    exportReturnsToPDF(rows);
+    exportReturnsToPDF(returnReportRows, returnsSubmitterFilter, returnsPurposeFilter);
   };
 
   const handleExportExcel = async () => {
@@ -154,9 +145,12 @@ export function ReportsPage({ user }: ReportsPageProps) {
       return;
     }
 
-    const rows = buildReturnReportRows(filteredReturns, products || [], employees || []);
-    const blob = await createReturnsExcelBlob(rows, 'Returns Report');
-    downloadBlob(blob, 'returns-report.xlsx');
+    const blob = await createReturnsExcelBlob(
+      returnReportRows,
+      returnsSubmitterFilter,
+      returnsPurposeFilter
+    );
+    downloadBlob(blob, `returns-report-${returnsSubmitterFilter}.xlsx`);
   };
 
   const handleCustomRange = () => {
@@ -214,6 +208,32 @@ export function ReportsPage({ user }: ReportsPageProps) {
               <option value="HV">HV</option>
               <option value="LV">LV</option>
               <option value="PPEIR">PPEIR</option>
+            </select>
+          )}
+          {reportType === 'returns' && (
+            <select
+              value={returnsSubmitterFilter}
+              onChange={(e) => setReturnsSubmitterFilter(e.target.value as ReturnSubmitterFilter)}
+              className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
+            >
+              {RETURN_SUBMITTER_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          )}
+          {reportType === 'returns' && (
+            <select
+              value={returnsPurposeFilter}
+              onChange={(e) => setReturnsPurposeFilter(e.target.value as ReturnPurposeFilter)}
+              className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
+            >
+              {RETURN_PURPOSE_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
             </select>
           )}
           <select
@@ -301,133 +321,80 @@ export function ReportsPage({ user }: ReportsPageProps) {
 
       {reportType === 'returns' && (
         <div className="space-y-4">
-          {filteredReturns.length === 0 && (
+          {returnReportRows.length === 0 && (
             <div className="bg-white rounded-xl border border-gray-200 p-8 text-center text-gray-600">
               Not enough data to generate report
             </div>
           )}
-          {filteredReturns.map((item) => {
-            const isExpanded = expandedItems.has(item.id);
-            const product = products?.find((product) => product.id === item.productId);
-            return (
-              <div key={item.id} className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-                <div className="p-6">
-                  <h3 className="font-medium text-gray-900 mb-4">Property Product Information</h3>
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                    <div>
-                      <p className="text-sm text-gray-600 mb-1">Article:</p>
-                      <p className="font-medium text-gray-900">{product?.article || 'Unknown'}</p>
+          {returnReportRows.length > 0 && (
+            <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+              <div className="px-6 py-4 bg-gray-50 border-b border-gray-200 space-y-3">
+                <p className="text-sm font-semibold text-gray-900">
+                  Section/Dept.: <span className="font-normal">PGO-BTS</span>
+                </p>
+                {returnsSubmitterFilter === 'system_admin' && (
+                  <p className="text-sm font-semibold text-gray-900">
+                    RRSP No.: <span className="font-normal">{returnsRrspDisplay}</span>
+                  </p>
+                )}
+                <div className="flex flex-wrap items-center gap-4 text-sm text-gray-800">
+                  <span className="font-semibold">PURPOSE:</span>
+                  {RETURN_PURPOSE_OPTIONS.map((option) => (
+                    <div key={option.value} className="flex items-center gap-2">
+                      <span className="inline-flex h-4 w-4 items-center justify-center border border-gray-600 text-[10px] leading-none">
+                        {option.value === returnsPurposeFilter ? 'X' : ''}
+                      </span>
+                      <span>{option.label}</span>
                     </div>
-                    <div>
-                      <p className="text-sm text-gray-600 mb-1">Description:</p>
-                      <p className="text-sm text-gray-900">{product?.description || ''}</p>
-                    </div>
-                    <div>
-                      <p className="text-sm text-gray-600 mb-1">Date:</p>
-                      <p className="text-sm text-gray-900">{product?.date ? formatDate(product.date) : ''}</p>
-                    </div>
-                    <div>
-                      <p className="text-sm text-gray-600 mb-1">{getControlNumberLabel(product?.valueCategory)}:</p>
-                      <p className="text-sm text-gray-900">{product?.parControlNumber || ''}</p>
-                    </div>
-                    <div>
-                      <p className="text-sm text-gray-600 mb-1">{getAssetNumberLabel(product?.valueCategory)}:</p>
-                      <p className="text-sm text-gray-900">{product?.propertyNumber || ''}</p>
-                    </div>
-                    <div>
-                      <p className="text-sm text-gray-600 mb-1">Unit:</p>
-                      <p className="text-sm text-gray-900">{product?.unit || ''}</p>
-                    </div>
-                    <div>
-                      <p className="text-sm text-gray-600 mb-1">Unit Value:</p>
-                      <p className="text-sm text-gray-900">{product ? formatCurrency(product.unitValue) : ''}</p>
-                    </div>
-                    <div>
-                      <p className="text-sm text-gray-600 mb-1">Balance per Card:</p>
-                      <p className="text-sm text-gray-900">{product?.balancePerCard ?? ''}</p>
-                    </div>
-                    <div>
-                      <p className="text-sm text-gray-600 mb-1">On Hand per Count:</p>
-                      <p className="text-sm text-gray-900">{product?.onHandPerCount ?? ''}</p>
-                    </div>
-                    <div>
-                      <p className="text-sm text-gray-600 mb-1">Total:</p>
-                      <p className="font-medium text-gray-900">{product ? formatCurrency(product.total) : ''}</p>
-                    </div>
-                    <div className="md:col-span-2">
-                      <p className="text-sm text-gray-600 mb-1">Remarks:</p>
-                      <p className="text-sm text-gray-900">{product?.remarks || ''}</p>
-                    </div>
-                  </div>
-
-                  {isExpanded && (
-                    <div className="mt-6 pt-6 border-t border-gray-200">
-                      <h3 className="font-medium text-gray-900 mb-4">Return Information</h3>
-                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                        <div>
-                          <p className="text-sm text-gray-600 mb-1">RRSP No.:</p>
-                          <p className="font-medium text-gray-900">{item.rrspNumber}</p>
-                        </div>
-                        <div>
-                          <p className="text-sm text-gray-600 mb-1">Return Date:</p>
-                          <p className="text-sm text-gray-900">{formatDate(item.returnDate)}</p>
-                        </div>
-                        <div>
-                          <p className="text-sm text-gray-600 mb-1">Quantity:</p>
-                          <p className="text-sm text-gray-900">{item.quantity} units</p>
-                        </div>
-                        <div>
-                          <p className="text-sm text-gray-600 mb-1">Condition:</p>
-                          <span className={`inline-flex px-3 py-1 rounded-full text-xs font-medium ${getConditionColor(item.condition)}`}>
-                            {item.condition}
-                          </span>
-                        </div>
-                        <div className="md:col-span-2">
-                          <p className="text-sm text-gray-600 mb-1">Remarks:</p>
-                          <p className="text-sm text-gray-900">{item.remarks}</p>
-                        </div>
-                        <div>
-                          <p className="text-sm text-gray-600 mb-1">Returned By - Name:</p>
-                          <p className="text-sm text-gray-900">{employeeMap.get(item.returnedByEmployeeId) || 'Unknown'}</p>
-                        </div>
-                        <div>
-                          <p className="text-sm text-gray-600 mb-1">Position:</p>
-                          <p className="text-sm text-gray-900 capitalize">{item.returnedByPosition}</p>
-                        </div>
-                        <div>
-                          <p className="text-sm text-gray-600 mb-1">Received Date:</p>
-                          <p className="text-sm text-gray-900">{formatDate(item.receivedDate)}</p>
-                        </div>
-                        <div>
-                          <p className="text-sm text-gray-600 mb-1">Location:</p>
-                          <p className="text-sm text-gray-900">{item.location}</p>
-                        </div>
-                      </div>
-                    </div>
-                  )}
+                  ))}
                 </div>
-
-                <button
-                  onClick={() => toggleExpand(item.id)}
-                  className="w-full px-6 py-3 bg-gray-50 hover:bg-gray-100 transition flex items-center justify-center gap-2 text-sm font-medium text-gray-700 border-t border-gray-200"
-                >
-                  {isExpanded ? (
-                    <>
-                      <EyeOff className="w-4 h-4" />
-                      Hide Details
-                      <ChevronUp className="w-4 h-4" />
-                    </>
-                  ) : (
-                    <>
-                      <Eye className="w-4 h-4" />
-                      Show More Details
-                      <ChevronDown className="w-4 h-4" />
-                    </>
-                  )}
-                </button>
               </div>
-            );
-          })}
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[1320px] border-collapse">
+                  <thead className="bg-gray-50 border-b border-gray-200">
+                    <tr>
+                      <th className="px-3 py-3 text-center text-xs font-semibold uppercase tracking-wider text-gray-600 border-r border-gray-200">No.</th>
+                      <th className="px-3 py-3 text-right text-xs font-semibold uppercase tracking-wider text-gray-600 border-r border-gray-200">Qty.</th>
+                      <th className="px-3 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600 border-r border-gray-200">Unit</th>
+                      <th className="px-3 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600 border-r border-gray-200">Description</th>
+                      <th className="px-3 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600 border-r border-gray-200">Property No./ICS Control No.</th>
+                      <th className="px-3 py-3 text-center text-xs font-semibold uppercase tracking-wider text-gray-600 border-r border-gray-200">Date Acquired</th>
+                      <th className="px-3 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600 border-r border-gray-200">Actual User</th>
+                      <th className="px-3 py-3 text-right text-xs font-semibold uppercase tracking-wider text-gray-600 border-r border-gray-200">Unit Value</th>
+                      <th className="px-3 py-3 text-right text-xs font-semibold uppercase tracking-wider text-gray-600">Total Value</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-200">
+                    {returnReportRows.map((row, index) => {
+                      const no = Number(row.no ?? index + 1);
+                      const qty = Number(row.qty ?? 0);
+                      const unitValue = Number(row.unitValue ?? 0);
+                      const totalValue = Number(row.totalValue ?? qty * unitValue);
+                      const article = String(row.article || '').trim();
+                      const descriptionText = String(row.descriptionText || '').trim();
+
+                      return (
+                        <tr key={`${row.propertyOrIcs || 'property'}-${index}`} className="hover:bg-gray-50">
+                          <td className="px-3 py-3 text-sm text-gray-900 text-center border-r border-gray-200">{no}</td>
+                          <td className="px-3 py-3 text-sm text-gray-900 text-right border-r border-gray-200">{qty}</td>
+                          <td className="px-3 py-3 text-sm text-gray-700 border-r border-gray-200">{row.unit || '-'}</td>
+                          <td className="px-3 py-3 text-sm text-gray-700 border-r border-gray-200 min-w-[340px]">
+                            <p className="font-semibold text-gray-900">{article || '-'}</p>
+                            {descriptionText && <p className="text-gray-700">{descriptionText}</p>}
+                          </td>
+                          <td className="px-3 py-3 text-sm text-gray-700 border-r border-gray-200">{row.propertyOrIcs || '-'}</td>
+                          <td className="px-3 py-3 text-sm text-gray-700 text-center border-r border-gray-200">{row.dateAcquired || '-'}</td>
+                          <td className="px-3 py-3 text-sm text-gray-700 border-r border-gray-200">{row.actualUser || '-'}</td>
+                          <td className="px-3 py-3 text-sm text-gray-900 text-right border-r border-gray-200">{formatCurrency(unitValue)}</td>
+                          <td className="px-3 py-3 text-sm text-gray-900 text-right font-medium">{formatCurrency(totalValue)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -60,6 +60,7 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [selectedReturn, setSelectedReturn] = useState<ReturnRecord | null>(null);
   const [filterStatus, setFilterStatus] = useState<ReturnStatus | 'all'>('all');
+  const [filterSubmittedBy, setFilterSubmittedBy] = useState<'all' | EmployeeRole>('all');
   const [formState, setFormState] = useState<ReturnFormState>(emptyReturnForm);
   const [formError, setFormError] = useState<string | null>(null);
   const [processingNotes, setProcessingNotes] = useState('');
@@ -147,12 +148,13 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
         return false;
       }
       if (filterStatus !== 'all' && ret.status !== filterStatus) return false;
+      if (filterSubmittedBy !== 'all' && ret.returnedByPosition !== filterSubmittedBy) return false;
       if (!searchTerm.trim()) return true;
       const term = searchTerm.trim().toLowerCase();
       const productName = productMap.get(ret.productId)?.article?.toLowerCase() || '';
       return productName.includes(term) || ret.rrspNumber.toLowerCase().includes(term);
     });
-  }, [returns, filterStatus, searchTerm, user, productMap]);
+  }, [returns, filterStatus, filterSubmittedBy, searchTerm, user, productMap]);
 
   const getStatusBadge = (status: ReturnStatus) => {
     switch (status) {
@@ -693,6 +695,17 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
             <option value="approved">Approved</option>
             <option value="rejected">Rejected</option>
           </select>
+          {isAdmin && (
+            <select
+              value={filterSubmittedBy}
+              onChange={(e) => setFilterSubmittedBy(e.target.value as 'all' | EmployeeRole)}
+              className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
+            >
+              <option value="all">All Submitters</option>
+              <option value="employee">Employee</option>
+              <option value="system_admin">System Admin</option>
+            </select>
+          )}
         </div>
       </div>
 

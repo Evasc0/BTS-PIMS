@@ -15,6 +15,31 @@ type ReportColumn = {
 
 type ReportRow = Record<string, string | number | null | undefined>;
 export type InventoryReportFilter = 'HV' | 'LV' | 'PPEIR';
+export type ReturnSubmitterFilter = 'employee' | 'system_admin';
+export type ReturnPurposeFilter = 'for_disposal' | 'need_repair' | 'functional' | 'others';
+
+export const RETURN_SUBMITTER_OPTIONS: Array<{ value: ReturnSubmitterFilter; label: string }> = [
+  { value: 'employee', label: 'Employee' },
+  { value: 'system_admin', label: 'Admin' }
+];
+
+export const RETURN_PURPOSE_OPTIONS: Array<{ value: ReturnPurposeFilter; label: string }> = [
+  { value: 'for_disposal', label: 'For Disposal' },
+  { value: 'need_repair', label: 'Need Repair' },
+  { value: 'functional', label: 'Functional' },
+  { value: 'others', label: 'Others' }
+];
+
+export const getReturnPurposeFromCondition = (condition: ReturnRecord['condition']): ReturnPurposeFilter => {
+  if (condition === 'for disposal' || condition === 'destroyed') return 'for_disposal';
+  if (condition === 'need repair' || condition === 'damaged') return 'need_repair';
+  if (condition === 'functional') return 'functional';
+  return 'others';
+};
+
+const getReturnPurposeCheckboxText = (selectedPurpose: ReturnPurposeFilter): string => {
+  return RETURN_PURPOSE_OPTIONS.map((option) => `[${option.value === selectedPurpose ? 'X' : ' '}] ${option.label}`).join('   ');
+};
 
 const PDF_MARGINS = { top: 56, left: 24, right: 24, bottom: 24 };
 const PDF_TITLE_Y = 32;
@@ -44,14 +69,15 @@ const getInventoryColumns = (inventoryFilter: InventoryReportFilter): ReportColu
 };
 
 const returnsColumns: ReportColumn[] = [
-  { key: 'rrspNumber', header: 'RRSP Number', align: 'left', pdfWidth: 100, excelWidth: 18 },
-  { key: 'returnDate', header: 'Return Date', align: 'center', pdfWidth: 80, excelWidth: 14 },
-  { key: 'quantity', header: 'Quantity', align: 'right', pdfWidth: 60, excelWidth: 10, format: 'number' },
-  { key: 'condition', header: 'Condition', align: 'left', pdfWidth: 100, excelWidth: 16 },
-  { key: 'returnedBy', header: 'Returned By', align: 'left', pdfWidth: 120, excelWidth: 22 },
-  { key: 'product', header: 'Product', align: 'left', pdfWidth: 120, excelWidth: 22 },
-  { key: 'location', header: 'Location', align: 'left', pdfWidth: 110, excelWidth: 18 },
-  { key: 'status', header: 'Status', align: 'left', pdfWidth: 104, excelWidth: 12 }
+  { key: 'no', header: 'NO.', align: 'center', pdfWidth: 36, excelWidth: 7, format: 'number' },
+  { key: 'qty', header: 'QTY.', align: 'right', pdfWidth: 44, excelWidth: 9, format: 'number' },
+  { key: 'unit', header: 'UNIT', align: 'left', pdfWidth: 48, excelWidth: 10 },
+  { key: 'description', header: 'DESCRIPTION', align: 'left', pdfWidth: 200, excelWidth: 40 },
+  { key: 'propertyOrIcs', header: 'PROPERTY No./ICS CONTROL No.', align: 'left', pdfWidth: 130, excelWidth: 28 },
+  { key: 'dateAcquired', header: 'Date Acquired', align: 'center', pdfWidth: 82, excelWidth: 14 },
+  { key: 'actualUser', header: 'Actual User', align: 'left', pdfWidth: 118, excelWidth: 24 },
+  { key: 'unitValue', header: 'UNIT VALUE', align: 'right', pdfWidth: 84, excelWidth: 16, format: 'currency' },
+  { key: 'totalValue', header: 'TOTAL VALUE', align: 'right', pdfWidth: 84, excelWidth: 16, format: 'currency' }
 ];
 
 const formatPdfValue = (value: ReportRow[string], column: ReportColumn): string => {
@@ -114,6 +140,88 @@ const buildPdfDocument = (title: string, columns: ReportColumn[], rows: ReportRo
       doc.text(title, pageWidth / 2, PDF_TITLE_Y, { align: 'center' });
 
       doc.setFont('helvetica', 'normal');
+      doc.setFontSize(PDF_PAGE_NUMBER_FONT_SIZE);
+      doc.text(`Page ${data.pageNumber}`, pageWidth - PDF_MARGINS.right, pageHeight - 12, { align: 'right' });
+    }
+  });
+
+  return doc;
+};
+
+const buildReturnsPdfDocument = (
+  title: string,
+  rows: ReportRow[],
+  submitterFilter: ReturnSubmitterFilter,
+  purposeFilter: ReturnPurposeFilter
+): jsPDF => {
+  const doc = new jsPDF({
+    orientation: 'landscape',
+    unit: 'pt',
+    format: 'a4'
+  });
+
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const columnStyles: Record<number, { cellWidth: number; halign: 'left' | 'right' | 'center' }> = {};
+
+  returnsColumns.forEach((column, index) => {
+    columnStyles[index] = {
+      cellWidth: column.pdfWidth,
+      halign: column.align
+    };
+  });
+
+  const rrspNumbers = Array.from(
+    new Set(
+      rows
+        .map((row) => String(row.rrspNumber || '').trim())
+        .filter((value) => value.length > 0)
+    )
+  );
+  const rrspLabel = rrspNumbers.length > 0 ? rrspNumbers.join(', ') : 'N/A';
+
+  autoTable(doc, {
+    startY: submitterFilter === 'system_admin' ? 104 : 88,
+    margin: PDF_MARGINS,
+    head: [returnsColumns.map((column) => column.header)],
+    body: rows.map((row) => returnsColumns.map((column) => formatPdfValue(row[column.key], column))),
+    theme: 'grid',
+    styles: {
+      fontSize: 8.5,
+      cellPadding: 3,
+      overflow: 'linebreak',
+      valign: 'middle',
+      lineColor: [120, 120, 120],
+      lineWidth: 0.6
+    },
+    headStyles: {
+      fontStyle: 'bold',
+      fontSize: 8.5,
+      fillColor: [235, 235, 235],
+      textColor: 20,
+      halign: 'center',
+      lineColor: [120, 120, 120],
+      lineWidth: 0.6
+    },
+    columnStyles,
+    showHead: 'everyPage',
+    didDrawPage: (data) => {
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(11);
+      doc.text(title, pageWidth / 2, 24, { align: 'center' });
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(10);
+      doc.text('Section/Dept.: PGO-BTS', PDF_MARGINS.left, 42);
+      if (submitterFilter === 'system_admin') {
+        doc.text(`RRSP No.: ${rrspLabel}`, PDF_MARGINS.left, 58);
+      }
+      doc.text(
+        `PURPOSE: ${getReturnPurposeCheckboxText(purposeFilter)}`,
+        PDF_MARGINS.left,
+        submitterFilter === 'system_admin' ? 74 : 58
+      );
+
       doc.setFontSize(PDF_PAGE_NUMBER_FONT_SIZE);
       doc.text(`Page ${data.pageNumber}`, pageWidth - PDF_MARGINS.right, pageHeight - 12, { align: 'right' });
     }
@@ -186,6 +294,114 @@ const buildExcelBlob = async (title: string, columns: ReportColumn[], rows: Repo
   });
 };
 
+const buildReturnsExcelBlob = async (
+  title: string,
+  rows: ReportRow[],
+  submitterFilter: ReturnSubmitterFilter,
+  purposeFilter: ReturnPurposeFilter
+): Promise<Blob> => {
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'BTS Inventory Management System';
+  workbook.created = new Date();
+
+  const ySplit = submitterFilter === 'system_admin' ? 6 : 5;
+  const sheet = workbook.addWorksheet(title, { views: [{ state: 'frozen', ySplit }] });
+  sheet.pageSetup = { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0 };
+  sheet.columns = returnsColumns.map((column) => ({
+    key: column.key,
+    width: column.excelWidth
+  }));
+
+  const rrspNumbers = Array.from(
+    new Set(
+      rows
+        .map((row) => String(row.rrspNumber || '').trim())
+        .filter((value) => value.length > 0)
+    )
+  );
+  const rrspLabel = rrspNumbers.length > 0 ? rrspNumbers.join(', ') : 'N/A';
+
+  sheet.mergeCells('A1:I1');
+  sheet.getCell('A1').value = title;
+  sheet.getCell('A1').font = { bold: true, size: 12 };
+  sheet.getCell('A1').alignment = { vertical: 'middle', horizontal: 'center' };
+
+  sheet.mergeCells('A2:I2');
+  sheet.getCell('A2').value = 'Section/Dept.: PGO-BTS';
+  sheet.getCell('A2').font = { bold: true };
+  sheet.getCell('A2').alignment = { vertical: 'middle', horizontal: 'left' };
+
+  let tableHeaderRowNumber = 5;
+  if (submitterFilter === 'system_admin') {
+    sheet.mergeCells('A3:I3');
+    sheet.getCell('A3').value = `RRSP No.: ${rrspLabel}`;
+    sheet.getCell('A3').alignment = { vertical: 'middle', horizontal: 'left' };
+    sheet.mergeCells('A4:I4');
+    sheet.getCell('A4').value = `PURPOSE: ${getReturnPurposeCheckboxText(purposeFilter)}`;
+    sheet.getCell('A4').alignment = { vertical: 'middle', horizontal: 'left' };
+    tableHeaderRowNumber = 6;
+  } else {
+    sheet.mergeCells('A3:I3');
+    sheet.getCell('A3').value = `PURPOSE: ${getReturnPurposeCheckboxText(purposeFilter)}`;
+    sheet.getCell('A3').alignment = { vertical: 'middle', horizontal: 'left' };
+  }
+
+  for (let current = 4; current < tableHeaderRowNumber; current += 1) {
+    if (submitterFilter === 'system_admin' && current === 4) continue;
+    sheet.mergeCells(`A${current}:I${current}`);
+    sheet.getCell(`A${current}`).value = '';
+  }
+
+  const headerValues = returnsColumns.map((column) => column.header);
+  const headerRow = sheet.insertRow(tableHeaderRowNumber, headerValues);
+  rows.forEach((row) => {
+    sheet.addRow(row);
+  });
+
+  const borderStyle = {
+    top: { style: 'thin', color: { argb: 'FFBDBDBD' } },
+    left: { style: 'thin', color: { argb: 'FFBDBDBD' } },
+    bottom: { style: 'thin', color: { argb: 'FFBDBDBD' } },
+    right: { style: 'thin', color: { argb: 'FFBDBDBD' } }
+  } as const;
+
+  returnsColumns.forEach((column, index) => {
+    const excelColumn = sheet.getColumn(index + 1);
+    excelColumn.alignment = {
+      vertical: 'top',
+      horizontal: column.align,
+      wrapText: column.key === 'description'
+    };
+    if (column.format === 'currency') {
+      excelColumn.numFmt = '"PHP" #,##0.00';
+    }
+    if (column.format === 'number') {
+      excelColumn.numFmt = '#,##0';
+    }
+  });
+
+  headerRow.font = { bold: true };
+  headerRow.eachCell((cell, colNumber) => {
+    const column = returnsColumns[colNumber - 1];
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE6E6E6' } };
+    cell.alignment = { vertical: 'middle', horizontal: column.align, wrapText: true };
+    cell.border = borderStyle;
+  });
+
+  const lastRow = sheet.lastRow?.number || tableHeaderRowNumber;
+  for (let rowNumber = tableHeaderRowNumber; rowNumber <= lastRow; rowNumber += 1) {
+    const row = sheet.getRow(rowNumber);
+    row.eachCell({ includeEmpty: true }, (cell) => {
+      cell.border = borderStyle;
+    });
+  }
+
+  const buffer = await workbook.xlsx.writeBuffer();
+  return new Blob([buffer], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  });
+};
+
 export const buildInventoryReportRows = (products: Product[], employees: Employee[]): ReportRow[] => {
   const employeeMap = new Map(employees.map((employee) => [employee.id, employee.fullName]));
   return products.map((product) => ({
@@ -207,20 +423,39 @@ export const buildInventoryReportRows = (products: Product[], employees: Employe
 export const buildReturnReportRows = (
   returns: ReturnRecord[],
   products: Product[],
-  employees: Employee[]
+  employees: Employee[],
+  submitterFilter: ReturnSubmitterFilter,
+  purposeFilter: ReturnPurposeFilter
 ): ReportRow[] => {
   const productMap = new Map(products.map((product) => [product.id, product]));
   const employeeMap = new Map(employees.map((employee) => [employee.id, employee]));
-  return returns.map((record) => ({
-    rrspNumber: record.rrspNumber,
-    returnDate: formatDate(record.returnDate),
-    quantity: record.quantity,
-    condition: record.condition,
-    returnedBy: employeeMap.get(record.returnedByEmployeeId)?.fullName || '',
-    product: productMap.get(record.productId)?.article || '',
-    location: record.location,
-    status: record.status
-  }));
+  return returns
+    .filter((record) => record.returnedByPosition === submitterFilter)
+    .filter((record) => getReturnPurposeFromCondition(record.condition) === purposeFilter)
+    .map((record, index) => {
+      const product = productMap.get(record.productId);
+      const article = (product?.article || '').trim();
+      const descriptionText = (product?.description || '').trim();
+      const qty = Number(product?.onHandPerCount || 0);
+      const unitValue = Number(product?.unitValue || 0);
+      const totalValue = qty * unitValue;
+      const propertyOrIcs = (product?.propertyNumber || '').trim() || (product?.parControlNumber || '').trim();
+
+      return {
+        no: index + 1,
+        qty,
+        unit: product?.unit || '',
+        description: [article, descriptionText].filter(Boolean).join('\n'),
+        propertyOrIcs,
+        dateAcquired: product?.date ? formatDate(product.date) : '',
+        actualUser: employeeMap.get(record.returnedByEmployeeId)?.fullName || '',
+        unitValue,
+        totalValue,
+        rrspNumber: record.rrspNumber,
+        article,
+        descriptionText
+      };
+    });
 };
 
 const getInventoryReportTitle = (inventoryFilter: InventoryReportFilter): string => `Inventory Report - ${inventoryFilter}`;
@@ -236,11 +471,16 @@ export const exportInventoryToPDF = (
   doc.save(`Inventory_Report_${inventoryFilter}_${fileDate}.pdf`);
 };
 
-export const exportReturnsToPDF = (rows: ReportRow[], reportDate: Date = new Date()): void => {
-  const title = 'Returns Report';
+export const exportReturnsToPDF = (
+  rows: ReportRow[],
+  submitterFilter: ReturnSubmitterFilter,
+  purposeFilter: ReturnPurposeFilter,
+  reportDate: Date = new Date()
+): void => {
+  const title = submitterFilter === 'system_admin' ? 'Returns Report - Admin' : 'Returns Report - Employee';
   const fileDate = formatFileDate(reportDate);
-  const doc = buildPdfDocument(title, returnsColumns, rows);
-  doc.save(`Returns_Report_${fileDate}.pdf`);
+  const doc = buildReturnsPdfDocument(title, rows, submitterFilter, purposeFilter);
+  doc.save(`Returns_Report_${submitterFilter}_${fileDate}.pdf`);
 };
 
 export const createInventoryExcelBlob = async (
@@ -253,9 +493,11 @@ export const createInventoryExcelBlob = async (
 
 export const createReturnsExcelBlob = async (
   rows: ReportRow[],
-  title = 'Returns Report'
+  submitterFilter: ReturnSubmitterFilter,
+  purposeFilter: ReturnPurposeFilter,
+  title = submitterFilter === 'system_admin' ? 'Returns Report - Admin' : 'Returns Report - Employee'
 ): Promise<Blob> => {
-  return buildExcelBlob(title, returnsColumns, rows);
+  return buildReturnsExcelBlob(title, rows, submitterFilter, purposeFilter);
 };
 
 export const downloadBlob = (blob: Blob, filename: string): void => {
