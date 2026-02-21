@@ -2558,7 +2558,6 @@ const mergeLegacyEmployeeRowIntoCanonical = (
 
   moveEmployeeReferencesToCanonicalId(db, duplicateId, canonicalId);
   db.prepare("DELETE FROM sync_outbox WHERE entity_type = 'employees' AND entity_id = ?").run(duplicateId);
-  db.prepare("DELETE FROM sync_conflicts WHERE entity_type = 'employees' AND entity_id = ?").run(duplicateId);
   db.prepare('DELETE FROM employees WHERE id = ?').run(duplicateId);
 };
 
