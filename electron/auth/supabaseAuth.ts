@@ -2,7 +2,11 @@ import type { EmployeeRole, EmployeeStatus } from '../shared/types';
 
 const getSupabaseUrl = (): string => (process.env.SUPABASE_URL || '').replace(/\/+$/u, '');
 const getSupabaseAnonKey = (): string => process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_PUBLISHABLE_KEY || '';
-const getSupabaseServiceRoleKey = (): string => process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+const getSupabaseServiceRoleKey = (): string =>
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_SERVICE_KEY ||
+  process.env.SUPABASE_SECRET_KEY ||
+  '';
 const getAppUsersTable = (): string => process.env.SUPABASE_APP_USERS_TABLE || 'app_users';
 
 const isConfigured = (): boolean => Boolean(getSupabaseUrl() && getSupabaseAnonKey());
