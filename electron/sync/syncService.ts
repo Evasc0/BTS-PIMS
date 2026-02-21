@@ -1113,20 +1113,6 @@ const getLocalEmployeeMetaByIdentity = (
     }
   }
 
-  const email = String(remoteData?.email ?? '').trim().toLowerCase();
-  if (email) {
-    const byEmail = db
-      .prepare('SELECT version, last_modified FROM employees WHERE lower(email) = ? LIMIT 1')
-      .get(email) as { version?: number; last_modified?: string | null } | undefined;
-    if (byEmail) {
-      return {
-        exists: true,
-        version: readVersion(byEmail.version, 0),
-        lastModified: byEmail.last_modified ?? null
-      };
-    }
-  }
-
   return { exists: false, version: 0, lastModified: null };
 };
 
@@ -1152,14 +1138,6 @@ const resolveLocalEmployeeRecordIdForRemote = (db: Database.Database, recordId: 
       .prepare('SELECT id FROM employees WHERE supabase_user_id = ? LIMIT 1')
       .get(supabaseUserId) as { id?: string } | undefined;
     if (bySupabase?.id) return String(bySupabase.id);
-  }
-
-  const email = String(remoteData?.email ?? '').trim().toLowerCase();
-  if (email) {
-    const byEmail = db
-      .prepare('SELECT id FROM employees WHERE lower(email) = ? LIMIT 1')
-      .get(email) as { id?: string } | undefined;
-    if (byEmail?.id) return String(byEmail.id);
   }
 
   return recordId;
@@ -2545,14 +2523,98 @@ const summarizeFullSyncRequest = (request: FullSyncRequestRow, chunks: FullSyncC
 
 const toBoolInt = (value: unknown): number => (value ? 1 : 0);
 
+const updateEmployeeReferenceId = (
+  db: Database.Database,
+  tableName: string,
+  columnName: string,
+  fromEmployeeId: string,
+  toEmployeeId: string
+): void => {
+  if (!fromEmployeeId || !toEmployeeId || fromEmployeeId === toEmployeeId) return;
+  db.prepare(`UPDATE ${tableName} SET ${columnName} = ? WHERE ${columnName} = ?`).run(toEmployeeId, fromEmployeeId);
+};
+
+const moveEmployeeReferencesToCanonicalId = (
+  db: Database.Database,
+  fromEmployeeId: string,
+  canonicalEmployeeId: string
+): void => {
+  if (!fromEmployeeId || !canonicalEmployeeId || fromEmployeeId === canonicalEmployeeId) return;
+  updateEmployeeReferenceId(db, 'products', 'assigned_to_employee_id', fromEmployeeId, canonicalEmployeeId);
+  updateEmployeeReferenceId(db, 'returns', 'returned_by_employee_id', fromEmployeeId, canonicalEmployeeId);
+  updateEmployeeReferenceId(db, 'returns', 'processed_by_employee_id', fromEmployeeId, canonicalEmployeeId);
+  updateEmployeeReferenceId(db, 'return_receivers', 'employee_id', fromEmployeeId, canonicalEmployeeId);
+  updateEmployeeReferenceId(db, 'activity_logs', 'performed_by_employee_id', fromEmployeeId, canonicalEmployeeId);
+};
+
+const mergeLegacyEmployeeRowIntoCanonical = (
+  db: Database.Database,
+  duplicateEmployeeId: string,
+  canonicalEmployeeId: string
+): void => {
+  const duplicateId = String(duplicateEmployeeId || '').trim();
+  const canonicalId = String(canonicalEmployeeId || '').trim();
+  if (!duplicateId || !canonicalId || duplicateId === canonicalId) return;
+
+  moveEmployeeReferencesToCanonicalId(db, duplicateId, canonicalId);
+  db.prepare("DELETE FROM sync_outbox WHERE entity_type = 'employees' AND entity_id = ?").run(duplicateId);
+  db.prepare("DELETE FROM sync_conflicts WHERE entity_type = 'employees' AND entity_id = ?").run(duplicateId);
+  db.prepare('DELETE FROM employees WHERE id = ?').run(duplicateId);
+};
+
+const collectLegacyEmployeeConflicts = (
+  db: Database.Database,
+  canonicalEmployeeId: string,
+  supabaseUserId: string,
+  normalizedEmail: string
+): string[] => {
+  const conflicts = new Set<string>();
+  if (supabaseUserId) {
+    const rows = db
+      .prepare('SELECT id FROM employees WHERE supabase_user_id = ? AND id <> ?')
+      .all(supabaseUserId, canonicalEmployeeId) as Array<{ id?: string | null }>;
+    for (const row of rows) {
+      const id = String(row?.id || '').trim();
+      if (id) conflicts.add(id);
+    }
+  }
+
+  if (normalizedEmail) {
+    const rows = db
+      .prepare('SELECT id FROM employees WHERE lower(email) = ? AND id <> ?')
+      .all(normalizedEmail, canonicalEmployeeId) as Array<{ id?: string | null }>;
+    for (const row of rows) {
+      const id = String(row?.id || '').trim();
+      if (id) conflicts.add(id);
+    }
+  }
+
+  return Array.from(conflicts);
+};
+
+const repairLegacyEmployeeIdentity = (
+  db: Database.Database,
+  canonicalEmployeeId: string,
+  supabaseUserId: string,
+  normalizedEmail: string
+): void => {
+  const canonicalId = String(canonicalEmployeeId || '').trim();
+  if (!canonicalId) return;
+  const conflicts = collectLegacyEmployeeConflicts(db, canonicalId, supabaseUserId, normalizedEmail);
+  for (const duplicateId of conflicts) {
+    mergeLegacyEmployeeRowIntoCanonical(db, duplicateId, canonicalId);
+  }
+};
+
 const applyRemoteEmployee = (db: Database.Database, payload: any, version: number): void => {
   const incomingEmployeeId = String(payload?.id ?? '').trim();
   if (!incomingEmployeeId) return;
   const incomingSupabaseUserId = String(payload?.supabaseUserId ?? payload?.supabase_user_id ?? '').trim();
   const incomingEmail = String(payload?.email ?? '').trim().toLowerCase();
   const now = nowIso();
+  repairLegacyEmployeeIdentity(db, incomingEmployeeId, incomingSupabaseUserId, incomingEmail);
 
-  const selectEmployeeById = db.prepare(
+  const existing = db.prepare(
     `SELECT
         id, first_name, last_name, email, phone, department, position, role, status, address, location, password_hash, password_salt,
         supabase_user_id, auth_sync_status, provisioned_at, created_at, two_factor_enabled, email_notifications, low_stock_alerts, language,
@@ -2560,27 +2622,7 @@ const applyRemoteEmployee = (db: Database.Database, payload: any, version: numbe
        FROM employees
        WHERE id = ?
        LIMIT 1`
-  );
-  const selectEmployeeBySupabase = db.prepare(
-    `SELECT
-        id, first_name, last_name, email, phone, department, position, role, status, address, location, password_hash, password_salt,
-        supabase_user_id, auth_sync_status, provisioned_at, created_at, two_factor_enabled, email_notifications, low_stock_alerts, language,
-        profile_image_data, profile_image_format, profile_image_updated_at, deleted_at
-       FROM employees
-       WHERE supabase_user_id = ?
-       LIMIT 1`
-  );
-  const selectEmployeeByEmail = db.prepare(
-    `SELECT
-        id, first_name, last_name, email, phone, department, position, role, status, address, location, password_hash, password_salt,
-        supabase_user_id, auth_sync_status, provisioned_at, created_at, two_factor_enabled, email_notifications, low_stock_alerts, language,
-        profile_image_data, profile_image_format, profile_image_updated_at, deleted_at
-       FROM employees
-       WHERE lower(email) = ?
-       LIMIT 1`
-  );
-
-  let existing = selectEmployeeById.get(incomingEmployeeId) as
+  ).get(incomingEmployeeId) as
     | {
         id?: string | null;
         first_name?: string | null;
@@ -2609,15 +2651,7 @@ const applyRemoteEmployee = (db: Database.Database, payload: any, version: numbe
         deleted_at?: string | null;
       }
     | undefined;
-
-  if (!existing && incomingSupabaseUserId) {
-    existing = selectEmployeeBySupabase.get(incomingSupabaseUserId) as typeof existing;
-  }
-  if (!existing && incomingEmail) {
-    existing = selectEmployeeByEmail.get(incomingEmail) as typeof existing;
-  }
-
-  const employeeId = String(existing?.id || incomingEmployeeId).trim() || incomingEmployeeId;
+  const employeeId = incomingEmployeeId;
 
   const existingById = db
     .prepare(
@@ -2656,40 +2690,39 @@ const applyRemoteEmployee = (db: Database.Database, payload: any, version: numbe
         profile_image_updated_at?: string | null;
       }
     | undefined;
-  existing = (existingById || existing) as typeof existing;
+  const current = (existingById || existing) as typeof existing;
   const fullName = String(payload.fullName ?? payload.full_name ?? '').trim();
   const splitName = splitFullName(fullName);
-  const firstName = String(payload.firstName ?? payload.first_name ?? '').trim() || splitName.firstName || existing?.first_name || '';
-  const lastName = String(payload.lastName ?? payload.last_name ?? '').trim() || splitName.lastName || existing?.last_name || '';
+  const firstName = String(payload.firstName ?? payload.first_name ?? '').trim() || splitName.firstName || current?.first_name || '';
+  const lastName = String(payload.lastName ?? payload.last_name ?? '').trim() || splitName.lastName || current?.last_name || '';
   const resolvedFullName = fullName || [firstName, lastName].filter(Boolean).join(' ') || employeeId;
   const passwordHash =
-    String(payload.passwordHash ?? payload.password_hash ?? '').trim() || String(existing?.password_hash ?? '').trim() || 'remote_managed';
+    String(payload.passwordHash ?? payload.password_hash ?? '').trim() || String(current?.password_hash ?? '').trim() || 'remote_managed';
   const passwordSalt =
-    String(payload.passwordSalt ?? payload.password_salt ?? '').trim() || String(existing?.password_salt ?? '').trim() || 'remote_managed';
+    String(payload.passwordSalt ?? payload.password_salt ?? '').trim() || String(current?.password_salt ?? '').trim() || 'remote_managed';
   const profileImageDataUrl =
     Object.prototype.hasOwnProperty.call(payload, 'profileImageDataUrl') ||
     Object.prototype.hasOwnProperty.call(payload, 'profile_image_data')
       ? payload.profileImageDataUrl ?? payload.profile_image_data ?? null
-      : existing?.profile_image_data ?? null;
+      : current?.profile_image_data ?? null;
   const profileImageFormat =
     Object.prototype.hasOwnProperty.call(payload, 'profileImageFormat') ||
     Object.prototype.hasOwnProperty.call(payload, 'profile_image_format')
       ? payload.profileImageFormat ?? payload.profile_image_format ?? null
-      : existing?.profile_image_format ?? null;
+      : current?.profile_image_format ?? null;
   const profileImageUpdatedAt =
     Object.prototype.hasOwnProperty.call(payload, 'profileImageUpdatedAt') ||
     Object.prototype.hasOwnProperty.call(payload, 'profile_image_updated_at')
       ? payload.profileImageUpdatedAt ?? payload.profile_image_updated_at ?? null
-      : existing?.profile_image_updated_at ?? null;
-  let resolvedEmail = incomingEmail || String(existing?.email ?? '').trim().toLowerCase();
-  if (resolvedEmail) {
-    const duplicateEmailOwner = db
-      .prepare('SELECT id FROM employees WHERE lower(email) = ? AND id <> ? LIMIT 1')
-      .get(resolvedEmail, employeeId) as { id?: string | null } | undefined;
-    if (duplicateEmailOwner?.id) {
-      resolvedEmail = String(existing?.email ?? '').trim().toLowerCase();
-    }
-  }
+      : current?.profile_image_updated_at ?? null;
+  const fallbackEmail = String(current?.email ?? '').trim().toLowerCase();
+  let resolvedEmail = incomingEmail || fallbackEmail || `sync-missing-${employeeId.toLowerCase()}@local.invalid`;
+  repairLegacyEmployeeIdentity(db, employeeId, incomingSupabaseUserId, resolvedEmail);
+  resolvedEmail = resolvedEmail.trim().toLowerCase();
+
+  const remoteLastModified = String(
+    payload.lastModified ?? payload.updatedAt ?? payload.updated_at ?? payload.createdAt ?? now
+  );
 
   db.prepare(
     `
@@ -2751,36 +2784,36 @@ const applyRemoteEmployee = (db: Database.Database, payload: any, version: numbe
     last_name: lastName,
     full_name: resolvedFullName,
     email: resolvedEmail,
-    phone: payload.phone ?? existing?.phone ?? '',
-    position: payload.position ?? existing?.position ?? '',
-    department: payload.department ?? existing?.department ?? '',
-    address: payload.address ?? existing?.address ?? payload.location ?? existing?.location ?? '',
-    role: payload.role ?? existing?.role ?? 'employee',
-    status: payload.status ?? existing?.status ?? 'active',
+    phone: payload.phone ?? current?.phone ?? '',
+    position: payload.position ?? current?.position ?? '',
+    department: payload.department ?? current?.department ?? '',
+    address: payload.address ?? current?.address ?? payload.location ?? current?.location ?? '',
+    role: payload.role ?? current?.role ?? 'employee',
+    status: payload.status ?? current?.status ?? 'active',
     password_hash: passwordHash,
     password_salt: passwordSalt,
-    supabase_user_id: payload.supabaseUserId ?? existing?.supabase_user_id ?? null,
-    auth_sync_status: payload.authSyncStatus ?? existing?.auth_sync_status ?? null,
+    supabase_user_id: payload.supabaseUserId ?? payload.supabase_user_id ?? current?.supabase_user_id ?? null,
+    auth_sync_status: payload.authSyncStatus ?? payload.auth_sync_status ?? current?.auth_sync_status ?? null,
     auth_last_error: null,
     pending_password_enc: null,
-    provisioned_at: payload.provisionedAt ?? existing?.provisioned_at ?? null,
+    provisioned_at: payload.provisionedAt ?? payload.provisioned_at ?? current?.provisioned_at ?? null,
     last_verified_at: null,
     verification_expires_at: null,
     hashed_session_token: null,
-    created_at: payload.createdAt ?? existing?.created_at ?? now,
-    location: payload.location ?? existing?.location ?? '',
+    created_at: payload.createdAt ?? payload.created_at ?? current?.created_at ?? now,
+    location: payload.location ?? current?.location ?? '',
     profile_image_data: profileImageDataUrl,
     profile_image_format: profileImageFormat,
     profile_image_updated_at: profileImageUpdatedAt,
-    two_factor_enabled: toBoolInt(payload.twoFactorEnabled ?? payload.two_factor_enabled ?? existing?.two_factor_enabled),
-    email_notifications: toBoolInt(payload.emailNotifications ?? payload.email_notifications ?? existing?.email_notifications),
-    low_stock_alerts: toBoolInt(payload.lowStockAlerts ?? payload.low_stock_alerts ?? existing?.low_stock_alerts),
-    language: payload.language ?? existing?.language ?? 'English',
+    two_factor_enabled: toBoolInt(payload.twoFactorEnabled ?? payload.two_factor_enabled ?? current?.two_factor_enabled),
+    email_notifications: toBoolInt(payload.emailNotifications ?? payload.email_notifications ?? current?.email_notifications),
+    low_stock_alerts: toBoolInt(payload.lowStockAlerts ?? payload.low_stock_alerts ?? current?.low_stock_alerts),
+    language: payload.language ?? current?.language ?? 'English',
     sync_status: 'synced',
     is_dirty: 0,
-    last_modified: payload.lastModified ?? now,
+    last_modified: remoteLastModified,
     last_synced_at: now,
-    deleted_at: payload.deletedAt ?? existing?.deleted_at ?? null,
+    deleted_at: payload.deletedAt ?? payload.deleted_at ?? current?.deleted_at ?? null,
     version
   });
 };
