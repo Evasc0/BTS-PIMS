@@ -53,9 +53,7 @@ export function Sidebar({ user, currentPage, onNavigate, onLogout }: SidebarProp
     <aside className="w-64 bg-white border-r border-gray-200 flex flex-col">
       <div className="p-6 border-b border-gray-200">
         <div className="flex items-center gap-3 mb-4">
-          <div className="w-10 h-10 bg-indigo-600 rounded-lg flex items-center justify-center">
-            <Package className="w-6 h-6 text-white" />
-          </div>
+          <img src="/LOGO.png" alt="BTS Logo" className="w-10 h-10 object-contain" />
           <div>
             <h1 className="font-bold text-gray-900">BTS</h1>
             <p className="text-xs text-gray-500">Property Inventory Management System</p>
