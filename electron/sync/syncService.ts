@@ -1095,6 +1095,76 @@ const getLocalVersion = (db: Database.Database, entityType: string, recordId: st
   return getLocalRecordMeta(db, entityType, recordId).version;
 };
 
+const getLocalEmployeeMetaByIdentity = (
+  db: Database.Database,
+  remoteData: any
+): { exists: boolean; version: number; lastModified: string | null } => {
+  const supabaseUserId = String(remoteData?.supabaseUserId ?? remoteData?.supabase_user_id ?? '').trim();
+  if (supabaseUserId) {
+    const bySupabase = db
+      .prepare('SELECT version, last_modified FROM employees WHERE supabase_user_id = ? LIMIT 1')
+      .get(supabaseUserId) as { version?: number; last_modified?: string | null } | undefined;
+    if (bySupabase) {
+      return {
+        exists: true,
+        version: readVersion(bySupabase.version, 0),
+        lastModified: bySupabase.last_modified ?? null
+      };
+    }
+  }
+
+  const email = String(remoteData?.email ?? '').trim().toLowerCase();
+  if (email) {
+    const byEmail = db
+      .prepare('SELECT version, last_modified FROM employees WHERE lower(email) = ? LIMIT 1')
+      .get(email) as { version?: number; last_modified?: string | null } | undefined;
+    if (byEmail) {
+      return {
+        exists: true,
+        version: readVersion(byEmail.version, 0),
+        lastModified: byEmail.last_modified ?? null
+      };
+    }
+  }
+
+  return { exists: false, version: 0, lastModified: null };
+};
+
+const getLocalRecordMetaForRemote = (
+  db: Database.Database,
+  entityType: string,
+  recordId: string,
+  remoteData: any
+): { exists: boolean; version: number; lastModified: string | null } => {
+  const direct = getLocalRecordMeta(db, entityType, recordId);
+  if (direct.exists) return direct;
+  if (entityType !== 'employees') return direct;
+  return getLocalEmployeeMetaByIdentity(db, remoteData);
+};
+
+const resolveLocalEmployeeRecordIdForRemote = (db: Database.Database, recordId: string, remoteData: any): string => {
+  const direct = db.prepare('SELECT id FROM employees WHERE id = ? LIMIT 1').get(recordId) as { id?: string } | undefined;
+  if (direct?.id) return String(direct.id);
+
+  const supabaseUserId = String(remoteData?.supabaseUserId ?? remoteData?.supabase_user_id ?? '').trim();
+  if (supabaseUserId) {
+    const bySupabase = db
+      .prepare('SELECT id FROM employees WHERE supabase_user_id = ? LIMIT 1')
+      .get(supabaseUserId) as { id?: string } | undefined;
+    if (bySupabase?.id) return String(bySupabase.id);
+  }
+
+  const email = String(remoteData?.email ?? '').trim().toLowerCase();
+  if (email) {
+    const byEmail = db
+      .prepare('SELECT id FROM employees WHERE lower(email) = ? LIMIT 1')
+      .get(email) as { id?: string } | undefined;
+    if (byEmail?.id) return String(byEmail.id);
+  }
+
+  return recordId;
+};
+
 const normalizeActorRole = (value: unknown): SyncRole | null => {
   const role = String(value || '')
     .trim()
@@ -2476,10 +2546,80 @@ const summarizeFullSyncRequest = (request: FullSyncRequestRow, chunks: FullSyncC
 const toBoolInt = (value: unknown): number => (value ? 1 : 0);
 
 const applyRemoteEmployee = (db: Database.Database, payload: any, version: number): void => {
-  const employeeId = String(payload?.id ?? '').trim();
-  if (!employeeId) return;
+  const incomingEmployeeId = String(payload?.id ?? '').trim();
+  if (!incomingEmployeeId) return;
+  const incomingSupabaseUserId = String(payload?.supabaseUserId ?? payload?.supabase_user_id ?? '').trim();
+  const incomingEmail = String(payload?.email ?? '').trim().toLowerCase();
   const now = nowIso();
-  const existing = db
+
+  const selectEmployeeById = db.prepare(
+    `SELECT
+        id, first_name, last_name, email, phone, department, position, role, status, address, location, password_hash, password_salt,
+        supabase_user_id, auth_sync_status, provisioned_at, created_at, two_factor_enabled, email_notifications, low_stock_alerts, language,
+        profile_image_data, profile_image_format, profile_image_updated_at, deleted_at
+       FROM employees
+       WHERE id = ?
+       LIMIT 1`
+  );
+  const selectEmployeeBySupabase = db.prepare(
+    `SELECT
+        id, first_name, last_name, email, phone, department, position, role, status, address, location, password_hash, password_salt,
+        supabase_user_id, auth_sync_status, provisioned_at, created_at, two_factor_enabled, email_notifications, low_stock_alerts, language,
+        profile_image_data, profile_image_format, profile_image_updated_at, deleted_at
+       FROM employees
+       WHERE supabase_user_id = ?
+       LIMIT 1`
+  );
+  const selectEmployeeByEmail = db.prepare(
+    `SELECT
+        id, first_name, last_name, email, phone, department, position, role, status, address, location, password_hash, password_salt,
+        supabase_user_id, auth_sync_status, provisioned_at, created_at, two_factor_enabled, email_notifications, low_stock_alerts, language,
+        profile_image_data, profile_image_format, profile_image_updated_at, deleted_at
+       FROM employees
+       WHERE lower(email) = ?
+       LIMIT 1`
+  );
+
+  let existing = selectEmployeeById.get(incomingEmployeeId) as
+    | {
+        id?: string | null;
+        first_name?: string | null;
+        last_name?: string | null;
+        email?: string | null;
+        phone?: string | null;
+        department?: string | null;
+        position?: string | null;
+        role?: string | null;
+        status?: string | null;
+        address?: string | null;
+        location?: string | null;
+        password_hash?: string | null;
+        password_salt?: string | null;
+        supabase_user_id?: string | null;
+        auth_sync_status?: string | null;
+        provisioned_at?: string | null;
+        created_at?: string | null;
+        two_factor_enabled?: number | null;
+        email_notifications?: number | null;
+        low_stock_alerts?: number | null;
+        language?: string | null;
+        profile_image_data?: string | null;
+        profile_image_format?: string | null;
+        profile_image_updated_at?: string | null;
+        deleted_at?: string | null;
+      }
+    | undefined;
+
+  if (!existing && incomingSupabaseUserId) {
+    existing = selectEmployeeBySupabase.get(incomingSupabaseUserId) as typeof existing;
+  }
+  if (!existing && incomingEmail) {
+    existing = selectEmployeeByEmail.get(incomingEmail) as typeof existing;
+  }
+
+  const employeeId = String(existing?.id || incomingEmployeeId).trim() || incomingEmployeeId;
+
+  const existingById = db
     .prepare(
       `SELECT
         first_name, last_name, email, phone, department, position, role, status, address, location, password_hash, password_salt,
@@ -2516,6 +2656,7 @@ const applyRemoteEmployee = (db: Database.Database, payload: any, version: numbe
         profile_image_updated_at?: string | null;
       }
     | undefined;
+  existing = (existingById || existing) as typeof existing;
   const fullName = String(payload.fullName ?? payload.full_name ?? '').trim();
   const splitName = splitFullName(fullName);
   const firstName = String(payload.firstName ?? payload.first_name ?? '').trim() || splitName.firstName || existing?.first_name || '';
@@ -2540,6 +2681,16 @@ const applyRemoteEmployee = (db: Database.Database, payload: any, version: numbe
     Object.prototype.hasOwnProperty.call(payload, 'profile_image_updated_at')
       ? payload.profileImageUpdatedAt ?? payload.profile_image_updated_at ?? null
       : existing?.profile_image_updated_at ?? null;
+  let resolvedEmail = incomingEmail || String(existing?.email ?? '').trim().toLowerCase();
+  if (resolvedEmail) {
+    const duplicateEmailOwner = db
+      .prepare('SELECT id FROM employees WHERE lower(email) = ? AND id <> ? LIMIT 1')
+      .get(resolvedEmail, employeeId) as { id?: string | null } | undefined;
+    if (duplicateEmailOwner?.id) {
+      resolvedEmail = String(existing?.email ?? '').trim().toLowerCase();
+    }
+  }
+
   db.prepare(
     `
       INSERT INTO employees (
@@ -2599,7 +2750,7 @@ const applyRemoteEmployee = (db: Database.Database, payload: any, version: numbe
     first_name: firstName,
     last_name: lastName,
     full_name: resolvedFullName,
-    email: payload.email ?? existing?.email ?? '',
+    email: resolvedEmail,
     phone: payload.phone ?? existing?.phone ?? '',
     position: payload.position ?? existing?.position ?? '',
     department: payload.department ?? existing?.department ?? '',
@@ -2629,7 +2780,7 @@ const applyRemoteEmployee = (db: Database.Database, payload: any, version: numbe
     is_dirty: 0,
     last_modified: payload.lastModified ?? now,
     last_synced_at: now,
-    deleted_at: payload.deletedAt ?? null,
+    deleted_at: payload.deletedAt ?? existing?.deleted_at ?? null,
     version
   });
 };
@@ -4053,7 +4204,7 @@ const pullAdminChanges = async (
       }
       const remoteData = readRemoteData(row);
       const remoteVersion = readVersion(remoteData?.version, 1);
-      const localMeta = getLocalRecordMeta(db, entityType, recordId);
+      const localMeta = getLocalRecordMetaForRemote(db, entityType, recordId, remoteData);
       const localVersion = localMeta.version;
       const remoteUpdatedAt = readRemoteUpdatedAt(row, remoteData);
       const remoteUpdatedMs = parseTimestamp(remoteUpdatedAt);
@@ -4087,7 +4238,11 @@ const pullAdminChanges = async (
 
       try {
         if (operation === 'delete') {
-          applyRemoteDelete(db, entityType, recordId, payload.deletedAt || rowCreatedAt || nowIso(), resolvedVersion);
+          const deleteRecordId =
+            entityType === 'employees'
+              ? resolveLocalEmployeeRecordIdForRemote(db, recordId, payload)
+              : recordId;
+          applyRemoteDelete(db, entityType, deleteRecordId, payload.deletedAt || rowCreatedAt || nowIso(), resolvedVersion);
         } else {
           applyRemoteUpsert(db, entityType, payload, resolvedVersion);
         }
@@ -4233,7 +4388,7 @@ const pullEmployeeAssignedChanges = async (
       }
       const remoteData = readRemoteData(row);
       const remoteVersion = readVersion(remoteData?.version, 1);
-      const localMeta = getLocalRecordMeta(db, entityType, recordId);
+      const localMeta = getLocalRecordMetaForRemote(db, entityType, recordId, remoteData);
       const localVersion = localMeta.version;
       const remoteUpdatedAt = readRemoteUpdatedAt(row, remoteData);
       const remoteUpdatedMs = parseTimestamp(remoteUpdatedAt);
@@ -4296,7 +4451,8 @@ const pullEmployeeAssignedChanges = async (
         } else {
           if (operation === 'delete') {
             const deletedAt = payload.deletedAt ?? payload.deleted_at ?? rowCreatedAt ?? nowIso();
-            applyRemoteDelete(db, 'employees', recordId, deletedAt, resolvedVersion);
+            const deleteEmployeeId = resolveLocalEmployeeRecordIdForRemote(db, recordId, payload);
+            applyRemoteDelete(db, 'employees', deleteEmployeeId, deletedAt, resolvedVersion);
           } else {
             applyRemoteEmployee(db, payload, resolvedVersion);
           }
@@ -4438,7 +4594,7 @@ const pullEmployeeSubmissionsForAdmin = async (
       }
       const remoteData = readRemoteData(row);
       const remoteVersion = readVersion(remoteData?.version, 1);
-      const localMeta = getLocalRecordMeta(db, entityType, recordId);
+      const localMeta = getLocalRecordMetaForRemote(db, entityType, recordId, remoteData);
       const localVersion = localMeta.version;
       const remoteUpdatedAt = readRemoteUpdatedAt(row, remoteData);
       const remoteUpdatedMs = parseTimestamp(remoteUpdatedAt);
@@ -4469,7 +4625,11 @@ const pullEmployeeSubmissionsForAdmin = async (
 
       try {
         if (operation === 'delete') {
-          applyRemoteDelete(db, entityType, recordId, payload.deletedAt || rowCreatedAt || nowIso(), resolvedVersion);
+          const deleteRecordId =
+            entityType === 'employees'
+              ? resolveLocalEmployeeRecordIdForRemote(db, recordId, payload)
+              : recordId;
+          applyRemoteDelete(db, entityType, deleteRecordId, payload.deletedAt || rowCreatedAt || nowIso(), resolvedVersion);
         } else {
           applyRemoteUpsert(db, entityType, payload, resolvedVersion);
         }

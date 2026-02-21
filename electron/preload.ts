@@ -72,6 +72,10 @@ contextBridge.exposeInMainWorld('api', {
     }) => ipcRenderer.invoke('auth:create-user', payload),
     changePassword: (payload: { userId: string; currentPassword: string; newPassword: string }) =>
       ipcRenderer.invoke('auth:change-password', payload),
+    changeEmail: (payload: { userId: string; newEmail: string }) =>
+      ipcRenderer.invoke('auth:change-email', payload),
+    adminUpdateEmail: (payload: { adminUserId: string; targetEmployeeId: string; newEmail: string }) =>
+      ipcRenderer.invoke('auth:admin-update-email', payload),
     adminResetPassword: (payload: { adminUserId: string; targetEmployeeId: string; newPassword: string }) =>
       ipcRenderer.invoke('auth:admin-reset-password', payload),
     logout: (userId: string) => ipcRenderer.invoke('auth:logout', userId)

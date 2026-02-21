@@ -238,6 +238,41 @@ export function registerIpc(mainWindow: BrowserWindow): void {
   );
 
   ipcMain.handle(
+    'auth:change-email',
+    async (
+      _evt,
+      payload: {
+        userId: string;
+        newEmail: string;
+      }
+    ) => {
+      const result = await authService.changeOwnEmail(payload);
+      if (result.success) {
+        notify('employees', [payload.userId]);
+      }
+      return result;
+    }
+  );
+
+  ipcMain.handle(
+    'auth:admin-update-email',
+    async (
+      _evt,
+      payload: {
+        adminUserId: string;
+        targetEmployeeId: string;
+        newEmail: string;
+      }
+    ) => {
+      const result = await authService.adminUpdateEmployeeEmail(payload);
+      if (result.success) {
+        notify('employees', [payload.targetEmployeeId]);
+      }
+      return result;
+    }
+  );
+
+  ipcMain.handle(
     'auth:admin-reset-password',
     async (
       _evt,

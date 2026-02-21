@@ -369,6 +369,33 @@ export const supabaseAuth = {
     }
   },
 
+  async updateUserEmail(accessToken: string, newEmail: string): Promise<void> {
+    if (!isConfigured()) {
+      throw new Error(
+        'Supabase auth is not configured. Set SUPABASE_URL and SUPABASE_ANON_KEY (or SUPABASE_PUBLISHABLE_KEY).'
+      );
+    }
+    if (!accessToken) {
+      throw new Error('Missing authenticated access token for email update.');
+    }
+    const email = String(newEmail || '').trim().toLowerCase();
+    if (!email) {
+      throw new Error('New email is required.');
+    }
+
+    const response = await authRequest('user', {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${accessToken}`
+      },
+      body: JSON.stringify({ email })
+    });
+
+    if (!response.ok) {
+      throw new Error(await parseSupabaseError(response));
+    }
+  },
+
   async adminResetUserPassword(input: { supabaseUserId: string; newPassword: string }): Promise<void> {
     const supabaseUrl = getSupabaseUrl();
     if (!supabaseUrl) {
@@ -395,6 +422,39 @@ export const supabaseAuth = {
         'content-type': 'application/json'
       },
       body: JSON.stringify({ password })
+    });
+
+    if (!response.ok) {
+      throw new Error(await parseSupabaseError(response));
+    }
+  },
+
+  async adminUpdateUserEmail(input: { supabaseUserId: string; newEmail: string }): Promise<void> {
+    const supabaseUrl = getSupabaseUrl();
+    if (!supabaseUrl) {
+      throw new Error('Supabase auth is not configured. Set SUPABASE_URL first.');
+    }
+    const serviceRoleKey = getSupabaseServiceRoleKey();
+    if (!serviceRoleKey) {
+      throw new Error('SUPABASE_SERVICE_ROLE_KEY is required for admin email update.');
+    }
+    const supabaseUserId = String(input.supabaseUserId || '').trim();
+    if (!supabaseUserId) {
+      throw new Error('Target Supabase user id is required.');
+    }
+    const email = String(input.newEmail || '').trim().toLowerCase();
+    if (!email) {
+      throw new Error('New email is required.');
+    }
+
+    const response = await fetch(`${supabaseUrl}/auth/v1/admin/users/${encodeURIComponent(supabaseUserId)}`, {
+      method: 'PUT',
+      headers: {
+        apikey: serviceRoleKey,
+        Authorization: `Bearer ${serviceRoleKey}`,
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({ email })
     });
 
     if (!response.ok) {

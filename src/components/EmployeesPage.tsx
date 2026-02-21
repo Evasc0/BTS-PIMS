@@ -214,6 +214,28 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
       return;
     }
 
+    const previousEmail = String(selectedEmployee.email || '').trim().toLowerCase();
+    const emailChanged = normalizedEmail !== previousEmail;
+    if (emailChanged) {
+      if (!navigator.onLine) {
+        setFormError('Internet connection is required to change employee email.');
+        return;
+      }
+      if (!window.api?.auth?.adminUpdateEmail) {
+        setFormError('Admin email update API is unavailable.');
+        return;
+      }
+      const emailResult = await window.api.auth.adminUpdateEmail({
+        adminUserId: user.id,
+        targetEmployeeId: selectedEmployee.id,
+        newEmail: normalizedEmail
+      });
+      if (!emailResult.success) {
+        setFormError(emailResult.error || 'Unable to update employee email.');
+        return;
+      }
+    }
+
     const split = splitFullName(formState.fullName);
     const payload: Partial<Employee> = {
       fullName: formState.fullName.trim(),

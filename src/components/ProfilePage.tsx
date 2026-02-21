@@ -117,6 +117,27 @@ export function ProfilePage({ user }: ProfilePageProps) {
       return;
     }
 
+    const previousEmail = String(user.email || '').trim().toLowerCase();
+    const emailChanged = normalizedEmail !== previousEmail;
+    if (emailChanged) {
+      if (!navigator.onLine) {
+        setFormError('Internet connection is required to change your email.');
+        return;
+      }
+      if (!window.api?.auth?.changeEmail) {
+        setFormError('Secure email update API is unavailable.');
+        return;
+      }
+      const emailResult = await window.api.auth.changeEmail({
+        userId: user.id,
+        newEmail: normalizedEmail
+      });
+      if (!emailResult.success) {
+        setFormError(emailResult.error || 'Unable to update email.');
+        return;
+      }
+    }
+
     const trimmedAddress = profileState.address.trim();
     await db.employees.update(user.id, {
       firstName: profileState.firstName.trim(),
@@ -135,7 +156,7 @@ export function ProfilePage({ user }: ProfilePageProps) {
       entityType: 'employee',
       entityId: user.id,
       performedByEmployeeId: user.id,
-      details: 'Profile updated'
+      details: emailChanged ? 'Profile updated (email changed)' : 'Profile updated'
     });
 
     setIsEditing(false);
@@ -422,8 +443,11 @@ export function ProfilePage({ user }: ProfilePageProps) {
                 <input
                   type="email"
                   value={profileState.email}
-                  disabled
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg outline-none bg-gray-50 text-gray-600"
+                  onChange={(e) => setProfileState({ ...profileState, email: e.target.value })}
+                  disabled={!isEditing}
+                  className={`w-full px-4 py-2 border border-gray-300 rounded-lg outline-none ${
+                    isEditing ? 'focus:ring-2 focus:ring-indigo-500 focus:border-transparent' : 'bg-gray-50 text-gray-600'
+                  }`}
                 />
               </div>
               <div>

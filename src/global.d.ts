@@ -141,7 +141,17 @@ interface AuthChangePasswordResult {
   error?: string;
   requiresInternet?: boolean;
 }
+interface AuthChangeEmailResult {
+  success: boolean;
+  error?: string;
+  requiresInternet?: boolean;
+}
 interface AuthAdminResetPasswordResult {
+  success: boolean;
+  error?: string;
+  requiresInternet?: boolean;
+}
+interface AuthAdminUpdateEmailResult {
   success: boolean;
   error?: string;
   requiresInternet?: boolean;
@@ -221,6 +231,15 @@ declare global {
           currentPassword: string;
           newPassword: string;
         }) => Promise<AuthChangePasswordResult>;
+        changeEmail: (payload: {
+          userId: string;
+          newEmail: string;
+        }) => Promise<AuthChangeEmailResult>;
+        adminUpdateEmail: (payload: {
+          adminUserId: string;
+          targetEmployeeId: string;
+          newEmail: string;
+        }) => Promise<AuthAdminUpdateEmailResult>;
         adminResetPassword: (payload: {
           adminUserId: string;
           targetEmployeeId: string;

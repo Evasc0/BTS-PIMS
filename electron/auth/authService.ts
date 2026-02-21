@@ -39,6 +39,8 @@ export type RefreshSessionResult =
 export type ChangePasswordResult =
   | { success: true; accessToken: string; expiresAt: string | null }
   | { success: false; error: string; requiresInternet?: boolean };
+export type ChangeEmailResult = { success: true } | { success: false; error: string; requiresInternet?: boolean };
+export type AdminUpdateEmailResult = { success: true } | { success: false; error: string; requiresInternet?: boolean };
 export type AdminResetPasswordResult = { success: true } | { success: false; error: string; requiresInternet?: boolean };
 
 interface EmployeeRow {
@@ -910,6 +912,158 @@ export const authService = {
         return {
           success: false,
           error: 'Internet connection required to update your password.',
+          requiresInternet: true
+        };
+      }
+      return { success: false, error: message };
+    }
+  },
+
+  async changeOwnEmail(input: { userId: string; newEmail: string }): Promise<ChangeEmailResult> {
+    const db = dataStore.getDb();
+    const employee = getEmployeeById(db, input.userId);
+    if (!employee) {
+      return { success: false, error: 'User profile was not found locally.' };
+    }
+    if (normalizeStatus(employee.status) !== 'active') {
+      return { success: false, error: 'Account is inactive. Contact administrator.' };
+    }
+    if (!supabaseAuth.isConfigured()) {
+      return {
+        success: false,
+        error: 'Supabase auth is not configured. Set SUPABASE_URL and SUPABASE_ANON_KEY (or SUPABASE_PUBLISHABLE_KEY).'
+      };
+    }
+
+    const normalizedEmail = String(input.newEmail || '').trim().toLowerCase();
+    if (!normalizedEmail) {
+      return { success: false, error: 'New email is required.' };
+    }
+    if (normalizedEmail === String(employee.email || '').trim().toLowerCase()) {
+      return { success: true };
+    }
+
+    try {
+      const refreshed = await authService.refreshSession(employee.id);
+      if (!refreshed.success) {
+        const failure = refreshed as Extract<RefreshSessionResult, { success: false }>;
+        return {
+          success: false,
+          error: failure.error || 'Internet connection required to update your email.',
+          requiresInternet: failure.requiresInternet
+        };
+      }
+
+      await supabaseAuth.updateUserEmail(refreshed.accessToken, normalizedEmail);
+
+      if (employee.supabase_user_id) {
+        try {
+          await supabaseAuth.upsertAppUserStatus({
+            adminAccessToken: refreshed.accessToken,
+            supabaseUserId: employee.supabase_user_id,
+            employeeId: employee.id,
+            email: normalizedEmail,
+            role: normalizeRole(employee.role),
+            status: normalizeStatus(employee.status)
+          });
+        } catch {
+          // Email update already succeeded in auth; keep app_users upsert best-effort.
+        }
+      }
+      return { success: true };
+    } catch (error: unknown) {
+      const message = normalizeLoginError(error);
+      if (isConnectivityError(message)) {
+        return {
+          success: false,
+          error: 'Internet connection required to update your email.',
+          requiresInternet: true
+        };
+      }
+      return { success: false, error: message };
+    }
+  },
+
+  async adminUpdateEmployeeEmail(input: {
+    adminUserId: string;
+    targetEmployeeId: string;
+    newEmail: string;
+  }): Promise<AdminUpdateEmailResult> {
+    const db = dataStore.getDb();
+    const admin = getEmployeeById(db, input.adminUserId);
+    if (!admin || normalizeStatus(admin.status) !== 'active' || normalizeRole(admin.role) !== 'system_admin') {
+      return { success: false, error: 'Only active system admin accounts can update employee email.' };
+    }
+
+    const targetEmployeeId = String(input.targetEmployeeId || '').trim();
+    if (!targetEmployeeId) {
+      return { success: false, error: 'Target employee id is required.' };
+    }
+    const target = getEmployeeById(db, targetEmployeeId);
+    if (!target) {
+      return { success: false, error: 'Target employee profile was not found locally.' };
+    }
+
+    const normalizedEmail = String(input.newEmail || '').trim().toLowerCase();
+    if (!normalizedEmail) {
+      return { success: false, error: 'New email is required.' };
+    }
+    if (normalizedEmail === String(target.email || '').trim().toLowerCase()) {
+      return { success: true };
+    }
+    if (!supabaseAuth.isConfigured()) {
+      return {
+        success: false,
+        error: 'Supabase auth is not configured. Set SUPABASE_URL and SUPABASE_ANON_KEY (or SUPABASE_PUBLISHABLE_KEY).'
+      };
+    }
+    if (!target.supabase_user_id) {
+      return {
+        success: false,
+        error: 'Employee is not linked to Supabase Auth yet. Re-provision this account first.'
+      };
+    }
+
+    let adminAccessToken = getCachedSessionToken(admin.id);
+    if (!adminAccessToken) {
+      const refreshed = await refreshCachedSessionToken(admin.id);
+      if (!refreshed.success) {
+        const failure = refreshed as Extract<RefreshSessionResult, { success: false }>;
+        return {
+          success: false,
+          error: failure.error || 'Internet connection required to update employee email.',
+          requiresInternet: failure.requiresInternet
+        };
+      }
+      adminAccessToken = refreshed.accessToken;
+    }
+
+    try {
+      await supabaseAuth.adminUpdateUserEmail({
+        supabaseUserId: target.supabase_user_id,
+        newEmail: normalizedEmail
+      });
+
+      try {
+        await supabaseAuth.upsertAppUserStatus({
+          adminAccessToken,
+          supabaseUserId: target.supabase_user_id,
+          employeeId: target.id,
+          email: normalizedEmail,
+          role: normalizeRole(target.role),
+          status: normalizeStatus(target.status)
+        });
+      } catch {
+        // Email update already succeeded in auth; keep app_users upsert best-effort.
+      }
+
+      return { success: true };
+    } catch (error: unknown) {
+      const message = normalizeLoginError(error);
+      if (isConnectivityError(message)) {
+        return {
+          success: false,
+          error: 'Internet connection required to update employee email.',
           requiresInternet: true
         };
       }
