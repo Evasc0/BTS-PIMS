@@ -49,6 +49,9 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
   const [imageBusy, setImageBusy] = useState(false);
   const [imageChangedAt, setImageChangedAt] = useState<string | null>(null);
   const [showCreatePassword, setShowCreatePassword] = useState(false);
+  const [resetPassword, setResetPassword] = useState('');
+  const [showResetPassword, setShowResetPassword] = useState(false);
+  const [resetPasswordBusy, setResetPasswordBusy] = useState(false);
 
   const employees = useLiveQuery(() => db.employees.toArray(), []);
   const products = useLiveQuery(() => db.products.toArray(), []);
@@ -90,6 +93,9 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
     setFormSuccess(null);
     setImageChangedAt(null);
     setShowCreatePassword(false);
+    setResetPassword('');
+    setShowResetPassword(false);
+    setResetPasswordBusy(false);
   };
 
   const openAddModal = () => {
@@ -115,6 +121,9 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
     setFormError(null);
     setFormSuccess(null);
     setImageChangedAt(null);
+    setResetPassword('');
+    setShowResetPassword(false);
+    setResetPasswordBusy(false);
   };
 
   const handleAddEmployee = async (event: React.FormEvent) => {
@@ -243,6 +252,68 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
     setSelectedEmployee(null);
     setFormSuccess('Employee updated.');
     setImageChangedAt(null);
+  };
+
+  const generateStrongPassword = (): string => {
+    const lower = 'abcdefghjkmnpqrstuvwxyz';
+    const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+    const digits = '23456789';
+    const symbols = '@#$%&*!?';
+    const all = `${lower}${upper}${digits}${symbols}`;
+    const randomChar = (set: string) => set[Math.floor(Math.random() * set.length)];
+    const chars = [randomChar(lower), randomChar(upper), randomChar(digits), randomChar(symbols)];
+    while (chars.length < 12) chars.push(randomChar(all));
+    for (let i = chars.length - 1; i > 0; i -= 1) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [chars[i], chars[j]] = [chars[j], chars[i]];
+    }
+    return chars.join('');
+  };
+
+  const handleAdminResetPassword = async () => {
+    if (!canManageEmployees || !selectedEmployee) return;
+    setFormError(null);
+    setFormSuccess(null);
+    const nextPassword = resetPassword.trim();
+    if (!nextPassword) {
+      setFormError('Enter a new password or generate one first.');
+      return;
+    }
+    if (!window.api?.auth?.adminResetPassword) {
+      setFormError('Admin reset password API is unavailable.');
+      return;
+    }
+
+    setResetPasswordBusy(true);
+    try {
+      const result = await window.api.auth.adminResetPassword({
+        adminUserId: user.id,
+        targetEmployeeId: selectedEmployee.id,
+        newPassword: nextPassword
+      });
+      if (!result.success) {
+        setFormError(result.error || 'Unable to reset employee password.');
+        return;
+      }
+
+      await logActivity({
+        action: 'UPDATE',
+        entityType: 'employee',
+        entityId: selectedEmployee.id,
+        performedByEmployeeId: user.id,
+        details: `Password reset for employee: ${selectedEmployee.fullName}`
+      });
+
+      setFormSuccess('Employee password reset successfully.');
+      setResetPassword('');
+      setShowResetPassword(false);
+
+      if (navigator.onLine && window.api?.sync?.push) {
+        void window.api.sync.push(user.id);
+      }
+    } finally {
+      setResetPasswordBusy(false);
+    }
   };
 
   const handleDeleteEmployee = async (employeeId: string, employeeName: string) => {
@@ -673,6 +744,47 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
                     <option value="active">Active</option>
                     <option value="inactive">Inactive</option>
                   </select>
+                </div>
+              </div>
+              <div className="border-t border-gray-100 pt-4">
+                <p className="text-sm font-medium text-gray-800">Reset Employee Password</p>
+                <p className="text-xs text-gray-500 mt-1">Admin-only action. This updates Supabase Auth and syncs to all devices.</p>
+                <div className="mt-3 grid grid-cols-1 md:grid-cols-[1fr_auto_auto] gap-2">
+                  <div className="flex items-center border border-gray-300 rounded-lg focus-within:ring-2 focus-within:ring-indigo-500 focus-within:border-transparent">
+                    <input
+                      type={showResetPassword ? 'text' : 'password'}
+                      value={resetPassword}
+                      onChange={(e) => setResetPassword(e.target.value)}
+                      placeholder="New password"
+                      className="w-full flex-1 bg-transparent px-3 py-2 outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowResetPassword((prev) => !prev)}
+                      className="mr-2 inline-flex h-8 w-8 items-center justify-center text-gray-500 hover:text-gray-700"
+                      aria-label={showResetPassword ? 'Hide password' : 'Show password'}
+                    >
+                      {showResetPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setResetPassword(generateStrongPassword());
+                      setShowResetPassword(true);
+                    }}
+                    className="px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50 transition"
+                  >
+                    Generate
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleAdminResetPassword}
+                    disabled={resetPasswordBusy}
+                    className="px-3 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700 transition disabled:opacity-60"
+                  >
+                    {resetPasswordBusy ? 'Resetting...' : 'Reset Password'}
+                  </button>
                 </div>
               </div>
               {formError && <p className="text-sm text-red-600">{formError}</p>}

@@ -72,6 +72,8 @@ contextBridge.exposeInMainWorld('api', {
     }) => ipcRenderer.invoke('auth:create-user', payload),
     changePassword: (payload: { userId: string; currentPassword: string; newPassword: string }) =>
       ipcRenderer.invoke('auth:change-password', payload),
+    adminResetPassword: (payload: { adminUserId: string; targetEmployeeId: string; newPassword: string }) =>
+      ipcRenderer.invoke('auth:admin-reset-password', payload),
     logout: (userId: string) => ipcRenderer.invoke('auth:logout', userId)
   },
   migration: {

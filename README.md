@@ -79,6 +79,8 @@ SUPABASE_URL=https://your-project-ref.supabase.co
 SUPABASE_ANON_KEY=sb_publishable_xxx
 # optional alias:
 # SUPABASE_PUBLISHABLE_KEY=sb_publishable_xxx
+# required for admin password reset of other users:
+SUPABASE_SERVICE_ROLE_KEY=sb_service_role_xxx
 SUPABASE_ADMIN_QUEUE_TABLE=admin_sync_queue
 SUPABASE_EMPLOYEE_QUEUE_TABLE=employee_sync_queue
 SUPABASE_PROFILE_SYNC_QUEUE_TABLE=profile_sync_queue

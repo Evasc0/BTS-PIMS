@@ -141,6 +141,11 @@ interface AuthChangePasswordResult {
   error?: string;
   requiresInternet?: boolean;
 }
+interface AuthAdminResetPasswordResult {
+  success: boolean;
+  error?: string;
+  requiresInternet?: boolean;
+}
 
 declare global {
   interface Window {
@@ -216,6 +221,11 @@ declare global {
           currentPassword: string;
           newPassword: string;
         }) => Promise<AuthChangePasswordResult>;
+        adminResetPassword: (payload: {
+          adminUserId: string;
+          targetEmployeeId: string;
+          newPassword: string;
+        }) => Promise<AuthAdminResetPasswordResult>;
         logout: (userId: string) => Promise<boolean>;
       };
       migration: {

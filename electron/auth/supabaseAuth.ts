@@ -2,6 +2,7 @@ import type { EmployeeRole, EmployeeStatus } from '../shared/types';
 
 const getSupabaseUrl = (): string => (process.env.SUPABASE_URL || '').replace(/\/+$/u, '');
 const getSupabaseAnonKey = (): string => process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_PUBLISHABLE_KEY || '';
+const getSupabaseServiceRoleKey = (): string => process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 const getAppUsersTable = (): string => process.env.SUPABASE_APP_USERS_TABLE || 'app_users';
 
 const isConfigured = (): boolean => Boolean(getSupabaseUrl() && getSupabaseAnonKey());
@@ -359,6 +360,39 @@ export const supabaseAuth = {
       method: 'PUT',
       headers: {
         Authorization: `Bearer ${accessToken}`
+      },
+      body: JSON.stringify({ password })
+    });
+
+    if (!response.ok) {
+      throw new Error(await parseSupabaseError(response));
+    }
+  },
+
+  async adminResetUserPassword(input: { supabaseUserId: string; newPassword: string }): Promise<void> {
+    const supabaseUrl = getSupabaseUrl();
+    if (!supabaseUrl) {
+      throw new Error('Supabase auth is not configured. Set SUPABASE_URL first.');
+    }
+    const serviceRoleKey = getSupabaseServiceRoleKey();
+    if (!serviceRoleKey) {
+      throw new Error('SUPABASE_SERVICE_ROLE_KEY is required for admin password reset.');
+    }
+    const supabaseUserId = String(input.supabaseUserId || '').trim();
+    if (!supabaseUserId) {
+      throw new Error('Target Supabase user id is required.');
+    }
+    const password = String(input.newPassword || '');
+    if (!password) {
+      throw new Error('New password is required.');
+    }
+
+    const response = await fetch(`${supabaseUrl}/auth/v1/admin/users/${encodeURIComponent(supabaseUserId)}`, {
+      method: 'PUT',
+      headers: {
+        apikey: serviceRoleKey,
+        Authorization: `Bearer ${serviceRoleKey}`,
+        'content-type': 'application/json'
       },
       body: JSON.stringify({ password })
     });

@@ -2476,25 +2476,41 @@ const summarizeFullSyncRequest = (request: FullSyncRequestRow, chunks: FullSyncC
 const toBoolInt = (value: unknown): number => (value ? 1 : 0);
 
 const applyRemoteEmployee = (db: Database.Database, payload: any, version: number): void => {
+  const employeeId = String(payload?.id ?? '').trim();
+  if (!employeeId) return;
   const now = nowIso();
   const existing = db
     .prepare(
       `SELECT
-        first_name, last_name, position, address, location, password_hash, password_salt,
+        first_name, last_name, email, phone, department, position, role, status, address, location, password_hash, password_salt,
+        supabase_user_id, auth_sync_status, provisioned_at, created_at, two_factor_enabled, email_notifications, low_stock_alerts, language,
         profile_image_data, profile_image_format, profile_image_updated_at
        FROM employees
        WHERE id = ?
        LIMIT 1`
     )
-    .get(payload.id) as
+    .get(employeeId) as
     | {
         first_name?: string | null;
         last_name?: string | null;
+        email?: string | null;
+        phone?: string | null;
+        department?: string | null;
         position?: string | null;
+        role?: string | null;
+        status?: string | null;
         address?: string | null;
         location?: string | null;
         password_hash?: string | null;
         password_salt?: string | null;
+        supabase_user_id?: string | null;
+        auth_sync_status?: string | null;
+        provisioned_at?: string | null;
+        created_at?: string | null;
+        two_factor_enabled?: number | null;
+        email_notifications?: number | null;
+        low_stock_alerts?: number | null;
+        language?: string | null;
         profile_image_data?: string | null;
         profile_image_format?: string | null;
         profile_image_updated_at?: string | null;
@@ -2504,10 +2520,11 @@ const applyRemoteEmployee = (db: Database.Database, payload: any, version: numbe
   const splitName = splitFullName(fullName);
   const firstName = String(payload.firstName ?? payload.first_name ?? '').trim() || splitName.firstName || existing?.first_name || '';
   const lastName = String(payload.lastName ?? payload.last_name ?? '').trim() || splitName.lastName || existing?.last_name || '';
+  const resolvedFullName = fullName || [firstName, lastName].filter(Boolean).join(' ') || employeeId;
   const passwordHash =
-    String(payload.passwordHash ?? payload.password_hash ?? '').trim() || existing?.password_hash || 'remote_managed';
+    String(payload.passwordHash ?? payload.password_hash ?? '').trim() || String(existing?.password_hash ?? '').trim() || 'remote_managed';
   const passwordSalt =
-    String(payload.passwordSalt ?? payload.password_salt ?? '').trim() || existing?.password_salt || 'remote_managed';
+    String(payload.passwordSalt ?? payload.password_salt ?? '').trim() || String(existing?.password_salt ?? '').trim() || 'remote_managed';
   const profileImageDataUrl =
     Object.prototype.hasOwnProperty.call(payload, 'profileImageDataUrl') ||
     Object.prototype.hasOwnProperty.call(payload, 'profile_image_data')
@@ -2533,7 +2550,7 @@ const applyRemoteEmployee = (db: Database.Database, payload: any, version: numbe
         two_factor_enabled, email_notifications, low_stock_alerts, language,
         sync_status, is_dirty, last_modified, last_synced_at, deleted_at, version
       ) VALUES (
-        @id, @first_name, @last_name, @full_name, @email, @phone, @position, @department, @address, @role, @status, @password_hash, @password_salt,
+        @id, @first_name, @last_name, @full_name, @email, @phone, @position, @department, @address, @role, @status, COALESCE(@password_hash, 'remote_managed'), COALESCE(@password_salt, 'remote_managed'),
         @supabase_user_id, @auth_sync_status, @auth_last_error, @pending_password_enc, @provisioned_at,
         @last_verified_at, @verification_expires_at, @hashed_session_token,
         @created_at, @location, @profile_image_data, @profile_image_format, @profile_image_updated_at,
@@ -2551,8 +2568,8 @@ const applyRemoteEmployee = (db: Database.Database, payload: any, version: numbe
         address = excluded.address,
         role = excluded.role,
         status = excluded.status,
-        password_hash = excluded.password_hash,
-        password_salt = excluded.password_salt,
+        password_hash = COALESCE(excluded.password_hash, employees.password_hash, 'remote_managed'),
+        password_salt = COALESCE(excluded.password_salt, employees.password_salt, 'remote_managed'),
         supabase_user_id = excluded.supabase_user_id,
         auth_sync_status = excluded.auth_sync_status,
         auth_last_error = excluded.auth_last_error,
@@ -2578,36 +2595,36 @@ const applyRemoteEmployee = (db: Database.Database, payload: any, version: numbe
         version = excluded.version
     `
   ).run({
-    id: payload.id,
+    id: employeeId,
     first_name: firstName,
     last_name: lastName,
-    full_name: fullName || [firstName, lastName].filter(Boolean).join(' ') || payload.id,
-    email: payload.email ?? '',
-    phone: payload.phone ?? '',
+    full_name: resolvedFullName,
+    email: payload.email ?? existing?.email ?? '',
+    phone: payload.phone ?? existing?.phone ?? '',
     position: payload.position ?? existing?.position ?? '',
-    department: payload.department ?? '',
+    department: payload.department ?? existing?.department ?? '',
     address: payload.address ?? existing?.address ?? payload.location ?? existing?.location ?? '',
-    role: payload.role ?? 'employee',
-    status: payload.status ?? 'active',
+    role: payload.role ?? existing?.role ?? 'employee',
+    status: payload.status ?? existing?.status ?? 'active',
     password_hash: passwordHash,
     password_salt: passwordSalt,
-    supabase_user_id: payload.supabaseUserId ?? null,
-    auth_sync_status: payload.authSyncStatus ?? null,
+    supabase_user_id: payload.supabaseUserId ?? existing?.supabase_user_id ?? null,
+    auth_sync_status: payload.authSyncStatus ?? existing?.auth_sync_status ?? null,
     auth_last_error: null,
     pending_password_enc: null,
-    provisioned_at: payload.provisionedAt ?? null,
+    provisioned_at: payload.provisionedAt ?? existing?.provisioned_at ?? null,
     last_verified_at: null,
     verification_expires_at: null,
     hashed_session_token: null,
-    created_at: payload.createdAt ?? now,
-    location: payload.location ?? '',
+    created_at: payload.createdAt ?? existing?.created_at ?? now,
+    location: payload.location ?? existing?.location ?? '',
     profile_image_data: profileImageDataUrl,
     profile_image_format: profileImageFormat,
     profile_image_updated_at: profileImageUpdatedAt,
-    two_factor_enabled: toBoolInt(payload.twoFactorEnabled),
-    email_notifications: toBoolInt(payload.emailNotifications),
-    low_stock_alerts: toBoolInt(payload.lowStockAlerts),
-    language: payload.language ?? 'English',
+    two_factor_enabled: toBoolInt(payload.twoFactorEnabled ?? payload.two_factor_enabled ?? existing?.two_factor_enabled),
+    email_notifications: toBoolInt(payload.emailNotifications ?? payload.email_notifications ?? existing?.email_notifications),
+    low_stock_alerts: toBoolInt(payload.lowStockAlerts ?? payload.low_stock_alerts ?? existing?.low_stock_alerts),
+    language: payload.language ?? existing?.language ?? 'English',
     sync_status: 'synced',
     is_dirty: 0,
     last_modified: payload.lastModified ?? now,
@@ -3093,6 +3110,86 @@ const createConflictRecord = (
   remoteVersion
 });
 
+const readLocalEmployeeForSync = (db: Database.Database, employeeId: string): Record<string, unknown> | null => {
+  const row = db
+    .prepare(
+      `SELECT
+        id, first_name, last_name, full_name, email, phone, position, department, address, role, status,
+        password_hash, password_salt, supabase_user_id, auth_sync_status, provisioned_at,
+        created_at, location, profile_image_data, profile_image_format, profile_image_updated_at,
+        two_factor_enabled, email_notifications, low_stock_alerts, language, last_modified, deleted_at, version
+       FROM employees
+       WHERE id = ?
+       LIMIT 1`
+    )
+    .get(employeeId) as
+    | {
+        id: string;
+        first_name?: string | null;
+        last_name?: string | null;
+        full_name?: string | null;
+        email?: string | null;
+        phone?: string | null;
+        position?: string | null;
+        department?: string | null;
+        address?: string | null;
+        role?: string | null;
+        status?: string | null;
+        password_hash?: string | null;
+        password_salt?: string | null;
+        supabase_user_id?: string | null;
+        auth_sync_status?: string | null;
+        provisioned_at?: string | null;
+        created_at?: string | null;
+        location?: string | null;
+        profile_image_data?: string | null;
+        profile_image_format?: string | null;
+        profile_image_updated_at?: string | null;
+        two_factor_enabled?: number | null;
+        email_notifications?: number | null;
+        low_stock_alerts?: number | null;
+        language?: string | null;
+        last_modified?: string | null;
+        deleted_at?: string | null;
+        version?: number | null;
+      }
+    | undefined;
+  if (!row) return null;
+
+  const fallbackSplit = splitFullName(row.full_name ?? '');
+  const now = nowIso();
+  return {
+    id: row.id,
+    firstName: row.first_name ?? fallbackSplit.firstName,
+    lastName: row.last_name ?? fallbackSplit.lastName,
+    fullName: row.full_name ?? '',
+    email: row.email ?? '',
+    phone: row.phone ?? '',
+    position: row.position ?? '',
+    department: row.department ?? '',
+    address: row.address ?? row.location ?? '',
+    role: row.role ?? 'employee',
+    status: row.status ?? 'active',
+    passwordHash: row.password_hash ?? 'remote_managed',
+    passwordSalt: row.password_salt ?? 'remote_managed',
+    supabaseUserId: row.supabase_user_id ?? null,
+    authSyncStatus: row.auth_sync_status ?? 'pending_upload',
+    provisionedAt: row.provisioned_at ?? null,
+    createdAt: row.created_at ?? now,
+    location: row.location ?? '',
+    profileImageDataUrl: row.profile_image_data ?? null,
+    profileImageFormat: row.profile_image_format ?? null,
+    profileImageUpdatedAt: row.profile_image_updated_at ?? null,
+    twoFactorEnabled: Boolean(row.two_factor_enabled),
+    emailNotifications: Boolean(row.email_notifications),
+    lowStockAlerts: Boolean(row.low_stock_alerts),
+    language: row.language ?? 'English',
+    lastModified: row.last_modified ?? now,
+    deletedAt: row.deleted_at ?? null,
+    version: readVersion(row.version, 1)
+  };
+};
+
 const buildPushQueueRecord = (db: Database.Database, row: OutboxRow) => {
   const entityType = normalizeEntityType(row.entity_type);
   if (!entityType) return null;
@@ -3107,10 +3204,17 @@ const buildPushQueueRecord = (db: Database.Database, row: OutboxRow) => {
   })();
 
   const version = readVersion(payload.version, getLocalVersion(db, entityType, row.entity_id) || 1);
+  const localEmployeeSnapshot =
+    entityType === 'employees' && operation !== 'delete' ? readLocalEmployeeForSync(db, row.entity_id) : null;
+  const effectiveVersion =
+    entityType === 'employees' && localEmployeeSnapshot
+      ? readVersion(localEmployeeSnapshot.version, version)
+      : version;
   const data = {
     ...payload,
+    ...(localEmployeeSnapshot || {}),
     id: row.entity_id,
-    version
+    version: effectiveVersion
   };
 
   return {
@@ -3125,14 +3229,17 @@ const buildPushQueueRecord = (db: Database.Database, row: OutboxRow) => {
     }
   };
 };
-const sanitizeQueueData = (input: any) => {
+const sanitizeQueueData = (input: any, entityType?: string) => {
   if (!input || typeof input !== 'object') return input;
   const output = { ...input };
+  const isEmployeePayload = entityType === 'employees';
   delete output._meta;
-  delete output.passwordHash;
-  delete output.passwordSalt;
-  delete output.password_hash;
-  delete output.password_salt;
+  if (!isEmployeePayload) {
+    delete output.passwordHash;
+    delete output.passwordSalt;
+    delete output.password_hash;
+    delete output.password_salt;
+  }
   delete output.pendingPasswordPlain;
   delete output.pendingPasswordEncrypted;
   delete output.hashedSessionToken;
@@ -3144,12 +3251,19 @@ const sanitizeQueueData = (input: any) => {
   delete output.last_verified_at;
   delete output.verification_expires_at;
   delete output.auth_last_error;
-  delete output.profileImageDataUrl;
-  delete output.profile_image_data;
+  if (!isEmployeePayload) {
+    delete output.profileImageDataUrl;
+    delete output.profile_image_data;
+    delete output.profileImageFormat;
+    delete output.profile_image_format;
+    delete output.profileImageUpdatedAt;
+    delete output.profile_image_updated_at;
+  }
   return output;
 };
 
 const buildEmployeeQueueRecords = (
+  db: Database.Database,
   entry: {
     entityType: string;
     entityId: string;
@@ -3180,7 +3294,7 @@ const buildEmployeeQueueRecords = (
 
     if (!recipients.size) return [];
 
-    const data = sanitizeQueueData(payload);
+    const data = sanitizeQueueData(payload, entry.entityType);
 
     return Array.from(recipients).map((employeeId) => ({
       employee_id: employeeId,
@@ -3198,7 +3312,7 @@ const buildEmployeeQueueRecords = (
     const returnedByPosition = String(payload.returnedByPosition || payload.returned_by_position || '').trim().toLowerCase();
     if (!returnedByEmployeeId || returnedByPosition !== 'employee') return [];
 
-    const data = sanitizeQueueData(payload);
+    const data = sanitizeQueueData(payload, entry.entityType);
     return [
       {
         employee_id: String(returnedByEmployeeId),
@@ -3215,19 +3329,30 @@ const buildEmployeeQueueRecords = (
   if (entry.entityType === 'employees') {
     const employeeId = String(payload.id || entry.entityId || '').trim();
     if (!employeeId) return [];
+    const recipients = new Set<string>([employeeId]);
 
-    const data = sanitizeQueueData(payload);
-    return [
-      {
-        employee_id: employeeId,
-        payload: {
-          table_name: entry.entityType,
-          operation: entry.queueRecord.operation,
-          record_id: entry.entityId,
-          data
-        }
+    const normalizedRole = String(payload.role || '').trim().toLowerCase();
+    if (normalizedRole === 'system_admin' || normalizedRole === 'admin') {
+      const activeEmployeeRows = db
+        .prepare("SELECT id FROM employees WHERE deleted_at IS NULL AND status = 'active'")
+        .all() as Array<{ id?: string }>;
+      for (const row of activeEmployeeRows) {
+        const id = String(row.id || '').trim();
+        if (!id) continue;
+        recipients.add(id);
       }
-    ];
+    }
+
+    const data = sanitizeQueueData(payload, entry.entityType);
+    return Array.from(recipients).map((recipientId) => ({
+      employee_id: recipientId,
+      payload: {
+        table_name: entry.entityType,
+        operation: entry.queueRecord.operation,
+        record_id: entry.entityId,
+        data
+      }
+    }));
   }
 
   return [];
@@ -3558,12 +3683,12 @@ export async function pushLocalChanges(actor: SyncActor, stage?: PushStageOption
           table_name: entry.queueRecord.table_name,
           operation: entry.queueRecord.operation,
           record_id: entry.queueRecord.record_id,
-          data: sanitizeQueueData(entry.queueRecord.data)
+          data: sanitizeQueueData(entry.queueRecord.data, entry.entityType)
         }))
       : [];
 
     let targetedAdminPayloadRecords = canAdminSync(actor)
-      ? prepared.flatMap((entry) => buildEmployeeQueueRecords(entry))
+      ? prepared.flatMap((entry) => buildEmployeeQueueRecords(db, entry))
       : [];
 
     if (canAdminSync(actor) && targetedAdminPayloadRecords.length) {
@@ -3599,7 +3724,7 @@ export async function pushLocalChanges(actor: SyncActor, stage?: PushStageOption
             table_name: entry.queueRecord.table_name,
             operation: entry.queueRecord.operation,
             record_id: entry.queueRecord.record_id,
-            data: sanitizeQueueData(entry.queueRecord.data)
+            data: sanitizeQueueData(entry.queueRecord.data, entry.entityType)
           }
         }))
       : [];
@@ -4489,6 +4614,13 @@ export async function pullRemoteChanges(actor: SyncActor, conflictStrategy: Conf
       };
     } catch (error: any) {
       const message = error?.message ?? 'Pull failed';
+      let profileImageResult: { pulled: number; skipped: number } = { pulled: 0, skipped: 0 };
+      try {
+        const currentDeviceId = getLocalDeviceId(db);
+        profileImageResult = await pullProfileImageRelayChanges(db, actor, currentDeviceId);
+      } catch {
+        // Best effort only: keep original pull error if profile relay pull also fails.
+      }
       writeSyncState(db, actor, { last_status: 'error', last_error: message });
       logSyncEvent(db, { eventType: 'pull', message: `Pull failed: ${message}` });
 
@@ -4497,7 +4629,9 @@ export async function pullRemoteChanges(actor: SyncActor, conflictStrategy: Conf
         pulledCount: 0,
         conflictCount: 0,
         conflicts: [] as ConflictRecord[],
-        error: message
+        error: message,
+        profileImagePulled: profileImageResult.pulled,
+        profileImageSkipped: profileImageResult.skipped
       };
     }
   });
@@ -4559,9 +4693,22 @@ export async function autoPullEmployeeSubmissions(actor: SyncActor) {
       };
     } catch (error: any) {
       const message = error?.message ?? 'Failed to auto pull employee submissions.';
+      let profileImageResult: { pulled: number; skipped: number } = { pulled: 0, skipped: 0 };
+      try {
+        const currentDeviceId = getLocalDeviceId(db);
+        profileImageResult = await pullProfileImageRelayChanges(db, actor, currentDeviceId);
+      } catch {
+        // Best effort only: keep original pull error if profile relay pull also fails.
+      }
       writeSyncState(db, actor, { last_status: 'error', last_error: message });
       logSyncEvent(db, { eventType: 'auto_pull_employee_submissions', message: `Auto pull failed: ${message}` });
-      return { status: 'error', pulledCount: 0, error: message };
+      return {
+        status: 'error',
+        pulledCount: 0,
+        error: message,
+        profileImagePulled: profileImageResult.pulled,
+        profileImageSkipped: profileImageResult.skipped
+      };
     }
   });
 }

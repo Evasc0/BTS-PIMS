@@ -39,6 +39,7 @@ export type RefreshSessionResult =
 export type ChangePasswordResult =
   | { success: true; accessToken: string; expiresAt: string | null }
   | { success: false; error: string; requiresInternet?: boolean };
+export type AdminResetPasswordResult = { success: true } | { success: false; error: string; requiresInternet?: boolean };
 
 interface EmployeeRow {
   id: string;
@@ -909,6 +910,92 @@ export const authService = {
         return {
           success: false,
           error: 'Internet connection required to update your password.',
+          requiresInternet: true
+        };
+      }
+      return { success: false, error: message };
+    }
+  },
+
+  async adminResetEmployeePassword(input: {
+    adminUserId: string;
+    targetEmployeeId: string;
+    newPassword: string;
+  }): Promise<AdminResetPasswordResult> {
+    const db = dataStore.getDb();
+    const admin = getEmployeeById(db, input.adminUserId);
+    if (!admin || normalizeStatus(admin.status) !== 'active' || normalizeRole(admin.role) !== 'system_admin') {
+      return { success: false, error: 'Only active system admin accounts can reset employee passwords.' };
+    }
+
+    const targetEmployeeId = String(input.targetEmployeeId || '').trim();
+    if (!targetEmployeeId) {
+      return { success: false, error: 'Target employee id is required.' };
+    }
+    if (targetEmployeeId === admin.id) {
+      return { success: false, error: 'Use the Profile page to change your own password.' };
+    }
+
+    const target = getEmployeeById(db, targetEmployeeId);
+    if (!target) {
+      return { success: false, error: 'Target employee profile was not found locally.' };
+    }
+    if (normalizeRole(target.role) !== 'employee') {
+      return { success: false, error: 'Use the Profile page to change another admin password.' };
+    }
+
+    const newPassword = String(input.newPassword || '');
+    if (!newPassword) {
+      return { success: false, error: 'New password is required.' };
+    }
+    const strengthError = validatePasswordStrength(newPassword);
+    if (strengthError) {
+      return { success: false, error: strengthError };
+    }
+
+    if (!supabaseAuth.isConfigured()) {
+      return {
+        success: false,
+        error: 'Supabase auth is not configured. Set SUPABASE_URL and SUPABASE_ANON_KEY (or SUPABASE_PUBLISHABLE_KEY).'
+      };
+    }
+    if (!target.supabase_user_id) {
+      return {
+        success: false,
+        error: 'Employee is not linked to Supabase Auth yet. Re-provision this account first.'
+      };
+    }
+
+    try {
+      await supabaseAuth.adminResetUserPassword({
+        supabaseUserId: target.supabase_user_id,
+        newPassword
+      });
+
+      const { hash, salt } = createPasswordHash(newPassword);
+      const verifiedAt = nowIso();
+      const expiresAt = new Date(Date.now() + AUTH_VERIFICATION_DAYS * DAY_MS).toISOString();
+
+      dataStore.employees.update(target.id, {
+        passwordHash: hash,
+        passwordSalt: salt,
+        authSyncStatus: 'synced',
+        authLastError: undefined,
+        pendingPasswordPlain: undefined,
+        pendingPasswordEncrypted: undefined,
+        lastVerifiedAt: verifiedAt,
+        verificationExpiresAt: expiresAt
+      });
+
+      setStoredRefreshToken(db, target.id, null);
+      sessionCache.delete(target.id);
+      return { success: true };
+    } catch (error: unknown) {
+      const message = normalizeLoginError(error);
+      if (isConnectivityError(message)) {
+        return {
+          success: false,
+          error: 'Internet connection required to reset employee password.',
           requiresInternet: true
         };
       }

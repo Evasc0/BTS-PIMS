@@ -237,6 +237,24 @@ export function registerIpc(mainWindow: BrowserWindow): void {
     }
   );
 
+  ipcMain.handle(
+    'auth:admin-reset-password',
+    async (
+      _evt,
+      payload: {
+        adminUserId: string;
+        targetEmployeeId: string;
+        newPassword: string;
+      }
+    ) => {
+      const result = await authService.adminResetEmployeePassword(payload);
+      if (result.success) {
+        notify('employees', [payload.targetEmployeeId]);
+      }
+      return result;
+    }
+  );
+
   ipcMain.handle('auth:logout', (_evt, userId: string) => {
     if (userId) {
       authService.clearLocalSessionCache(userId);

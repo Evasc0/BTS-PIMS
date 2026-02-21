@@ -198,24 +198,16 @@ const normalizeAuthSyncStatus = (value: unknown): 'pending_upload' | 'synced' | 
 
 const mapEmployeeOutboxPayload = (employee: Employee) => {
   const {
-    passwordHash,
-    passwordSalt,
     pendingPasswordPlain,
     pendingPasswordEncrypted,
     hashedSessionToken,
     authLastError,
-    lastVerifiedAt,
-    verificationExpiresAt,
     ...rest
   } = employee;
-  void passwordHash;
-  void passwordSalt;
   void pendingPasswordPlain;
   void pendingPasswordEncrypted;
   void hashedSessionToken;
   void authLastError;
-  void lastVerifiedAt;
-  void verificationExpiresAt;
   return rest;
 };
 
