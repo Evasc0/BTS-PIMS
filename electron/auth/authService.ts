@@ -69,6 +69,7 @@ interface CachedSupabaseSession {
 }
 
 const sessionCache = new Map<string, CachedSupabaseSession>();
+const sessionPasswordCache = new Map<string, string>();
 
 const nowIso = (): string => new Date().toISOString();
 
@@ -187,6 +188,23 @@ const setCachedSession = (
   });
 };
 
+const setSessionPassword = (userId: string, password: string): void => {
+  const key = String(userId || '').trim();
+  if (!key) return;
+  const value = String(password || '');
+  if (!value) {
+    sessionPasswordCache.delete(key);
+    return;
+  }
+  sessionPasswordCache.set(key, value);
+};
+
+const clearSessionPassword = (userId: string): void => {
+  const key = String(userId || '').trim();
+  if (!key) return;
+  sessionPasswordCache.delete(key);
+};
+
 const getCachedSessionToken = (userId: string): string | null => {
   const cached = sessionCache.get(userId);
   if (!cached) return null;
@@ -227,6 +245,58 @@ const refreshCachedSessionToken = async (userId: string): Promise<RefreshSession
   const cached = sessionCache.get(userId);
   const refreshToken = cached?.refreshToken || getStoredRefreshToken(db, userId);
   if (!refreshToken) {
+    const employee = getEmployeeById(db, userId);
+    const cachedPassword = sessionPasswordCache.get(userId);
+    if (employee && cachedPassword) {
+      try {
+        const online = await supabaseAuth.onlineLogin(String(employee.email || '').trim().toLowerCase(), cachedPassword);
+        const verifiedAt = nowIso();
+        const expiresAt = new Date(Date.now() + AUTH_VERIFICATION_DAYS * DAY_MS).toISOString();
+        const role = normalizeRole(online.role || employee.role);
+        const status = normalizeStatus(online.accountStatus || employee.status);
+
+        updateAuthVerificationCache(db, {
+          employeeId: employee.id,
+          supabaseUserId: online.supabaseUserId,
+          role,
+          status,
+          authSyncStatus: 'synced',
+          authLastError: null,
+          pendingPasswordEnc: null,
+          provisionedAt: employee.provisioned_at || verifiedAt,
+          lastVerifiedAt: verifiedAt,
+          verificationExpiresAt: expiresAt,
+          hashedSessionToken: hashSessionToken(online.accessToken)
+        });
+
+        setCachedSession(userId, online.accessToken, online.expiresAt, online.refreshToken);
+        setStoredRefreshToken(db, userId, online.refreshToken);
+        return {
+          success: true,
+          refreshed: true,
+          accessToken: online.accessToken,
+          expiresAt: online.expiresAt
+        };
+      } catch (error: unknown) {
+        const message = normalizeLoginError(error);
+        if (isInvalidCredentialsError(message)) {
+          clearSessionPassword(userId);
+          return {
+            success: false,
+            error: 'Session expired for this device. Sign in again with your latest email/password.'
+          };
+        }
+        if (isConnectivityError(message)) {
+          return {
+            success: false,
+            error: 'Internet connection required to refresh your session.',
+            requiresInternet: true
+          };
+        }
+        return { success: false, error: message };
+      }
+    }
+
     return { success: false, error: 'No refresh token available. Sign in online once on this device.' };
   }
 
@@ -512,7 +582,8 @@ const requiresOnlineVerification = (employee: EmployeeRow): boolean =>
 const applyOnlineLogin = async (
   db: Database.Database,
   employee: EmployeeRow,
-  online: Awaited<ReturnType<typeof supabaseAuth.onlineLogin>>
+  online: Awaited<ReturnType<typeof supabaseAuth.onlineLogin>>,
+  loginPassword: string
 ): Promise<OfflineFirstLoginResult> => {
   const remoteStatus = normalizeStatus(online.accountStatus || employee.status);
   const resolvedRole = normalizeRole(online.role || employee.role);
@@ -561,6 +632,7 @@ const applyOnlineLogin = async (
 
   setCachedSession(employee.id, online.accessToken, online.expiresAt, online.refreshToken);
   setStoredRefreshToken(db, employee.id, online.refreshToken);
+  setSessionPassword(employee.id, loginPassword);
 
   return {
     success: true,
@@ -613,7 +685,7 @@ export const authService = {
           supabaseUserId: online.supabaseUserId,
           profileEmployeeId: online.profileEmployeeId
         });
-        return applyOnlineLogin(db, employee, online);
+        return applyOnlineLogin(db, employee, online, password);
       } catch (error: unknown) {
         const message = normalizeLoginError(error);
         const connectivityIssue = isConnectivityError(message);
@@ -648,7 +720,7 @@ export const authService = {
               supabaseUserId: online.supabaseUserId,
               profileEmployeeId: employee.id
             });
-            return applyOnlineLogin(db, employee, online);
+            return applyOnlineLogin(db, employee, online, password);
           } catch (bootstrapError: unknown) {
             const bootstrapMessage = normalizeLoginError(bootstrapError);
 
@@ -682,7 +754,7 @@ export const authService = {
                   supabaseUserId: online.supabaseUserId,
                   profileEmployeeId: employee.id
                 });
-                return applyOnlineLogin(db, employee, online);
+                return applyOnlineLogin(db, employee, online, password);
               } catch (serviceBootstrapError: unknown) {
                 if (localPasswordValid && canUseLocalBootstrapLogin(employee)) {
                   const verifiedAt = nowIso();
