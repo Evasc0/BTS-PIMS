@@ -2185,3 +2185,255 @@ html {
   filter: invert(1);
   opacity: 0.85;
 }
+
+/* Login transition animation shown after successful authentication. */
+.login-intro {
+  --login-intro-bg-start: #eff6ff;
+  --login-intro-bg-mid: #dbeafe;
+  --login-intro-bg-end: #c7d2fe;
+  --login-intro-grid-a: rgba(37, 99, 235, 0.14);
+  --login-intro-grid-b: rgba(59, 130, 246, 0.12);
+  --login-intro-core: rgba(59, 130, 246, 0.25);
+  --login-intro-glow-left: rgba(56, 189, 248, 0.26);
+  --login-intro-glow-right: rgba(79, 70, 229, 0.24);
+  --login-intro-ring-border: rgba(30, 64, 175, 0.34);
+  --login-intro-ring-outer: rgba(59, 130, 246, 0.2);
+  --login-intro-ring-inner: rgba(99, 102, 241, 0.14);
+  --login-intro-letter-color: #1e293b;
+  --login-intro-letter-shadow: rgba(37, 99, 235, 0.28);
+  --login-intro-name-color: #0f172a;
+  --login-intro-message-color: rgba(30, 41, 59, 0.84);
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: radial-gradient(
+    circle at 25% 15%,
+    var(--login-intro-bg-start) 0%,
+    var(--login-intro-bg-mid) 38%,
+    var(--login-intro-bg-end) 100%
+  );
+}
+
+.dark .login-intro {
+  --login-intro-bg-start: #1d4ed8;
+  --login-intro-bg-mid: #0f172a;
+  --login-intro-bg-end: #020617;
+  --login-intro-grid-a: rgba(125, 211, 252, 0.25);
+  --login-intro-grid-b: rgba(125, 211, 252, 0.2);
+  --login-intro-core: rgba(56, 189, 248, 0.45);
+  --login-intro-glow-left: rgba(14, 165, 233, 0.56);
+  --login-intro-glow-right: rgba(59, 130, 246, 0.52);
+  --login-intro-ring-border: rgba(186, 230, 253, 0.45);
+  --login-intro-ring-outer: rgba(56, 189, 248, 0.24);
+  --login-intro-ring-inner: rgba(56, 189, 248, 0.18);
+  --login-intro-letter-color: #e0f2fe;
+  --login-intro-letter-shadow: rgba(125, 211, 252, 0.5);
+  --login-intro-name-color: #f8fafc;
+  --login-intro-message-color: rgba(186, 230, 253, 0.94);
+}
+
+.login-intro::before {
+  content: '';
+  position: absolute;
+  inset: -45%;
+  background-image: linear-gradient(transparent 97%, var(--login-intro-grid-a) 100%),
+    linear-gradient(90deg, transparent 97%, var(--login-intro-grid-b) 100%);
+  background-size: 2.5rem 2.5rem;
+  transform: perspective(500px) rotateX(60deg);
+  transform-origin: top;
+  animation: login-intro-grid-shift 12s linear infinite;
+  opacity: 0.38;
+}
+
+.login-intro::after {
+  content: '';
+  position: absolute;
+  width: min(60vw, 34rem);
+  aspect-ratio: 1 / 1;
+  border-radius: 999px;
+  background: radial-gradient(circle, var(--login-intro-core) 0%, rgba(56, 189, 248, 0) 70%);
+  filter: blur(10px);
+  animation: login-intro-core-pulse 2.8s ease-in-out infinite;
+}
+
+.login-intro__background {
+  position: absolute;
+  inset: -15%;
+  pointer-events: none;
+}
+
+.login-intro__glow {
+  position: absolute;
+  width: 30rem;
+  height: 30rem;
+  border-radius: 999px;
+  filter: blur(70px);
+  opacity: 0.8;
+  animation: login-intro-glow-drift 8s ease-in-out infinite;
+}
+
+.login-intro__glow--left {
+  left: -5rem;
+  top: -3rem;
+  background: var(--login-intro-glow-left);
+}
+
+.login-intro__glow--right {
+  right: -7rem;
+  bottom: -4rem;
+  background: var(--login-intro-glow-right);
+  animation-delay: 1.2s;
+}
+
+.login-intro__content {
+  position: relative;
+  z-index: 2;
+  width: min(90vw, 46rem);
+  text-align: center;
+  padding: 1.75rem;
+}
+
+.login-intro__ring {
+  position: absolute;
+  left: 50%;
+  top: calc(50% - 0.75rem);
+  width: min(78vw, 23rem);
+  aspect-ratio: 1 / 1;
+  border: 1px solid var(--login-intro-ring-border);
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 24px var(--login-intro-ring-outer), inset 0 0 24px var(--login-intro-ring-inner);
+  animation: login-intro-ring-breathe 2.6s ease-in-out infinite;
+}
+
+.login-intro__letters {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  gap: clamp(0.35rem, 2.5vw, 1rem);
+  margin-bottom: 1rem;
+}
+
+.login-intro__letter {
+  --intro-delay: 0s;
+  font-size: clamp(2.8rem, 10vw, 6rem);
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: 0.18em;
+  text-indent: 0.18em;
+  color: var(--login-intro-letter-color);
+  text-shadow: 0 0 25px var(--login-intro-letter-shadow);
+  opacity: 0;
+  transform: translateY(1.5rem) scale(0.8) rotate(-9deg);
+  animation: login-intro-letter-enter 0.85s cubic-bezier(0.2, 1, 0.22, 1) forwards;
+  animation-delay: var(--intro-delay);
+}
+
+.login-intro__school-name {
+  font-size: clamp(1rem, 3vw, 1.8rem);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--login-intro-name-color);
+  opacity: 0;
+  transform: translateY(1rem);
+  animation: login-intro-text-reveal 0.8s ease forwards;
+  animation-delay: 2.7s;
+}
+
+.login-intro__message {
+  margin-top: 0.65rem;
+  font-size: clamp(0.86rem, 1.7vw, 1.05rem);
+  letter-spacing: 0.06em;
+  color: var(--login-intro-message-color);
+  opacity: 0;
+  transform: translateY(0.45rem);
+  animation: login-intro-text-reveal 0.8s ease forwards;
+  animation-delay: 3.3s;
+}
+
+@keyframes login-intro-grid-shift {
+  0% {
+    transform: perspective(500px) rotateX(60deg) translateY(0);
+  }
+  100% {
+    transform: perspective(500px) rotateX(60deg) translateY(-2.5rem);
+  }
+}
+
+@keyframes login-intro-core-pulse {
+  0%,
+  100% {
+    opacity: 0.46;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.82;
+    transform: scale(1.08);
+  }
+}
+
+@keyframes login-intro-glow-drift {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(1.1rem, -0.8rem, 0) scale(1.1);
+  }
+}
+
+@keyframes login-intro-ring-breathe {
+  0%,
+  100% {
+    transform: translate(-50%, -50%) scale(0.92);
+    opacity: 0.55;
+  }
+  50% {
+    transform: translate(-50%, -50%) scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes login-intro-letter-enter {
+  0% {
+    opacity: 0;
+    transform: translateY(1.5rem) scale(0.8) rotate(-9deg);
+  }
+  70% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1) rotate(0deg);
+  }
+}
+
+@keyframes login-intro-text-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(0.65rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .login-intro::before,
+  .login-intro::after,
+  .login-intro__glow,
+  .login-intro__ring,
+  .login-intro__letter,
+  .login-intro__school-name,
+  .login-intro__message {
+    animation: none !important;
+    opacity: 1;
+    transform: none;
+  }
+}

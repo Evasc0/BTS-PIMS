@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { db, initializeDatabase } from './db';
 import type { Employee } from './types';
 
@@ -7,11 +7,13 @@ interface AuthContextValue {
   loading: boolean;
   initError: string | null;
   syncNotice: string | null;
+  loginIntroPending: boolean;
   login: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
   logout: () => void;
   refreshUser: () => Promise<void>;
   refreshAssignedUpdates: () => Promise<void>;
   clearSyncNotice: () => void;
+  completeLoginIntro: () => void;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
@@ -42,6 +44,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [initError, setInitError] = useState<string | null>(null);
   const [syncNotice, setSyncNotice] = useState<string | null>(null);
+  const [loginIntroPending, setLoginIntroPending] = useState(false);
   const employeeSyncInFlightRef = useRef(false);
   const adminSyncInFlightRef = useRef(false);
   const lastActivityAtRef = useRef(Date.now());
@@ -294,6 +297,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             if (isMounted) setCurrentUser(user);
           } else {
             localStorage.removeItem(SESSION_KEY);
+            if (isMounted) setLoginIntroPending(false);
             if (user && user.status === 'active' && isVerificationExpired(user) && isMounted) {
               setInitError('Session expired. Sign in online to verify your account.');
             }
@@ -320,6 +324,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const latest = await db.employees.get(currentUser.id);
       if (!latest || latest.status !== 'active') {
         localStorage.removeItem(SESSION_KEY);
+        setLoginIntroPending(false);
         setCurrentUser(null);
         setSyncNotice(null);
         setInitError('Your account has been deactivated. Contact administrator.');
@@ -337,6 +342,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           void window.api.auth.logout(currentUser.id);
         }
         localStorage.removeItem(SESSION_KEY);
+        setLoginIntroPending(false);
         setCurrentUser(null);
         setSyncNotice(null);
         setInitError('Your credentials were updated. Please sign in again with your latest email/password.');
@@ -508,9 +514,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     localStorage.setItem(SESSION_KEY, user.id);
     setInitError(null);
+    setLoginIntroPending(true);
     setCurrentUser(user);
     return { success: true };
   };
+
+  const completeLoginIntro = useCallback(() => {
+    setLoginIntroPending(false);
+  }, []);
 
   const logout = () => {
     if (currentUser && window.api?.auth) {
@@ -518,6 +529,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
     localStorage.removeItem(SESSION_KEY);
     setSyncNotice(null);
+    setLoginIntroPending(false);
     setCurrentUser(null);
   };
 
@@ -548,8 +560,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const clearSyncNotice = () => setSyncNotice(null);
 
   const value = useMemo<AuthContextValue>(
-    () => ({ currentUser, loading, initError, syncNotice, login, logout, refreshUser, refreshAssignedUpdates, clearSyncNotice }),
-    [currentUser, loading, initError, syncNotice]
+    () => ({
+      currentUser,
+      loading,
+      initError,
+      syncNotice,
+      loginIntroPending,
+      login,
+      logout,
+      refreshUser,
+      refreshAssignedUpdates,
+      clearSyncNotice,
+      completeLoginIntro
+    }),
+    [currentUser, loading, initError, syncNotice, loginIntroPending, completeLoginIntro]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

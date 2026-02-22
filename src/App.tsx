@@ -9,12 +9,23 @@ import { ActivityLogsPage } from './components/ActivityLogsPage';
 import { SettingsPage } from './components/SettingsPage';
 import { ProfilePage } from './components/ProfilePage';
 import { Sidebar } from './components/Sidebar';
+import { LoginTransitionScreen } from './components/LoginTransitionScreen';
 import { useAuth } from './lib/auth';
 import type { EmployeeRole } from './lib/types';
 import { applyThemePreference, getStoredThemePreference } from './lib/theme';
 
 export default function App() {
-  const { currentUser, loading, initError, logout, syncNotice, refreshAssignedUpdates, clearSyncNotice } = useAuth();
+  const {
+    currentUser,
+    loading,
+    initError,
+    logout,
+    syncNotice,
+    refreshAssignedUpdates,
+    clearSyncNotice,
+    loginIntroPending,
+    completeLoginIntro
+  } = useAuth();
   const [currentPage, setCurrentPage] = useState('dashboard');
 
   const pagePermissions = useMemo<Record<string, EmployeeRole[]>>(
@@ -53,6 +64,10 @@ export default function App() {
 
   if (!currentUser) {
     return <LoginPage initError={initError} />;
+  }
+
+  if (loginIntroPending) {
+    return <LoginTransitionScreen onComplete={completeLoginIntro} />;
   }
 
   const renderPage = () => {
