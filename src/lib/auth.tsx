@@ -22,9 +22,9 @@ const readEnvMs = (key: string, fallback: number, min = 1000): number => {
   if (!Number.isFinite(parsed) || parsed < min) return fallback;
   return Math.floor(parsed);
 };
-const REALTIME_SYNC_POLL_MS = readEnvMs('VITE_SYNC_REALTIME_POLL_MS', 60000, 5000);
+const REALTIME_SYNC_POLL_MS = readEnvMs('VITE_SYNC_REALTIME_POLL_MS', 10000, 5000);
 const IDLE_SYNC_AFTER_MS = readEnvMs('VITE_SYNC_IDLE_AFTER_MS', 5 * 60 * 1000, 60000);
-const IDLE_SYNC_POLL_MS = readEnvMs('VITE_SYNC_IDLE_POLL_MS', 60 * 1000, 5000);
+const IDLE_SYNC_POLL_MS = readEnvMs('VITE_SYNC_IDLE_POLL_MS', 30000, 5000);
 const parseDateMs = (value?: string): number | null => {
   if (!value) return null;
   const parsed = Date.parse(value);

@@ -56,6 +56,12 @@ const getProfileQueueTable = (): string => process.env.SUPABASE_PROFILE_SYNC_QUE
 const getAppUsersTable = (): string => process.env.SUPABASE_APP_USERS_TABLE || 'app_users';
 const getSupabaseUrl = (): string => (process.env.SUPABASE_URL || '').replace(/\/+$/u, '');
 const getSupabaseAnonKey = (): string => process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_PUBLISHABLE_KEY || '';
+const getSupabaseServiceRoleKey = (): string =>
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_SERVICE_KEY ||
+  process.env.VITE_SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_SECRET_KEY ||
+  '';
 const getPullPageSize = (): number => Math.max(1, Number(process.env.SYNC_PULL_PAGE_SIZE || 200));
 const getFullSyncRequestsTable = (): string => process.env.SUPABASE_FULL_SYNC_REQUESTS_TABLE || 'full_sync_requests';
 const getFullSyncChunksTable = (): string => process.env.SUPABASE_FULL_SYNC_CHUNKS_TABLE || 'full_sync_chunks';
@@ -277,11 +283,18 @@ interface LocalChunkManifest {
 }
 
 const isConfigured = (): boolean => Boolean(getSupabaseUrl() && getSupabaseAnonKey());
+const isServiceRoleConfigured = (): boolean => Boolean(getSupabaseServiceRoleKey());
 
 type SupabaseActorToken = { accessToken: string; expiresAtMs: number | null };
 const actorSupabaseTokens = new Map<string, SupabaseActorToken>();
 let scopedSupabaseAccessToken: string | null = null;
 let scopedActorUserId: string | null = null;
+
+type SupabaseRequestAuthContext = {
+  accessToken: string;
+  apikey: string;
+  usingServiceRole: boolean;
+};
 
 const parseExpiryMs = (value?: string | null): number | null => {
   if (!value) return null;
@@ -1366,6 +1379,28 @@ const hasRecentAdminPresence = async (): Promise<boolean | null> => {
   }
 };
 
+const resolveSupabaseRequestAuthContext = async (): Promise<SupabaseRequestAuthContext> => {
+  const anonKey = getSupabaseAnonKey();
+  try {
+    const accessToken = await ensureScopedAccessToken();
+    return {
+      accessToken,
+      apikey: anonKey,
+      usingServiceRole: false
+    };
+  } catch (error: unknown) {
+    if (!isServiceRoleConfigured()) {
+      throw error;
+    }
+    const serviceRoleKey = getSupabaseServiceRoleKey();
+    return {
+      accessToken: serviceRoleKey,
+      apikey: serviceRoleKey,
+      usingServiceRole: true
+    };
+  }
+};
+
 const supabaseRequest = async (pathAndQuery: string, init?: RequestInit): Promise<Response> => {
   if (!isConfigured()) {
     throw new Error(
@@ -1373,13 +1408,12 @@ const supabaseRequest = async (pathAndQuery: string, init?: RequestInit): Promis
     );
   }
 
-  const supabaseAnonKey = getSupabaseAnonKey();
   const supabaseUrl = getSupabaseUrl();
-  const accessToken = await ensureScopedAccessToken();
+  const auth = await resolveSupabaseRequestAuthContext();
 
-  const executeRequest = async (token: string): Promise<Response> => {
+  const executeRequest = async (token: string, apikey: string): Promise<Response> => {
     const headers: Record<string, string> = {
-      apikey: supabaseAnonKey,
+      apikey,
       Authorization: `Bearer ${token}`
     };
     if (init?.body) {
@@ -1395,12 +1429,12 @@ const supabaseRequest = async (pathAndQuery: string, init?: RequestInit): Promis
     });
   };
 
-  let response = await executeRequest(accessToken);
+  let response = await executeRequest(auth.accessToken, auth.apikey);
   if (!response.ok) {
     let raw = (await response.text()) || `Supabase request failed with status ${response.status}`;
     let parsed = parseSupabaseError(raw);
 
-    if (scopedActorUserId && isRetryableAuthError(response.status, parsed)) {
+    if (!auth.usingServiceRole && scopedActorUserId && isRetryableAuthError(response.status, parsed)) {
       const refreshed = await authService.refreshSession(scopedActorUserId, { forceRefresh: true });
       if (!refreshed.success) {
         const failure = refreshed as { success: false; error: string };
@@ -1408,7 +1442,7 @@ const supabaseRequest = async (pathAndQuery: string, init?: RequestInit): Promis
       }
       setSyncActorAccessToken(scopedActorUserId, refreshed.accessToken, refreshed.expiresAt);
       scopedSupabaseAccessToken = refreshed.accessToken;
-      response = await executeRequest(refreshed.accessToken);
+      response = await executeRequest(refreshed.accessToken, getSupabaseAnonKey());
       if (response.ok) {
         return response;
       }
@@ -1439,15 +1473,14 @@ const supabaseStorageRequest = async (pathAndQuery: string, init?: RequestInit):
     );
   }
 
-  const supabaseAnonKey = getSupabaseAnonKey();
   const supabaseUrl = getSupabaseUrl();
-  const accessToken = await ensureScopedAccessToken();
+  const auth = await resolveSupabaseRequestAuthContext();
 
   const response = await fetch(`${supabaseUrl}/storage/v1/${pathAndQuery}`, {
     ...init,
     headers: {
-      apikey: supabaseAnonKey,
-      Authorization: `Bearer ${accessToken}`,
+      apikey: auth.apikey,
+      Authorization: `Bearer ${auth.accessToken}`,
       ...(init?.headers as Record<string, string> | undefined)
     }
   });
