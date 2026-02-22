@@ -5,6 +5,7 @@ const getSupabaseAnonKey = (): string => process.env.SUPABASE_ANON_KEY || proces
 const getSupabaseServiceRoleKey = (): string =>
   process.env.SUPABASE_SERVICE_ROLE_KEY ||
   process.env.SUPABASE_SERVICE_KEY ||
+  process.env.VITE_SUPABASE_SERVICE_ROLE_KEY ||
   process.env.SUPABASE_SECRET_KEY ||
   '';
 const getAppUsersTable = (): string => process.env.SUPABASE_APP_USERS_TABLE || 'app_users';

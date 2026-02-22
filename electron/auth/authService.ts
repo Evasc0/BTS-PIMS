@@ -1068,6 +1068,13 @@ export const authService = {
           requiresInternet: failure.requiresInternet
         };
       }
+      if (!supabaseAuth.isServiceRoleConfigured()) {
+        return {
+          success: false,
+          error:
+            'Immediate email replacement requires SUPABASE_SERVICE_ROLE_KEY in Electron env. Add it, restart the app, then retry.'
+        };
+      }
 
       let resolvedSupabaseUserId = String(employee.supabase_user_id || '').trim();
       if (!resolvedSupabaseUserId) {
@@ -1080,25 +1087,14 @@ export const authService = {
         }
       }
 
-      // Prefer service-role admin update for immediate Auth email replacement (no pending email-change state).
-      if (resolvedSupabaseUserId && supabaseAuth.isServiceRoleConfigured()) {
-        await supabaseAuth.adminUpdateUserEmail({
-          supabaseUserId: resolvedSupabaseUserId,
-          newEmail: normalizedEmail,
-          confirmEmail: true
-        });
-      } else {
-        await supabaseAuth.updateUserEmail(refreshed.accessToken, normalizedEmail);
-        const currentUser = await supabaseAuth.getCurrentUser(refreshed.accessToken);
-        const effectiveEmail = String(currentUser.email || '').trim().toLowerCase();
-        if (effectiveEmail !== normalizedEmail) {
-          return {
-            success: false,
-            error:
-              'Supabase did not apply the new email yet. Confirm the email change first, or configure SUPABASE_SERVICE_ROLE_KEY for immediate admin-managed updates.'
-          };
-        }
+      if (!resolvedSupabaseUserId) {
+        return { success: false, error: 'Unable to resolve Supabase user id for email update.' };
       }
+      await supabaseAuth.adminUpdateUserEmail({
+        supabaseUserId: resolvedSupabaseUserId,
+        newEmail: normalizedEmail,
+        confirmEmail: true
+      });
 
       if (resolvedSupabaseUserId) {
         try {
