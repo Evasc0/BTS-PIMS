@@ -1,7 +1,7 @@
 import { createHash } from 'crypto';
 import { app, BrowserWindow, ipcMain } from 'electron';
 import { dataStore } from '../db';
-import { authService } from '../auth/authService';
+import { authService as importedAuthService } from '../auth/authService';
 import {
   autoPullEmployeeSubmissions,
   checkPendingFullSyncRequest,
@@ -22,6 +22,21 @@ import {
   uploadNextFullSyncChunk
 } from '../sync/syncService';
 import { checkForUpdates, installUpdate } from '../update/updater';
+
+type AuthServiceApi = typeof importedAuthService;
+
+const resolveAuthService = (): AuthServiceApi => {
+  if (importedAuthService) return importedAuthService;
+  try {
+    const runtimeModule = require('../auth/authService') as { authService?: AuthServiceApi };
+    if (runtimeModule?.authService) {
+      return runtimeModule.authService;
+    }
+  } catch {
+    // fall through to consistent error
+  }
+  throw new Error('Auth service failed to initialize. Restart the app and try again.');
+};
 
 export function registerIpc(mainWindow: BrowserWindow): void {
   const sanitizeEmployeeForRenderer = <T extends Record<string, any> | null | undefined>(employee: T): T => {
@@ -177,6 +192,7 @@ export function registerIpc(mainWindow: BrowserWindow): void {
         preferOnline: boolean;
       }
     ) => {
+      const authService = resolveAuthService();
       const result = await authService.loginOfflineFirst(payload);
       if (result.success && result.verifiedOnline && result.sessionAccessToken) {
         setSyncActorAccessToken(result.userId, result.sessionAccessToken, result.sessionAccessTokenExpiresAt || null);
@@ -192,6 +208,7 @@ export function registerIpc(mainWindow: BrowserWindow): void {
   );
 
   ipcMain.handle('auth:provision-pending', async (_evt, adminUserId: string, adminAccessToken: string) => {
+    const authService = resolveAuthService();
     return authService.provisionPendingEmployees({ adminUserId, adminAccessToken });
   });
 
@@ -214,6 +231,7 @@ export function registerIpc(mainWindow: BrowserWindow): void {
         language?: string;
       }
     ) => {
+      const authService = resolveAuthService();
       const result = await authService.createUserInstant(payload);
       if (result.success && result.employeeId) {
         notify('employees', [result.employeeId]);
@@ -232,6 +250,7 @@ export function registerIpc(mainWindow: BrowserWindow): void {
         newPassword: string;
       }
     ) => {
+      const authService = resolveAuthService();
       const result = await authService.changeOwnPassword(payload);
       if (result.success) {
         setSyncActorAccessToken(payload.userId, result.accessToken, result.expiresAt || null);
@@ -253,6 +272,7 @@ export function registerIpc(mainWindow: BrowserWindow): void {
         newEmail: string;
       }
     ) => {
+      const authService = resolveAuthService();
       const result = await authService.changeOwnEmail(payload);
       if (result.success) {
         notify('employees', [payload.userId]);
@@ -271,6 +291,7 @@ export function registerIpc(mainWindow: BrowserWindow): void {
         newEmail: string;
       }
     ) => {
+      const authService = resolveAuthService();
       const result = await authService.adminUpdateEmployeeEmail(payload);
       if (result.success) {
         notify('employees', [payload.targetEmployeeId]);
@@ -289,6 +310,7 @@ export function registerIpc(mainWindow: BrowserWindow): void {
         newPassword: string;
       }
     ) => {
+      const authService = resolveAuthService();
       const result = await authService.adminResetEmployeePassword(payload);
       if (result.success) {
         notify('employees', [payload.targetEmployeeId]);
@@ -299,6 +321,7 @@ export function registerIpc(mainWindow: BrowserWindow): void {
 
   ipcMain.handle('auth:logout', (_evt, userId: string) => {
     if (userId) {
+      const authService = resolveAuthService();
       authService.clearLocalSessionCache(userId);
       clearSyncActorAccessToken(userId);
     }
