@@ -403,7 +403,7 @@ export function SettingsPage({ user }: SettingsPageProps) {
         ) {
           const preview = await window.api.sync.previewPull(user.id);
           if (preview.status === 'ok' && preview.newRecords > 0) {
-            const autoPull = await window.api.sync.pull(user.id, 'remote_wins');
+            const autoPull = await window.api.sync.pull(user.id, 'skip');
             const pulled = Number(autoPull.pulledCount || 0);
             nextMessage += ` Auto-pulled ${pulled} assigned update(s).`;
           } else if (preview.status === 'ok') {

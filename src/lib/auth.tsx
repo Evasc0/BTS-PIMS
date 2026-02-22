@@ -124,7 +124,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
       }
 
-      const result = await window.api.sync.pull(user.id, 'remote_wins');
+      const result = await window.api.sync.pull(user.id, 'skip');
       if (result.status === 'idle') {
         if (!silent) {
           setSyncNotice('Assigned data is up to date.');
@@ -200,19 +200,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
 
       let lastStepError: string | null = null;
+      let pushFailed = false;
 
       if (Number(status.pendingLocalChanges || 0) > 0) {
         try {
           await window.api.sync.push(user.id);
         } catch (error: any) {
           lastStepError = error?.message || 'Automatic admin push failed.';
+          pushFailed = true;
         }
       }
 
-      try {
-        await window.api.sync.pull(user.id, 'remote_wins');
-      } catch (error: any) {
-        lastStepError = error?.message || 'Automatic admin pull failed.';
+      if (!pushFailed) {
+        try {
+          await window.api.sync.pull(user.id, 'skip');
+        } catch (error: any) {
+          lastStepError = error?.message || 'Automatic admin pull failed.';
+        }
       }
 
       if (window.api.sync.autoPullEmployeeSubmissions) {

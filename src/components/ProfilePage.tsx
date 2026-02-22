@@ -28,6 +28,19 @@ interface ProfileFormState {
   address: string;
 }
 
+const profileStateFromUser = (user: Employee): ProfileFormState => {
+  const split = splitFullName(user.fullName);
+  return {
+    firstName: user.firstName ?? split.firstName,
+    lastName: user.lastName ?? split.lastName,
+    email: user.email,
+    phone: user.phone,
+    position: user.position ?? (user.role === 'system_admin' ? 'System Admin' : 'Employee'),
+    department: user.department,
+    address: user.address ?? user.location ?? ''
+  };
+};
+
 const passwordStrengthError = (value: string): string | null => {
   const password = String(value || '');
   if (password.length < 8) return 'Password must be at least 8 characters.';
@@ -59,15 +72,7 @@ export function ProfilePage({ user }: ProfilePageProps) {
   const [passwordBusy, setPasswordBusy] = useState(false);
   const [imageBusy, setImageBusy] = useState(false);
   const [themePreference, setThemePreference] = useState<ThemePreference>(() => getStoredThemePreference(user.id));
-  const [profileState, setProfileState] = useState<ProfileFormState>({
-    firstName: '',
-    lastName: '',
-    email: '',
-    phone: '',
-    position: '',
-    department: '',
-    address: ''
-  });
+  const [profileState, setProfileState] = useState<ProfileFormState>(() => profileStateFromUser(user));
 
   const products = useLiveQuery(() => db.products.toArray(), []);
   const returns = useLiveQuery(() => db.returns.toArray(), []);
@@ -83,18 +88,27 @@ export function ProfilePage({ user }: ProfilePageProps) {
   );
 
   useEffect(() => {
-    const split = splitFullName(user.fullName);
-    setProfileState({
-      firstName: user.firstName ?? split.firstName,
-      lastName: user.lastName ?? split.lastName,
-      email: user.email,
-      phone: user.phone,
-      position: user.position ?? (user.role === 'system_admin' ? 'System Admin' : 'Employee'),
-      department: user.department,
-      address: user.address ?? user.location ?? ''
-    });
+    // Prevent background sync/user-refresh events from clobbering in-progress edits.
+    if (isEditing) return;
+    setProfileState(profileStateFromUser(user));
+  }, [
+    user.id,
+    user.firstName,
+    user.lastName,
+    user.fullName,
+    user.email,
+    user.phone,
+    user.position,
+    user.role,
+    user.department,
+    user.address,
+    user.location,
+    isEditing
+  ]);
+
+  useEffect(() => {
     setThemePreference(getStoredThemePreference(user.id));
-  }, [user]);
+  }, [user.id]);
 
   const handleSave = async () => {
     setFormError(null);
@@ -405,7 +419,12 @@ export function ProfilePage({ user }: ProfilePageProps) {
                 onClick={() => {
                   setFormError(null);
                   setFormSuccess(null);
-                  setIsEditing(!isEditing);
+                  if (isEditing) {
+                    setProfileState(profileStateFromUser(user));
+                    setIsEditing(false);
+                    return;
+                  }
+                  setIsEditing(true);
                 }}
                 className="px-4 py-2 text-indigo-600 hover:bg-indigo-50 rounded-lg transition text-sm font-medium"
               >

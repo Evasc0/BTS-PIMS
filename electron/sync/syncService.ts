@@ -1584,12 +1584,14 @@ const fetchRemoteQueuePage = async (
     'id,employee_id,recipient_key,origin_device_id,origin_user_id,payload,payload_size_kb,created_at,updated_at,table_name,operation,record_id,data,timestamp';
   const selectLegacy =
     'id,employee_id,origin_device_id,origin_user_id,payload,payload_size_kb,created_at,table_name,operation,record_id,data,timestamp';
+  const updatedAtOrder = 'updated_at.asc,created_at.asc,id.asc';
+  const legacyOrder = 'created_at.asc,id.asc';
   params.set('select', selectWithUpdatedAt);
-  params.set('order', 'created_at.asc,id.asc');
+  params.set('order', updatedAtOrder);
   params.set('limit', String(limit));
   params.set('offset', String(offset));
   if (sinceTimestamp) {
-    params.set('created_at', `gt.${sinceTimestamp}`);
+    params.set('updated_at', `gt.${sinceTimestamp}`);
   }
   if (employeeId === EMPLOYEE_ID_NULL_FILTER) {
     params.set('recipient_key', `eq.${RELAY_RECIPIENT_ALL}`);
@@ -1610,6 +1612,11 @@ const fetchRemoteQueuePage = async (
     if (!missingUpdatedAt && !missingRecipientKey) throw error;
     if (missingUpdatedAt) {
       params.set('select', selectLegacy);
+      params.set('order', legacyOrder);
+      params.delete('updated_at');
+      if (sinceTimestamp) {
+        params.set('created_at', `gt.${sinceTimestamp}`);
+      }
     }
     if (missingRecipientKey && employeeId === EMPLOYEE_ID_NULL_FILTER) {
       params.delete('recipient_key');
@@ -1672,24 +1679,36 @@ const readRemoteData = (row: RemoteQueueRow): any => {
 };
 
 const readRemoteTimestamp = (row: RemoteQueueRow): string => {
-  if (row.created_at) return row.created_at;
   if (row.updated_at) return row.updated_at;
+  if (row.created_at) return row.created_at;
   if (row.timestamp) return row.timestamp;
   return nowIso();
 };
 
 const readRemoteUpdatedAt = (row: RemoteQueueRow, remoteData: any): string => {
   const payload = readRemotePayload(row);
-  const candidate =
-    payload?.updated_at ??
-    row.updated_at ??
-    remoteData?.updatedAt ??
-    remoteData?.lastModified ??
-    remoteData?.createdAt ??
-    row.created_at ??
-    row.timestamp;
-  if (!candidate) return nowIso();
-  return String(candidate);
+  // Prefer payload/data timestamps over queue-row metadata. Queue row `updated_at`
+  // can drift (e.g. merge/upsert touch) and make stale payloads appear newer.
+  const candidates = [
+    payload?.updated_at,
+    remoteData?.updatedAt,
+    remoteData?.updated_at,
+    remoteData?.lastModified,
+    remoteData?.last_modified,
+    remoteData?.createdAt,
+    remoteData?.created_at,
+    row.updated_at,
+    row.created_at,
+    row.timestamp
+  ];
+
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const value = String(candidate);
+    if (parseTimestamp(value) != null) return value;
+  }
+
+  return nowIso();
 };
 
 const deleteRemoteQueueRows = async (tableName: string, ids: string[], excludeOriginDeviceId: string | null = null): Promise<void> => {
@@ -4508,8 +4527,11 @@ const pullEmployeeAssignedChanges = async (
       }
 
       if (localVersion > remoteVersion && conflictStrategy === 'skip') {
-        conflicts.push(createConflictRecord({ ...row, table_name: entityType, record_id: recordId }, entityType, localVersion, remoteVersion));
-        markEntityConflict(db, entityType, recordId);
+        // Local row is newer than remote queue payload: keep local truth and clear stale remote row.
+        remoteIdsToDelete.push(row.id);
+        if (!latestAppliedTimestamp || rowCreatedAt > latestAppliedTimestamp) {
+          latestAppliedTimestamp = rowCreatedAt;
+        }
         continue;
       }
 
@@ -4714,8 +4736,11 @@ const pullEmployeeSubmissionsForAdmin = async (
       }
 
       if (localVersion > remoteVersion && conflictStrategy === 'skip') {
-        conflicts.push(createConflictRecord({ ...row, table_name: entityType, record_id: recordId }, entityType, localVersion, remoteVersion));
-        markEntityConflict(db, entityType, recordId);
+        // Admin-local row is newer than employee submission: clear stale queue row to avoid repeat pull.
+        remoteIdsToDelete.push(row.id);
+        if (!latestAppliedTimestamp || rowCreatedAt > latestAppliedTimestamp) {
+          latestAppliedTimestamp = rowCreatedAt;
+        }
         continue;
       }
 
