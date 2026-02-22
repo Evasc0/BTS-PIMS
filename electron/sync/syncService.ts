@@ -4333,8 +4333,9 @@ const pullAdminChanges = async (
       const remoteUpdatedAt = readRemoteUpdatedAt(row, remoteData);
       const remoteUpdatedMs = parseTimestamp(remoteUpdatedAt);
       const localUpdatedMs = parseTimestamp(localMeta.lastModified);
+      const hasComparableTimestamps = localMeta.exists && remoteUpdatedMs != null && localUpdatedMs != null;
 
-      if (localMeta.exists && remoteUpdatedMs != null && localUpdatedMs != null && remoteUpdatedMs <= localUpdatedMs) {
+      if (hasComparableTimestamps && remoteUpdatedMs <= localUpdatedMs) {
         remoteIdsToDelete.push(row.id);
         if (!latestAppliedTimestamp || rowCreatedAt > latestAppliedTimestamp) {
           latestAppliedTimestamp = rowCreatedAt;
@@ -4342,7 +4343,9 @@ const pullAdminChanges = async (
         continue;
       }
 
-      if (localVersion > remoteVersion && conflictStrategy === 'skip') {
+      // If timestamps are available and incoming is newer, allow apply even if local version is numerically higher.
+      // Version-only skip is used only when reliable timestamp comparison is unavailable.
+      if (!hasComparableTimestamps && localVersion > remoteVersion && conflictStrategy === 'skip') {
         // Admin-local version is newer than employee submission: keep local truth and clear stale remote row.
         remoteIdsToDelete.push(row.id);
         if (!latestAppliedTimestamp || rowCreatedAt > latestAppliedTimestamp) {
@@ -4351,8 +4354,7 @@ const pullAdminChanges = async (
         continue;
       }
 
-      const resolvedVersion =
-        localVersion > remoteVersion && conflictStrategy === 'remote_wins' ? localVersion + 1 : remoteVersion;
+      const resolvedVersion = localVersion > remoteVersion ? localVersion + 1 : remoteVersion;
 
       const payload = {
         ...(remoteData || {}),
@@ -4517,8 +4519,9 @@ const pullEmployeeAssignedChanges = async (
       const remoteUpdatedAt = readRemoteUpdatedAt(row, remoteData);
       const remoteUpdatedMs = parseTimestamp(remoteUpdatedAt);
       const localUpdatedMs = parseTimestamp(localMeta.lastModified);
+      const hasComparableTimestamps = localMeta.exists && remoteUpdatedMs != null && localUpdatedMs != null;
 
-      if (localMeta.exists && remoteUpdatedMs != null && localUpdatedMs != null && remoteUpdatedMs <= localUpdatedMs) {
+      if (hasComparableTimestamps && remoteUpdatedMs <= localUpdatedMs) {
         remoteIdsToDelete.push(row.id);
         if (!latestAppliedTimestamp || rowCreatedAt > latestAppliedTimestamp) {
           latestAppliedTimestamp = rowCreatedAt;
@@ -4526,7 +4529,9 @@ const pullEmployeeAssignedChanges = async (
         continue;
       }
 
-      if (localVersion > remoteVersion && conflictStrategy === 'skip') {
+      // If timestamps are available and incoming is newer, allow apply even if local version is numerically higher.
+      // Version-only skip is used only when reliable timestamp comparison is unavailable.
+      if (!hasComparableTimestamps && localVersion > remoteVersion && conflictStrategy === 'skip') {
         // Local row is newer than remote queue payload: keep local truth and clear stale remote row.
         remoteIdsToDelete.push(row.id);
         if (!latestAppliedTimestamp || rowCreatedAt > latestAppliedTimestamp) {
@@ -4535,8 +4540,7 @@ const pullEmployeeAssignedChanges = async (
         continue;
       }
 
-      const resolvedVersion =
-        localVersion > remoteVersion && conflictStrategy === 'remote_wins' ? localVersion + 1 : remoteVersion;
+      const resolvedVersion = localVersion > remoteVersion ? localVersion + 1 : remoteVersion;
 
       const payload = {
         ...normalizeAdminQueuePayloadForEmployee(db, row, entityType, remoteData || {}, actor.userId),
@@ -4726,8 +4730,9 @@ const pullEmployeeSubmissionsForAdmin = async (
       const remoteUpdatedAt = readRemoteUpdatedAt(row, remoteData);
       const remoteUpdatedMs = parseTimestamp(remoteUpdatedAt);
       const localUpdatedMs = parseTimestamp(localMeta.lastModified);
+      const hasComparableTimestamps = localMeta.exists && remoteUpdatedMs != null && localUpdatedMs != null;
 
-      if (localMeta.exists && remoteUpdatedMs != null && localUpdatedMs != null && remoteUpdatedMs <= localUpdatedMs) {
+      if (hasComparableTimestamps && remoteUpdatedMs <= localUpdatedMs) {
         remoteIdsToDelete.push(row.id);
         if (!latestAppliedTimestamp || rowCreatedAt > latestAppliedTimestamp) {
           latestAppliedTimestamp = rowCreatedAt;
@@ -4735,7 +4740,9 @@ const pullEmployeeSubmissionsForAdmin = async (
         continue;
       }
 
-      if (localVersion > remoteVersion && conflictStrategy === 'skip') {
+      // If timestamps are available and incoming is newer, allow apply even if local version is numerically higher.
+      // Version-only skip is used only when reliable timestamp comparison is unavailable.
+      if (!hasComparableTimestamps && localVersion > remoteVersion && conflictStrategy === 'skip') {
         // Admin-local row is newer than employee submission: clear stale queue row to avoid repeat pull.
         remoteIdsToDelete.push(row.id);
         if (!latestAppliedTimestamp || rowCreatedAt > latestAppliedTimestamp) {
@@ -4744,8 +4751,7 @@ const pullEmployeeSubmissionsForAdmin = async (
         continue;
       }
 
-      const resolvedVersion =
-        localVersion > remoteVersion && conflictStrategy === 'remote_wins' ? localVersion + 1 : remoteVersion;
+      const resolvedVersion = localVersion > remoteVersion ? localVersion + 1 : remoteVersion;
 
       const payload = {
         ...normalizeEmployeeSubmissionPayloadForAdmin(db, row, entityType, remoteData || {}),
