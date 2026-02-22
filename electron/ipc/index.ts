@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { app, BrowserWindow, ipcMain } from 'electron';
 import { dataStore } from '../db';
 import { authService } from '../auth/authService';
@@ -25,7 +26,13 @@ import { checkForUpdates, installUpdate } from '../update/updater';
 export function registerIpc(mainWindow: BrowserWindow): void {
   const sanitizeEmployeeForRenderer = <T extends Record<string, any> | null | undefined>(employee: T): T => {
     if (!employee || typeof employee !== 'object') return employee;
-    const output = { ...employee };
+    const output = { ...employee } as Record<string, any>;
+    const passwordHash = String(output.passwordHash || '');
+    const passwordSalt = String(output.passwordSalt || '');
+    output.credentialFingerprint =
+      passwordHash || passwordSalt
+        ? createHash('sha256').update(`${passwordHash}:${passwordSalt}`).digest('hex')
+        : undefined;
     delete output.passwordHash;
     delete output.passwordSalt;
     delete output.pendingPasswordPlain;

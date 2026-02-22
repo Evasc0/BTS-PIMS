@@ -325,8 +325,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const previousEmail = String(currentUser.email || '').trim().toLowerCase();
       const latestEmail = String(latest.email || '').trim().toLowerCase();
       const emailChanged = latestEmail !== previousEmail;
-      const passwordChanged = String(latest.passwordHash || '') !== String(currentUser.passwordHash || '');
-      if (emailChanged || passwordChanged) {
+      const credentialsChanged =
+        String(latest.credentialFingerprint || '') !== String(currentUser.credentialFingerprint || '');
+      if (emailChanged || credentialsChanged) {
         if (window.api?.auth) {
           void window.api.auth.logout(currentUser.id);
         }
