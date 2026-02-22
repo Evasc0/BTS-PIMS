@@ -574,6 +574,39 @@ const insertLocalUserProvision = (
     deleted_at: null,
     version: 1
   });
+
+  db.prepare(
+    `
+      INSERT INTO sync_outbox (
+        entity_type, entity_id, operation, payload, created_at, attempts, last_error, next_retry_at
+      ) VALUES (
+        @entity_type, @entity_id, @operation, @payload, @created_at, @attempts, @last_error, @next_retry_at
+      )
+      ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+        operation = excluded.operation,
+        payload = excluded.payload,
+        created_at = excluded.created_at,
+        attempts = 0,
+        last_error = NULL,
+        next_retry_at = NULL
+    `
+  ).run({
+    entity_type: 'employees',
+    entity_id: input.employeeId,
+    operation: 'insert',
+    payload: JSON.stringify({
+      id: input.employeeId,
+      email: input.email.trim().toLowerCase(),
+      role: input.role,
+      status: input.status,
+      version: 1,
+      lastModified: now
+    }),
+    created_at: now,
+    attempts: 0,
+    last_error: null,
+    next_retry_at: null
+  });
 };
 
 const requiresOnlineVerification = (employee: EmployeeRow): boolean =>
