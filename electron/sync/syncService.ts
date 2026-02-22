@@ -110,6 +110,8 @@ interface SyncStateRow {
   online_mode: number;
   last_push_at: string | null;
   last_pull_at: string | null;
+  last_profile_pull_at: string | null;
+  last_employee_submission_pull_at: string | null;
   last_successful_sync_at: string | null;
   last_push_count: number;
   last_pull_count: number;
@@ -505,6 +507,8 @@ const ensureSyncSchema = (db: Database.Database): void => {
         online_mode INTEGER NOT NULL DEFAULT 0,
         last_push_at TEXT,
         last_pull_at TEXT,
+        last_profile_pull_at TEXT,
+        last_employee_submission_pull_at TEXT,
         last_successful_sync_at TEXT,
         last_push_count INTEGER NOT NULL DEFAULT 0,
         last_pull_count INTEGER NOT NULL DEFAULT 0,
@@ -559,6 +563,8 @@ const ensureSyncSchema = (db: Database.Database): void => {
   ensureStateColumn('online_mode', 'INTEGER NOT NULL DEFAULT 0');
   ensureStateColumn('last_push_at', 'TEXT');
   ensureStateColumn('last_pull_at', 'TEXT');
+  ensureStateColumn('last_profile_pull_at', 'TEXT');
+  ensureStateColumn('last_employee_submission_pull_at', 'TEXT');
   ensureStateColumn('last_successful_sync_at', 'TEXT');
   ensureStateColumn('last_push_count', 'INTEGER NOT NULL DEFAULT 0');
   ensureStateColumn('last_pull_count', 'INTEGER NOT NULL DEFAULT 0');
@@ -599,6 +605,14 @@ const ensureSyncSchema = (db: Database.Database): void => {
           ELSE device_registered_at
         END,
         online_mode = COALESCE(online_mode, 0),
+        last_profile_pull_at = CASE
+          WHEN last_profile_pull_at IS NULL OR trim(last_profile_pull_at) = '' THEN NULL
+          ELSE last_profile_pull_at
+        END,
+        last_employee_submission_pull_at = CASE
+          WHEN last_employee_submission_pull_at IS NULL OR trim(last_employee_submission_pull_at) = '' THEN NULL
+          ELSE last_employee_submission_pull_at
+        END,
         last_successful_sync_at = CASE
           WHEN last_successful_sync_at IS NULL OR trim(last_successful_sync_at) = '' THEN
             CASE
@@ -704,12 +718,14 @@ const ensureSyncStateRow = (db: Database.Database, actor: SyncActor): void => {
     `
       INSERT OR IGNORE INTO sync_state (
         id, device_id, last_auto_sync_at, last_full_sync_at, device_registered_at,
-        online_mode, last_push_at, last_pull_at, last_successful_sync_at, last_push_count, last_pull_count,
+        online_mode, last_push_at, last_pull_at, last_profile_pull_at, last_employee_submission_pull_at,
+        last_successful_sync_at, last_push_count, last_pull_count,
         last_conflict_count, full_sync_required, full_sync_reason, last_status, last_error, last_warning,
         relay_queue_rows, relay_queue_payload_mb, relay_storage_mb, relay_oldest_queue_at, relay_last_checked_at, updated_at
       ) VALUES (
         @id, @device_id, @last_auto_sync_at, @last_full_sync_at, @device_registered_at,
-        @online_mode, @last_push_at, @last_pull_at, @last_successful_sync_at, @last_push_count, @last_pull_count,
+        @online_mode, @last_push_at, @last_pull_at, @last_profile_pull_at, @last_employee_submission_pull_at,
+        @last_successful_sync_at, @last_push_count, @last_pull_count,
         @last_conflict_count, @full_sync_required, @full_sync_reason, @last_status, @last_error, @last_warning,
         @relay_queue_rows, @relay_queue_payload_mb, @relay_storage_mb, @relay_oldest_queue_at, @relay_last_checked_at, @updated_at
       )
@@ -723,6 +739,8 @@ const ensureSyncStateRow = (db: Database.Database, actor: SyncActor): void => {
     online_mode: 0,
     last_push_at: null,
     last_pull_at: null,
+    last_profile_pull_at: null,
+    last_employee_submission_pull_at: null,
     last_successful_sync_at: null,
     last_push_count: 0,
     last_pull_count: 0,
@@ -782,6 +800,8 @@ const writeSyncState = (db: Database.Database, actor: SyncActor, patch: Partial<
         online_mode = @online_mode,
         last_push_at = @last_push_at,
         last_pull_at = @last_pull_at,
+        last_profile_pull_at = @last_profile_pull_at,
+        last_employee_submission_pull_at = @last_employee_submission_pull_at,
         last_successful_sync_at = @last_successful_sync_at,
         last_push_count = @last_push_count,
         last_pull_count = @last_pull_count,
@@ -1649,6 +1669,57 @@ const fetchAllRemoteQueueRows = async (
   return rows;
 };
 
+const hasRemoteQueueRows = async (
+  tableName: string,
+  sinceTimestamp: string | null,
+  employeeId: string | null = null,
+  excludeOriginDeviceId: string | null = null
+): Promise<boolean> => {
+  const params = new URLSearchParams();
+  const selectWithUpdatedAt = 'id,employee_id,recipient_key,origin_device_id,created_at,updated_at,timestamp';
+  const selectLegacy = 'id,employee_id,origin_device_id,created_at,timestamp';
+  params.set('select', selectWithUpdatedAt);
+  params.set('order', 'updated_at.asc,created_at.asc,id.asc');
+  params.set('limit', '1');
+  if (sinceTimestamp) {
+    params.set('updated_at', `gt.${sinceTimestamp}`);
+  }
+  if (employeeId === EMPLOYEE_ID_NULL_FILTER) {
+    params.set('recipient_key', `eq.${RELAY_RECIPIENT_ALL}`);
+  } else if (employeeId) {
+    params.set('employee_id', `eq.${employeeId}`);
+  }
+  if (excludeOriginDeviceId) {
+    params.set('or', `(origin_device_id.is.null,origin_device_id.neq.${excludeOriginDeviceId})`);
+  }
+
+  let response: Response;
+  try {
+    response = await supabaseRequest(`${tableName}?${params.toString()}`, { method: 'GET' });
+  } catch (error: any) {
+    const message = String(error?.message || '').toLowerCase();
+    const missingUpdatedAt = message.includes('updated_at');
+    const missingRecipientKey = message.includes('recipient_key');
+    if (!missingUpdatedAt && !missingRecipientKey) throw error;
+    if (missingUpdatedAt) {
+      params.set('select', selectLegacy);
+      params.set('order', 'created_at.asc,id.asc');
+      params.delete('updated_at');
+      if (sinceTimestamp) {
+        params.set('created_at', `gt.${sinceTimestamp}`);
+      }
+    }
+    if (missingRecipientKey && employeeId === EMPLOYEE_ID_NULL_FILTER) {
+      params.delete('recipient_key');
+      params.set('employee_id', 'is.null');
+    }
+    response = await supabaseRequest(`${tableName}?${params.toString()}`, { method: 'GET' });
+  }
+
+  const rows = (await response.json()) as RemoteQueueRow[];
+  return Array.isArray(rows) && rows.length > 0;
+};
+
 const readRemotePayload = (row: RemoteQueueRow): any => {
   if (row.payload && typeof row.payload === 'object') return row.payload;
   return null;
@@ -1765,7 +1836,8 @@ const pushProfileImageQueueRows = async (rows: Array<Record<string, unknown>>): 
 
 const fetchProfileImageQueueRows = async (
   actor: SyncActor,
-  excludeOriginDeviceId: string | null
+  excludeOriginDeviceId: string | null,
+  sinceTimestamp: string | null = null
 ): Promise<ProfileImageQueueRow[]> => {
   const rows: ProfileImageQueueRow[] = [];
   const pageSize = getPullPageSize();
@@ -1777,13 +1849,28 @@ const fetchProfileImageQueueRows = async (
     params.set('order', 'updated_at.asc,id.asc');
     params.set('limit', String(pageSize));
     params.set('offset', String(offset));
+    if (sinceTimestamp) {
+      params.set('updated_at', `gt.${sinceTimestamp}`);
+    }
     if (!canAdminSync(actor)) {
       params.set('employee_id', `eq.${actor.userId}`);
     }
     if (excludeOriginDeviceId) {
       params.set('or', `(origin_device_id.is.null,origin_device_id.neq.${excludeOriginDeviceId})`);
     }
-    const response = await supabaseRequest(`${getProfileQueueTable()}?${params.toString()}`, { method: 'GET' });
+    let response: Response;
+    try {
+      response = await supabaseRequest(`${getProfileQueueTable()}?${params.toString()}`, { method: 'GET' });
+    } catch (error: any) {
+      const message = String(error?.message || '').toLowerCase();
+      if (!message.includes('updated_at')) throw error;
+      params.delete('updated_at');
+      if (sinceTimestamp) {
+        params.set('created_at', `gt.${sinceTimestamp}`);
+      }
+      params.set('order', 'created_at.asc,id.asc');
+      response = await supabaseRequest(`${getProfileQueueTable()}?${params.toString()}`, { method: 'GET' });
+    }
     const page = (await response.json()) as ProfileImageQueueRow[];
     if (!Array.isArray(page) || page.length === 0) {
       break;
@@ -1796,6 +1883,42 @@ const fetchProfileImageQueueRows = async (
   }
 
   return rows;
+};
+
+const hasProfileImageQueueRows = async (
+  actor: SyncActor,
+  excludeOriginDeviceId: string | null,
+  sinceTimestamp: string | null = null
+): Promise<boolean> => {
+  const params = new URLSearchParams();
+  params.set('select', 'id,employee_id,origin_device_id,updated_at,created_at');
+  params.set('order', 'updated_at.asc,id.asc');
+  params.set('limit', '1');
+  if (sinceTimestamp) {
+    params.set('updated_at', `gt.${sinceTimestamp}`);
+  }
+  if (!canAdminSync(actor)) {
+    params.set('employee_id', `eq.${actor.userId}`);
+  }
+  if (excludeOriginDeviceId) {
+    params.set('or', `(origin_device_id.is.null,origin_device_id.neq.${excludeOriginDeviceId})`);
+  }
+
+  let response: Response;
+  try {
+    response = await supabaseRequest(`${getProfileQueueTable()}?${params.toString()}`, { method: 'GET' });
+  } catch (error: any) {
+    const message = String(error?.message || '').toLowerCase();
+    if (!message.includes('updated_at')) throw error;
+    params.delete('updated_at');
+    if (sinceTimestamp) {
+      params.set('created_at', `gt.${sinceTimestamp}`);
+    }
+    params.set('order', 'created_at.asc,id.asc');
+    response = await supabaseRequest(`${getProfileQueueTable()}?${params.toString()}`, { method: 'GET' });
+  }
+  const rows = (await response.json()) as ProfileImageQueueRow[];
+  return Array.isArray(rows) && rows.length > 0;
 };
 
 const getProfileImageUpdatedAtCandidate = (value: unknown): string | null => {
@@ -1814,14 +1937,19 @@ const getProfileImageFormat = (imageDataUrl: string | null, fallback: string | n
 const pullProfileImageRelayChanges = async (
   db: Database.Database,
   actor: SyncActor,
-  currentDeviceId: string
-): Promise<{ pulled: number; skipped: number }> => {
-  const rows = await fetchProfileImageQueueRows(actor, currentDeviceId);
-  if (!rows.length) return { pulled: 0, skipped: 0 };
+  currentDeviceId: string,
+  sinceTimestamp: string | null = null
+): Promise<{ pulled: number; skipped: number; latestSeenAt: string | null }> => {
+  const hasRows = await hasProfileImageQueueRows(actor, currentDeviceId, sinceTimestamp);
+  if (!hasRows) return { pulled: 0, skipped: 0, latestSeenAt: sinceTimestamp };
+
+  const rows = await fetchProfileImageQueueRows(actor, currentDeviceId, sinceTimestamp);
+  if (!rows.length) return { pulled: 0, skipped: 0, latestSeenAt: sinceTimestamp };
 
   const rowIdsToDelete: string[] = [];
   let pulled = 0;
   let skipped = 0;
+  let latestSeenAt: string | null = sinceTimestamp;
 
   const tx = db.transaction(() => {
     for (const row of rows) {
@@ -1831,6 +1959,8 @@ const pullProfileImageRelayChanges = async (
         .prepare('SELECT profile_image_updated_at FROM employees WHERE id = ? LIMIT 1')
         .get(employeeId) as { profile_image_updated_at?: string | null } | undefined;
       if (!local) {
+        rowIdsToDelete.push(row.id);
+        latestSeenAt = latestTimestamp(latestSeenAt, row.updated_at, row.created_at);
         skipped += 1;
         continue;
       }
@@ -1845,6 +1975,7 @@ const pullProfileImageRelayChanges = async (
 
       if (localUpdatedMs != null && remoteUpdatedMs != null && remoteUpdatedMs <= localUpdatedMs) {
         rowIdsToDelete.push(row.id);
+        latestSeenAt = latestTimestamp(latestSeenAt, remoteUpdatedAt, row.updated_at, row.created_at);
         skipped += 1;
         continue;
       }
@@ -1875,6 +2006,7 @@ const pullProfileImageRelayChanges = async (
       });
 
       rowIdsToDelete.push(row.id);
+      latestSeenAt = latestTimestamp(latestSeenAt, remoteUpdatedAt, row.updated_at, row.created_at);
       pulled += 1;
     }
   });
@@ -1883,7 +2015,7 @@ const pullProfileImageRelayChanges = async (
   if (rowIdsToDelete.length) {
     await deleteRemoteQueueRowsWithRetry(getProfileQueueTable(), rowIdsToDelete, currentDeviceId);
   }
-  return { pulled, skipped };
+  return { pulled, skipped, latestSeenAt };
 };
 
 const deleteQueueRowsOlderThan = async (tableName: string, cutoffIso: string): Promise<void> => {
@@ -3756,6 +3888,8 @@ const mapStatus = (actor: SyncActor, state: SyncStateRow, db: Database.Database)
   configured: isConfigured(),
   lastPushAt: state.last_push_at,
   lastPullAt: state.last_pull_at,
+  lastProfilePullAt: state.last_profile_pull_at,
+  lastEmployeeSubmissionPullAt: state.last_employee_submission_pull_at,
   lastPushCount: state.last_push_count,
   lastPullCount: state.last_pull_count,
   lastConflictCount: state.last_conflict_count,
@@ -4215,6 +4349,23 @@ export async function previewRemoteChanges(actor: SyncActor) {
 
     try {
       const currentDeviceId = getLocalDeviceId(db);
+      const hasRows = canAdminSync(actor)
+        ? await hasRemoteQueueRows(getAdminQueueTable(), state.last_pull_at, EMPLOYEE_ID_NULL_FILTER, currentDeviceId)
+        : await hasRemoteQueueRows(getAdminQueueTable(), state.last_pull_at, actor.userId, currentDeviceId);
+      if (!hasRows) {
+        writeSyncState(db, actor, {
+          last_status: 'online',
+          last_error: null,
+          last_successful_sync_at: nowIso()
+        });
+        return {
+          status: 'ok',
+          newRecords: 0,
+          conflictCount: 0,
+          totalSizeKb: 0,
+          message: 'No new remote records available.'
+        };
+      }
       const rows = canAdminSync(actor)
         ? await fetchAllRemoteQueueRows(getAdminQueueTable(), state.last_pull_at, EMPLOYEE_ID_NULL_FILTER, currentDeviceId)
         : await fetchAllRemoteQueueRows(getAdminQueueTable(), state.last_pull_at, actor.userId, currentDeviceId);
@@ -4239,14 +4390,6 @@ export async function previewRemoteChanges(actor: SyncActor) {
         if (!hasComparableTimestamps && localVersion > remoteVersion) conflicts += 1;
       }
 
-      let previewMessage: string | undefined;
-      if (rows.length === 0) {
-        const allVisibleRows = canAdminSync(actor)
-          ? await fetchAllRemoteQueueRows(getAdminQueueTable(), state.last_pull_at, EMPLOYEE_ID_NULL_FILTER)
-          : await fetchAllRemoteQueueRows(getAdminQueueTable(), state.last_pull_at, actor.userId);
-        previewMessage = allVisibleRows.length > 0 ? 'Data already exists locally.' : 'No new remote records available.';
-      }
-
       writeSyncState(db, actor, {
         last_status: 'online',
         last_error: null,
@@ -4258,7 +4401,7 @@ export async function previewRemoteChanges(actor: SyncActor) {
         newRecords: rows.length,
         conflictCount: conflicts,
         totalSizeKb: Number(totalSizeKb.toFixed(3)),
-        message: previewMessage
+        message: rows.length === 0 ? 'No new remote records available.' : undefined
       };
     } catch (error: any) {
       return {
@@ -4278,10 +4421,32 @@ const pullAdminChanges = async (
   conflictStrategy: ConflictStrategy,
   currentDeviceId: string
 ) => {
+  const hasRows = await hasRemoteQueueRows(getAdminQueueTable(), state.last_pull_at, EMPLOYEE_ID_NULL_FILTER, currentDeviceId);
+  if (!hasRows) {
+    const message = 'No new remote records available.';
+    const syncedAt = nowIso();
+    writeSyncState(db, actor, {
+      last_status: 'online',
+      last_error: null,
+      last_pull_count: 0,
+      last_conflict_count: 0,
+      last_successful_sync_at: syncedAt,
+      last_auto_sync_at: syncedAt,
+      device_registered_at: state.device_registered_at || syncedAt,
+      full_sync_required: 0,
+      full_sync_reason: null
+    });
+    return {
+      status: 'idle',
+      pulledCount: 0,
+      conflictCount: 0,
+      conflicts: [] as ConflictRecord[],
+      message
+    };
+  }
   const rows = await fetchAllRemoteQueueRows(getAdminQueueTable(), state.last_pull_at, EMPLOYEE_ID_NULL_FILTER, currentDeviceId);
   if (!rows.length) {
-    const allVisibleRows = await fetchAllRemoteQueueRows(getAdminQueueTable(), state.last_pull_at, EMPLOYEE_ID_NULL_FILTER);
-    const message = allVisibleRows.length ? 'Data already exists locally.' : 'No new remote records available.';
+    const message = 'No new remote records available.';
     const syncedAt = nowIso();
     writeSyncState(db, actor, {
       last_status: 'online',
@@ -4447,10 +4612,32 @@ const pullEmployeeAssignedChanges = async (
   conflictStrategy: ConflictStrategy,
   currentDeviceId: string
 ) => {
+  const hasRows = await hasRemoteQueueRows(getAdminQueueTable(), state.last_pull_at, actor.userId, currentDeviceId);
+  if (!hasRows) {
+    const message = 'No new remote records available.';
+    const syncedAt = nowIso();
+    writeSyncState(db, actor, {
+      last_status: 'online',
+      last_error: null,
+      last_pull_count: 0,
+      last_conflict_count: 0,
+      last_successful_sync_at: syncedAt,
+      last_auto_sync_at: syncedAt,
+      device_registered_at: state.device_registered_at || syncedAt,
+      full_sync_required: 0,
+      full_sync_reason: null
+    });
+    return {
+      status: 'idle',
+      pulledCount: 0,
+      conflictCount: 0,
+      conflicts: [] as ConflictRecord[],
+      message
+    };
+  }
   const rows = await fetchAllRemoteQueueRows(getAdminQueueTable(), state.last_pull_at, actor.userId, currentDeviceId);
   if (!rows.length) {
-    const allVisibleRows = await fetchAllRemoteQueueRows(getAdminQueueTable(), state.last_pull_at, actor.userId);
-    const message = allVisibleRows.length ? 'Data already exists locally.' : 'No new remote records available.';
+    const message = 'No new remote records available.';
     const syncedAt = nowIso();
     writeSyncState(db, actor, {
       last_status: 'online',
@@ -4660,17 +4847,35 @@ const pullEmployeeAssignedChanges = async (
 const pullEmployeeSubmissionsForAdmin = async (
   db: Database.Database,
   actor: SyncActor,
+  state: SyncStateRow,
   conflictStrategy: ConflictStrategy,
   currentDeviceId: string
 ) => {
-  const rows = await fetchAllRemoteQueueRows(getEmployeeQueueTable(), null, null, currentDeviceId);
-  if (!rows.length) {
+  const sinceTimestamp = state.last_employee_submission_pull_at;
+  const hasRows = await hasRemoteQueueRows(getEmployeeQueueTable(), sinceTimestamp, null, currentDeviceId);
+  if (!hasRows) {
     const syncedAt = nowIso();
-    const currentState = readSyncState(db, actor);
     writeSyncState(db, actor, {
       last_successful_sync_at: syncedAt,
       last_auto_sync_at: syncedAt,
-      device_registered_at: currentState.device_registered_at || syncedAt,
+      device_registered_at: state.device_registered_at || syncedAt,
+      last_status: 'online',
+      last_error: null
+    });
+    return {
+      status: 'idle' as const,
+      pulledCount: 0,
+      conflictCount: 0,
+      conflicts: [] as ConflictRecord[]
+    };
+  }
+  const rows = await fetchAllRemoteQueueRows(getEmployeeQueueTable(), sinceTimestamp, null, currentDeviceId);
+  if (!rows.length) {
+    const syncedAt = nowIso();
+    writeSyncState(db, actor, {
+      last_successful_sync_at: syncedAt,
+      last_auto_sync_at: syncedAt,
+      device_registered_at: state.device_registered_at || syncedAt,
       last_status: 'online',
       last_error: null
     });
@@ -4797,12 +5002,13 @@ const pullEmployeeSubmissionsForAdmin = async (
     await deleteRemoteQueueRowsWithRetry(getEmployeeQueueTable(), remoteIdsToDelete, currentDeviceId);
   }
 
+  const shouldAdvanceCursor = conflicts.length === 0 && Boolean(latestAppliedTimestamp);
   const syncedAt = nowIso();
-  const currentState = readSyncState(db, actor);
   writeSyncState(db, actor, {
+    last_employee_submission_pull_at: shouldAdvanceCursor ? latestAppliedTimestamp : state.last_employee_submission_pull_at,
     last_successful_sync_at: syncedAt,
     last_auto_sync_at: syncedAt,
-    device_registered_at: currentState.device_registered_at || syncedAt,
+    device_registered_at: state.device_registered_at || syncedAt,
     full_sync_required: 0,
     full_sync_reason: null,
     last_status: conflicts.length ? 'conflict' : 'online',
@@ -4887,10 +5093,17 @@ export async function pullRemoteChanges(actor: SyncActor, conflictStrategy: Conf
       const result = canAdminSync(actor)
         ? await pullAdminChanges(db, actor, state, conflictStrategy, currentDeviceId)
         : await pullEmployeeAssignedChanges(db, actor, state, conflictStrategy, currentDeviceId);
-      let profileImageResult: { pulled: number; skipped: number } = { pulled: 0, skipped: 0 };
+      let profileImageResult: { pulled: number; skipped: number; latestSeenAt: string | null } = {
+        pulled: 0,
+        skipped: 0,
+        latestSeenAt: state.last_profile_pull_at
+      };
 
       if (result.status === 'synced' || result.status === 'idle' || result.status === 'conflict') {
-        profileImageResult = await pullProfileImageRelayChanges(db, actor, currentDeviceId);
+        profileImageResult = await pullProfileImageRelayChanges(db, actor, currentDeviceId, state.last_profile_pull_at);
+        if (profileImageResult.latestSeenAt && profileImageResult.latestSeenAt !== state.last_profile_pull_at) {
+          writeSyncState(db, actor, { last_profile_pull_at: profileImageResult.latestSeenAt });
+        }
         if (profileImageResult.pulled > 0) {
           logSyncEvent(db, {
             eventType: 'pull',
@@ -4911,10 +5124,17 @@ export async function pullRemoteChanges(actor: SyncActor, conflictStrategy: Conf
       };
     } catch (error: any) {
       const message = error?.message ?? 'Pull failed';
-      let profileImageResult: { pulled: number; skipped: number } = { pulled: 0, skipped: 0 };
+      let profileImageResult: { pulled: number; skipped: number; latestSeenAt: string | null } = {
+        pulled: 0,
+        skipped: 0,
+        latestSeenAt: state.last_profile_pull_at
+      };
       try {
         const currentDeviceId = getLocalDeviceId(db);
-        profileImageResult = await pullProfileImageRelayChanges(db, actor, currentDeviceId);
+        profileImageResult = await pullProfileImageRelayChanges(db, actor, currentDeviceId, state.last_profile_pull_at);
+        if (profileImageResult.latestSeenAt && profileImageResult.latestSeenAt !== state.last_profile_pull_at) {
+          writeSyncState(db, actor, { last_profile_pull_at: profileImageResult.latestSeenAt });
+        }
       } catch {
         // Best effort only: keep original pull error if profile relay pull also fails.
       }
@@ -4967,10 +5187,17 @@ export async function autoPullEmployeeSubmissions(actor: SyncActor) {
     try {
       await cleanupQueueRetention(actor);
       const currentDeviceId = getLocalDeviceId(db);
-      const result = await pullEmployeeSubmissionsForAdmin(db, actor, 'skip', currentDeviceId);
-      let profileImageResult: { pulled: number; skipped: number } = { pulled: 0, skipped: 0 };
+      const result = await pullEmployeeSubmissionsForAdmin(db, actor, state, 'skip', currentDeviceId);
+      let profileImageResult: { pulled: number; skipped: number; latestSeenAt: string | null } = {
+        pulled: 0,
+        skipped: 0,
+        latestSeenAt: state.last_profile_pull_at
+      };
       if (result.status === 'synced' || result.status === 'idle' || result.status === 'conflict') {
-        profileImageResult = await pullProfileImageRelayChanges(db, actor, currentDeviceId);
+        profileImageResult = await pullProfileImageRelayChanges(db, actor, currentDeviceId, state.last_profile_pull_at);
+        if (profileImageResult.latestSeenAt && profileImageResult.latestSeenAt !== state.last_profile_pull_at) {
+          writeSyncState(db, actor, { last_profile_pull_at: profileImageResult.latestSeenAt });
+        }
         if (profileImageResult.pulled > 0) {
           logSyncEvent(db, {
             eventType: 'auto_pull_employee_submissions',
@@ -4990,10 +5217,17 @@ export async function autoPullEmployeeSubmissions(actor: SyncActor) {
       };
     } catch (error: any) {
       const message = error?.message ?? 'Failed to auto pull employee submissions.';
-      let profileImageResult: { pulled: number; skipped: number } = { pulled: 0, skipped: 0 };
+      let profileImageResult: { pulled: number; skipped: number; latestSeenAt: string | null } = {
+        pulled: 0,
+        skipped: 0,
+        latestSeenAt: state.last_profile_pull_at
+      };
       try {
         const currentDeviceId = getLocalDeviceId(db);
-        profileImageResult = await pullProfileImageRelayChanges(db, actor, currentDeviceId);
+        profileImageResult = await pullProfileImageRelayChanges(db, actor, currentDeviceId, state.last_profile_pull_at);
+        if (profileImageResult.latestSeenAt && profileImageResult.latestSeenAt !== state.last_profile_pull_at) {
+          writeSyncState(db, actor, { last_profile_pull_at: profileImageResult.latestSeenAt });
+        }
       } catch {
         // Best effort only: keep original pull error if profile relay pull also fails.
       }
