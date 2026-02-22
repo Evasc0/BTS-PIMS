@@ -905,25 +905,36 @@ export const authService = {
       return { success: false, error: 'Only active system admin accounts can create users.' };
     }
 
-    let adminAccessToken = getCachedSessionToken(input.adminUserId);
-    if (!adminAccessToken) {
-      const refreshed = await refreshCachedSessionToken(input.adminUserId);
-      if (!refreshed.success) {
-        const failure = refreshed as Extract<RefreshSessionResult, { success: false }>;
-        return {
-          success: false,
-          error: failure.error || 'Internet connection required to create user.',
-          requiresInternet: failure.requiresInternet ?? true
-        };
-      }
-      adminAccessToken = refreshed.accessToken;
-    }
-
     if (!supabaseAuth.isConfigured()) {
       return {
         success: false,
         error: 'Supabase auth is not configured. Set SUPABASE_URL and SUPABASE_ANON_KEY (or SUPABASE_PUBLISHABLE_KEY).'
       };
+    }
+
+    const serviceRoleEnabled = supabaseAuth.isServiceRoleConfigured();
+    let adminAccessToken = getCachedSessionToken(input.adminUserId);
+    if (!adminAccessToken) {
+      const refreshed = await refreshCachedSessionToken(input.adminUserId);
+      if (!refreshed.success) {
+        const failure = refreshed as Extract<RefreshSessionResult, { success: false }>;
+        const failureMessage = String(failure.error || '');
+        const noSessionToken =
+          failureMessage.toLowerCase().includes('no refresh token') ||
+          failureMessage.toLowerCase().includes('sign in online once');
+
+        // If service role is configured, allow admin-managed provisioning even when
+        // this device has no refresh token for the current admin session.
+        if (!serviceRoleEnabled || failure.requiresInternet || !noSessionToken) {
+          return {
+            success: false,
+            error: failure.error || 'Internet connection required to create user.',
+            requiresInternet: failure.requiresInternet ?? true
+          };
+        }
+      } else {
+        adminAccessToken = refreshed.accessToken;
+      }
     }
 
     const fullName = input.fullName.trim();
@@ -941,15 +952,56 @@ export const authService = {
     const status = normalizeStatus(input.status);
     const employeeId = randomUUID();
 
-    try {
-      const provisioned = await supabaseAuth.provisionEmployeeAccount({
-        adminAccessToken,
-        employeeId,
+    const provisionViaServiceRole = async (): Promise<{ supabaseUserId: string }> => {
+      const created = await supabaseAuth.adminCreateUser({
         email,
         password,
+        employeeId,
         role,
         status
       });
+
+      await supabaseAuth.upsertAppUserStatus({
+        adminAccessToken: adminAccessToken || '',
+        supabaseUserId: created.supabaseUserId,
+        employeeId,
+        email,
+        role,
+        status
+      });
+
+      return created;
+    };
+
+    try {
+      let provisioned: { supabaseUserId: string };
+
+      if (adminAccessToken) {
+        try {
+          provisioned = await supabaseAuth.provisionEmployeeAccount({
+            adminAccessToken,
+            employeeId,
+            email,
+            password,
+            role,
+            status
+          });
+        } catch (scopedProvisionError: unknown) {
+          if (!serviceRoleEnabled) {
+            throw scopedProvisionError;
+          }
+          provisioned = await provisionViaServiceRole();
+        }
+      } else {
+        if (!serviceRoleEnabled) {
+          return {
+            success: false,
+            error: 'No refresh token available. Sign in online once on this device.',
+            requiresInternet: true
+          };
+        }
+        provisioned = await provisionViaServiceRole();
+      }
 
       insertLocalUserProvision(db, {
         employeeId,
