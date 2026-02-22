@@ -67,6 +67,42 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
 
   const canManageEmployees = user.role === 'system_admin';
 
+  const pushEmployeeChangesNow = async (targetEmployeeId?: string): Promise<string | null> => {
+    if (!window.api?.sync?.push) return null;
+    if (!navigator.onLine) {
+      return 'Changes are saved locally and will sync when internet is available.';
+    }
+
+    try {
+      let stage: { outboxIds?: number[] } | undefined;
+      if (window.api.sync.viewLocalChanges) {
+        const normalizedTargetId = String(targetEmployeeId || '').trim();
+        const summary = await window.api.sync.viewLocalChanges(user.id);
+        const outboxIds = summary.changes
+          .filter((change) => {
+            if (change.entityType !== 'employees') return false;
+            if (!normalizedTargetId) return true;
+            return change.entityId === normalizedTargetId;
+          })
+          .map((change) => change.outboxId);
+        if (outboxIds.length === 0) {
+          return null;
+        }
+        if (outboxIds.length) {
+          stage = { outboxIds };
+        }
+      }
+
+      const result = await window.api.sync.push(user.id, stage);
+      if (result.status === 'synced' || result.status === 'idle') return null;
+      if (result.status === 'offline') return 'Sync mode is offline. Enable Online mode to sync now.';
+      if (result.status === 'deferred') return result.error || 'Sync was deferred. The app will retry automatically.';
+      return result.error || `Sync returned status: ${result.status}.`;
+    } catch (error: any) {
+      return error?.message || 'Immediate sync failed. The app will retry automatically.';
+    }
+  };
+
   const filteredEmployees = (employees || []).filter((employee) => {
     const term = searchTerm.trim().toLowerCase();
     if (!term) return true;
@@ -187,13 +223,11 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
       performedByEmployeeId: user.id,
       details: `Employee created: ${formState.fullName.trim()}`
     });
-
-    if (navigator.onLine && window.api?.sync?.push) {
-      void window.api.sync.push(user.id);
-    }
+    const syncWarning = await pushEmployeeChangesNow(createResult.employeeId);
 
     setShowAddModal(false);
     resetForm();
+    setFormSuccess(syncWarning ? `Employee created. ${syncWarning}` : 'Employee created successfully.');
   };
 
   const handleEditEmployee = async (event: React.FormEvent) => {
@@ -266,13 +300,10 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
       performedByEmployeeId: user.id,
       details: `Employee updated: ${formState.fullName.trim()}`
     });
-
-    if (navigator.onLine && window.api?.sync?.push) {
-      void window.api.sync.push(user.id);
-    }
+    const syncWarning = await pushEmployeeChangesNow(selectedEmployee.id);
 
     setSelectedEmployee(null);
-    setFormSuccess('Employee updated.');
+    setFormSuccess(syncWarning ? `Employee updated. ${syncWarning}` : 'Employee updated.');
     setImageChangedAt(null);
   };
 
@@ -325,14 +356,13 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
         performedByEmployeeId: user.id,
         details: `Password reset for employee: ${selectedEmployee.fullName}`
       });
+      const syncWarning = await pushEmployeeChangesNow(selectedEmployee.id);
 
-      setFormSuccess('Employee password reset successfully.');
+      setFormSuccess(
+        syncWarning ? `Employee password reset successfully. ${syncWarning}` : 'Employee password reset successfully.'
+      );
       setResetPassword('');
       setShowResetPassword(false);
-
-      if (navigator.onLine && window.api?.sync?.push) {
-        void window.api.sync.push(user.id);
-      }
     } finally {
       setResetPasswordBusy(false);
     }
@@ -356,9 +386,8 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
       performedByEmployeeId: user.id,
       details: `Employee removed: ${employeeName}`
     });
-    if (navigator.onLine && window.api?.sync?.push) {
-      void window.api.sync.push(user.id);
-    }
+    const syncWarning = await pushEmployeeChangesNow(employeeId);
+    setFormSuccess(syncWarning ? `Employee removed. ${syncWarning}` : 'Employee removed.');
   };
 
   const handleEditImageClick = () => {

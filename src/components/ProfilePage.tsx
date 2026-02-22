@@ -110,6 +110,37 @@ export function ProfilePage({ user }: ProfilePageProps) {
     setThemePreference(getStoredThemePreference(user.id));
   }, [user.id]);
 
+  const pushProfileChangesNow = async (): Promise<string | null> => {
+    if (!window.api?.sync?.push) return null;
+    if (!navigator.onLine) {
+      return 'Changes are saved locally and will sync when internet is available.';
+    }
+
+    try {
+      let stage: { outboxIds?: number[] } | undefined;
+      if (window.api.sync.viewLocalChanges) {
+        const summary = await window.api.sync.viewLocalChanges(user.id);
+        const outboxIds = summary.changes
+          .filter((change) => change.entityType === 'employees' && change.entityId === user.id)
+          .map((change) => change.outboxId);
+        if (outboxIds.length === 0) {
+          return null;
+        }
+        if (outboxIds.length) {
+          stage = { outboxIds };
+        }
+      }
+
+      const result = await window.api.sync.push(user.id, stage);
+      if (result.status === 'synced' || result.status === 'idle') return null;
+      if (result.status === 'offline') return 'Sync mode is offline. Enable Online mode to sync now.';
+      if (result.status === 'deferred') return result.error || 'Sync was deferred. The app will retry automatically.';
+      return result.error || `Sync returned status: ${result.status}.`;
+    } catch (error: any) {
+      return error?.message || 'Immediate sync failed. The app will retry automatically.';
+    }
+  };
+
   const handleSave = async () => {
     setFormError(null);
     setFormSuccess(null);
@@ -173,13 +204,10 @@ export function ProfilePage({ user }: ProfilePageProps) {
       details: emailChanged ? 'Profile updated (email changed)' : 'Profile updated'
     });
 
+    const syncWarning = await pushProfileChangesNow();
     setIsEditing(false);
-    setFormSuccess('Profile updated successfully.');
+    setFormSuccess(syncWarning ? `Profile updated. ${syncWarning}` : 'Profile updated successfully.');
     await refreshUser();
-
-    if (navigator.onLine && window.api?.sync?.push) {
-      void window.api.sync.push(user.id);
-    }
   };
 
   const handleChangePassword = async () => {
@@ -229,8 +257,9 @@ export function ProfilePage({ user }: ProfilePageProps) {
         details: 'Password updated in Supabase Auth'
       });
 
+      const syncWarning = await pushProfileChangesNow();
       setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
-      setPasswordSuccess('Password updated successfully.');
+      setPasswordSuccess(syncWarning ? `Password updated. ${syncWarning}` : 'Password updated successfully.');
       await refreshUser();
     } finally {
       setPasswordBusy(false);
@@ -270,12 +299,9 @@ export function ProfilePage({ user }: ProfilePageProps) {
         performedByEmployeeId: user.id,
         details: 'Profile image updated'
       });
-      setFormSuccess('Profile image updated.');
+      const syncWarning = await pushProfileChangesNow();
+      setFormSuccess(syncWarning ? `Profile image updated. ${syncWarning}` : 'Profile image updated.');
       await refreshUser();
-
-      if (navigator.onLine && window.api?.sync?.push) {
-        void window.api.sync.push(user.id);
-      }
     } catch (error: any) {
       setFormError(error?.message || 'Unable to process and save profile image.');
     } finally {
@@ -302,12 +328,9 @@ export function ProfilePage({ user }: ProfilePageProps) {
         performedByEmployeeId: user.id,
         details: 'Profile image removed'
       });
-      setFormSuccess('Profile image removed.');
+      const syncWarning = await pushProfileChangesNow();
+      setFormSuccess(syncWarning ? `Profile image removed. ${syncWarning}` : 'Profile image removed.');
       await refreshUser();
-
-      if (navigator.onLine && window.api?.sync?.push) {
-        void window.api.sync.push(user.id);
-      }
     } finally {
       setImageBusy(false);
     }
