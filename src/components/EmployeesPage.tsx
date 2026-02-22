@@ -11,6 +11,8 @@ interface EmployeesPageProps {
 }
 
 interface EmployeeFormState {
+  firstName: string;
+  lastName: string;
   fullName: string;
   email: string;
   phone: string;
@@ -25,6 +27,8 @@ interface EmployeeFormState {
 }
 
 const emptyFormState: EmployeeFormState = {
+  firstName: '',
+  lastName: '',
   fullName: '',
   email: '',
   phone: '',
@@ -37,6 +41,9 @@ const emptyFormState: EmployeeFormState = {
   profileImageDataUrl: null,
   profileImageFormat: null
 };
+
+const composeFullName = (firstName: string, lastName: string): string =>
+  [String(firstName || '').trim(), String(lastName || '').trim()].filter(Boolean).join(' ').trim();
 
 export function EmployeesPage({ user }: EmployeesPageProps) {
   const editPhotoInputRef = useRef<HTMLInputElement | null>(null);
@@ -140,8 +147,11 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
   };
 
   const openEditModal = (employee: Employee) => {
+    const split = splitFullName(employee.fullName);
     setSelectedEmployee(employee);
     setFormState({
+      firstName: employee.firstName ?? split.firstName,
+      lastName: employee.lastName ?? split.lastName,
       fullName: employee.fullName,
       email: employee.email,
       phone: employee.phone,
@@ -170,7 +180,7 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
 
     const normalizedEmail = formState.email.trim().toLowerCase();
     if (!formState.fullName.trim() || !normalizedEmail || !formState.password) {
-      setFormError('Full name, email, and password are required.');
+      setFormError('First name, last name, email, and password are required.');
       return;
     }
 
@@ -236,9 +246,12 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
     setFormError(null);
     setFormSuccess(null);
 
+    const firstName = String(formState.firstName || '').trim();
+    const lastName = String(formState.lastName || '').trim();
+    const nextFullName = composeFullName(firstName, lastName);
     const normalizedEmail = formState.email.trim().toLowerCase();
-    if (!formState.fullName.trim() || !normalizedEmail) {
-      setFormError('Full name and email are required.');
+    if (!firstName || !lastName || !normalizedEmail) {
+      setFormError('First name, last name, and email are required.');
       return;
     }
 
@@ -270,11 +283,10 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
       }
     }
 
-    const split = splitFullName(formState.fullName);
     const payload: Partial<Employee> = {
-      fullName: formState.fullName.trim(),
-      firstName: split.firstName,
-      lastName: split.lastName,
+      fullName: nextFullName,
+      firstName,
+      lastName,
       email: normalizedEmail,
       phone: formState.phone.trim(),
       position: formState.position.trim(),
@@ -298,7 +310,7 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
       entityType: 'employee',
       entityId: selectedEmployee.id,
       performedByEmployeeId: user.id,
-      details: `Employee updated: ${formState.fullName.trim()}`
+      details: `Employee updated: ${nextFullName}`
     });
     const syncWarning = await pushEmployeeChangesNow(selectedEmployee.id);
 
@@ -542,25 +554,49 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
             <form className="space-y-4" onSubmit={handleAddEmployee}>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Full Name</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">First Name</label>
                   <input
                     type="text"
-                    value={formState.fullName}
-                    onChange={(e) => setFormState({ ...formState, fullName: e.target.value })}
+                    value={formState.firstName}
+                    onChange={(e) => {
+                      const firstName = e.target.value;
+                      setFormState((prev) => ({
+                        ...prev,
+                        firstName,
+                        fullName: composeFullName(firstName, prev.lastName)
+                      }));
+                    }}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
                     required
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Email</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Last Name</label>
                   <input
-                    type="email"
-                    value={formState.email}
-                    onChange={(e) => setFormState({ ...formState, email: e.target.value })}
+                    type="text"
+                    value={formState.lastName}
+                    onChange={(e) => {
+                      const lastName = e.target.value;
+                      setFormState((prev) => ({
+                        ...prev,
+                        lastName,
+                        fullName: composeFullName(prev.firstName, lastName)
+                      }));
+                    }}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
                     required
                   />
                 </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Email</label>
+                <input
+                  type="email"
+                  value={formState.email}
+                  onChange={(e) => setFormState({ ...formState, email: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
+                  required
+                />
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
@@ -713,25 +749,49 @@ export function EmployeesPage({ user }: EmployeesPageProps) {
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Full Name</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">First Name</label>
                   <input
                     type="text"
-                    value={formState.fullName}
-                    onChange={(e) => setFormState({ ...formState, fullName: e.target.value })}
+                    value={formState.firstName}
+                    onChange={(e) => {
+                      const firstName = e.target.value;
+                      setFormState((prev) => ({
+                        ...prev,
+                        firstName,
+                        fullName: composeFullName(firstName, prev.lastName)
+                      }));
+                    }}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
                     required
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Email</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Last Name</label>
                   <input
-                    type="email"
-                    value={formState.email}
-                    onChange={(e) => setFormState({ ...formState, email: e.target.value })}
+                    type="text"
+                    value={formState.lastName}
+                    onChange={(e) => {
+                      const lastName = e.target.value;
+                      setFormState((prev) => ({
+                        ...prev,
+                        lastName,
+                        fullName: composeFullName(prev.firstName, lastName)
+                      }));
+                    }}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
                     required
                   />
                 </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Email</label>
+                <input
+                  type="email"
+                  value={formState.email}
+                  onChange={(e) => setFormState({ ...formState, email: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
+                  required
+                />
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
