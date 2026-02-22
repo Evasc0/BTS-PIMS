@@ -48,6 +48,30 @@ export interface OnlineLoginResult {
   accountStatus: EmployeeStatus | null;
   profileEmployeeId: string | null;
   profileFound: boolean;
+  firstName: string | null;
+  lastName: string | null;
+  fullName: string | null;
+  phone: string | null;
+  position: string | null;
+  department: string | null;
+  address: string | null;
+  location: string | null;
+  language: string | null;
+}
+
+interface AuthProfileMetadataInput {
+  employeeId: string;
+  role: EmployeeRole;
+  status: EmployeeStatus;
+  fullName?: string | null;
+  firstName?: string | null;
+  lastName?: string | null;
+  phone?: string | null;
+  position?: string | null;
+  department?: string | null;
+  address?: string | null;
+  location?: string | null;
+  language?: string | null;
 }
 
 const parseSupabaseError = async (response: Response): Promise<string> => {
@@ -156,6 +180,38 @@ const normalizeStatus = (value: unknown): EmployeeStatus | null => {
     .toLowerCase();
   if (status === 'active' || status === 'inactive') return status;
   return null;
+};
+
+const normalizeOptionalText = (value: unknown): string | null => {
+  const trimmed = String(value ?? '').trim();
+  return trimmed ? trimmed : null;
+};
+
+const buildAuthUserMetadata = (input: AuthProfileMetadataInput): Record<string, unknown> => {
+  const metadata: Record<string, unknown> = {
+    employee_id: input.employeeId,
+    app_role: input.role,
+    role: input.role,
+    account_status: input.status,
+    status: input.status
+  };
+
+  const addIfPresent = (key: string, value: unknown): void => {
+    const normalized = normalizeOptionalText(value);
+    if (normalized) metadata[key] = normalized;
+  };
+
+  addIfPresent('full_name', input.fullName);
+  addIfPresent('first_name', input.firstName);
+  addIfPresent('last_name', input.lastName);
+  addIfPresent('phone', input.phone);
+  addIfPresent('position', input.position);
+  addIfPresent('department', input.department);
+  addIfPresent('address', input.address);
+  addIfPresent('location', input.location);
+  addIfPresent('language', input.language);
+
+  return metadata;
 };
 
 const fetchAppUserByUserId = async (accessToken: string, userId: string): Promise<AppUserRow | null> => {
@@ -332,14 +388,27 @@ export const supabaseAuth = {
       profileByEmail = null;
     }
     const profile = profileByUserId || profileByEmail;
+    const metadata = (payload?.user?.user_metadata || {}) as Record<string, unknown>;
+    const metadataEmployeeId = normalizeOptionalText(metadata.employee_id ?? metadata.employeeId);
+    const metadataRole = normalizeRole(metadata.app_role ?? metadata.role);
+    const metadataStatus = normalizeStatus(metadata.account_status ?? metadata.status);
+    const metadataFirstName = normalizeOptionalText(metadata.first_name ?? metadata.firstName);
+    const metadataLastName = normalizeOptionalText(metadata.last_name ?? metadata.lastName);
+    const metadataFullName = normalizeOptionalText(metadata.full_name ?? metadata.fullName);
+    const metadataPhone = normalizeOptionalText(metadata.phone);
+    const metadataPosition = normalizeOptionalText(metadata.position);
+    const metadataDepartment = normalizeOptionalText(metadata.department);
+    const metadataAddress = normalizeOptionalText(metadata.address);
+    const metadataLocation = normalizeOptionalText(metadata.location);
+    const metadataLanguage = normalizeOptionalText(metadata.language);
 
     const role =
       normalizeRole(profile?.role) ||
       normalizeRole(payload?.user?.app_metadata?.app_role) ||
-      normalizeRole(payload?.user?.user_metadata?.role);
+      metadataRole;
     const accountStatus =
       normalizeStatus(profile?.account_status) ||
-      normalizeStatus(payload?.user?.user_metadata?.account_status) ||
+      metadataStatus ||
       'active';
 
     return {
@@ -352,8 +421,17 @@ export const supabaseAuth = {
       email: payload?.user?.email || profile?.email || null,
       role,
       accountStatus,
-      profileEmployeeId: profile?.employee_id || null,
-      profileFound: Boolean(profile)
+      profileEmployeeId: profile?.employee_id || metadataEmployeeId || null,
+      profileFound: Boolean(profile),
+      firstName: metadataFirstName,
+      lastName: metadataLastName,
+      fullName: metadataFullName,
+      phone: metadataPhone,
+      position: metadataPosition,
+      department: metadataDepartment,
+      address: metadataAddress,
+      location: metadataLocation,
+      language: metadataLanguage
     };
   },
 
@@ -558,6 +636,17 @@ export const supabaseAuth = {
     employeeId: string;
     role: EmployeeRole;
     status: EmployeeStatus;
+    profile?: {
+      fullName?: string;
+      firstName?: string;
+      lastName?: string;
+      phone?: string;
+      position?: string;
+      department?: string;
+      address?: string;
+      location?: string;
+      language?: string;
+    };
   }): Promise<{ supabaseUserId: string }> {
     const supabaseUrl = getSupabaseUrl();
     if (!supabaseUrl) {
@@ -588,11 +677,20 @@ export const supabaseAuth = {
         email,
         password,
         email_confirm: true,
-        user_metadata: {
-          employee_id: input.employeeId,
-          app_role: input.role,
-          account_status: input.status
-        }
+        user_metadata: buildAuthUserMetadata({
+          employeeId: input.employeeId,
+          role: input.role,
+          status: input.status,
+          fullName: input.profile?.fullName,
+          firstName: input.profile?.firstName,
+          lastName: input.profile?.lastName,
+          phone: input.profile?.phone,
+          position: input.profile?.position,
+          department: input.profile?.department,
+          address: input.profile?.address,
+          location: input.profile?.location,
+          language: input.profile?.language
+        })
       })
     });
 
@@ -614,11 +712,33 @@ export const supabaseAuth = {
     password: string;
     employeeId: string;
     role: EmployeeRole;
-  }): Promise<{ supabaseUserId: string }> {
-    const metadata = {
-      app_role: input.role,
-      employee_id: input.employeeId
+    status?: EmployeeStatus;
+    profile?: {
+      fullName?: string;
+      firstName?: string;
+      lastName?: string;
+      phone?: string;
+      position?: string;
+      department?: string;
+      address?: string;
+      location?: string;
+      language?: string;
     };
+  }): Promise<{ supabaseUserId: string }> {
+    const metadata = buildAuthUserMetadata({
+      employeeId: input.employeeId,
+      role: input.role,
+      status: normalizeStatus(input.status) || 'active',
+      fullName: input.profile?.fullName,
+      firstName: input.profile?.firstName,
+      lastName: input.profile?.lastName,
+      phone: input.profile?.phone,
+      position: input.profile?.position,
+      department: input.profile?.department,
+      address: input.profile?.address,
+      location: input.profile?.location,
+      language: input.profile?.language
+    });
     const result = await signUpWithPassword(input.email.trim().toLowerCase(), input.password, metadata);
     return { supabaseUserId: result.userId };
   },
@@ -630,14 +750,37 @@ export const supabaseAuth = {
     password: string;
     role: EmployeeRole;
     status: EmployeeStatus;
+    profile?: {
+      fullName?: string;
+      firstName?: string;
+      lastName?: string;
+      phone?: string;
+      position?: string;
+      department?: string;
+      address?: string;
+      location?: string;
+      language?: string;
+    };
   }): Promise<{ supabaseUserId: string }> {
     const normalizedEmail = input.email.trim().toLowerCase();
     let supabaseUserId: string | null = null;
 
     try {
       const signUpResult = await signUpWithPassword(normalizedEmail, input.password, {
-        app_role: input.role,
-        employee_id: input.employeeId
+        ...buildAuthUserMetadata({
+          employeeId: input.employeeId,
+          role: input.role,
+          status: input.status,
+          fullName: input.profile?.fullName,
+          firstName: input.profile?.firstName,
+          lastName: input.profile?.lastName,
+          phone: input.profile?.phone,
+          position: input.profile?.position,
+          department: input.profile?.department,
+          address: input.profile?.address,
+          location: input.profile?.location,
+          language: input.profile?.language
+        })
       });
       supabaseUserId = signUpResult.userId;
     } catch (error: any) {

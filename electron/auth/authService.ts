@@ -45,8 +45,16 @@ export type AdminResetPasswordResult = { success: true } | { success: false; err
 
 interface EmployeeRow {
   id: string;
+  first_name?: string | null;
+  last_name?: string | null;
   full_name: string;
   email: string;
+  phone?: string | null;
+  position?: string | null;
+  department?: string | null;
+  address?: string | null;
+  location?: string | null;
+  language?: string | null;
   role: EmployeeRole;
   status: EmployeeStatus;
   password_hash: string;
@@ -342,6 +350,11 @@ const splitFullName = (fullName: string): { firstName: string; lastName: string 
   };
 };
 
+const normalizeOptionalText = (value: unknown): string | null => {
+  const trimmed = String(value ?? '').trim();
+  return trimmed ? trimmed : null;
+};
+
 const updateAuthVerificationCache = (
   db: Database.Database,
   input: {
@@ -398,6 +411,15 @@ const upsertLocalEmployeeFromOnline = (
     status: EmployeeStatus | null;
     supabaseUserId: string;
     profileEmployeeId: string | null;
+    firstName?: string | null;
+    lastName?: string | null;
+    fullName?: string | null;
+    phone?: string | null;
+    position?: string | null;
+    department?: string | null;
+    address?: string | null;
+    location?: string | null;
+    language?: string | null;
   }
 ): EmployeeRow => {
   const existingByEmail = getEmployeeByEmail(db, input.email);
@@ -409,12 +431,40 @@ const upsertLocalEmployeeFromOnline = (
   const { hash, salt } = createPasswordHash(input.password);
   const now = nowIso();
 
+  const fallbackFullName = deriveFullName(input.email);
+  const incomingFirstName = normalizeOptionalText(input.firstName);
+  const incomingLastName = normalizeOptionalText(input.lastName);
+  const incomingFullName = normalizeOptionalText(input.fullName);
+  const existingFirstName = normalizeOptionalText(existing?.first_name);
+  const existingLastName = normalizeOptionalText(existing?.last_name);
+  const existingFullName = normalizeOptionalText(existing?.full_name);
+  const splitIncoming = splitFullName(incomingFullName || '');
+  const splitFallback = splitFullName(existingFullName || fallbackFullName);
+  const firstName = incomingFirstName || splitIncoming.firstName || existingFirstName || splitFallback.firstName;
+  const lastName = incomingLastName || splitIncoming.lastName || existingLastName || splitFallback.lastName;
+  const fullName = incomingFullName || [firstName, lastName].filter(Boolean).join(' ').trim() || fallbackFullName;
+  const phone = normalizeOptionalText(input.phone) ?? normalizeOptionalText(existing?.phone) ?? '';
+  const position = normalizeOptionalText(input.position) ?? normalizeOptionalText(existing?.position) ?? '';
+  const department = normalizeOptionalText(input.department) ?? normalizeOptionalText(existing?.department) ?? '';
+  const address = normalizeOptionalText(input.address) ?? normalizeOptionalText(existing?.address) ?? '';
+  const location = normalizeOptionalText(input.location) ?? normalizeOptionalText(existing?.location) ?? address;
+  const language = normalizeOptionalText(input.language) ?? normalizeOptionalText(existing?.language) ?? 'English';
+
   if (existing) {
     db.prepare(
       `
         UPDATE employees
         SET
+          first_name = @first_name,
+          last_name = @last_name,
+          full_name = @full_name,
           email = @email,
+          phone = @phone,
+          position = @position,
+          department = @department,
+          address = @address,
+          location = @location,
+          language = @language,
           role = @role,
           status = @status,
           password_hash = @password_hash,
@@ -433,7 +483,16 @@ const upsertLocalEmployeeFromOnline = (
       `
     ).run({
       id: existing.id,
+      first_name: firstName,
+      last_name: lastName,
+      full_name: fullName,
       email: input.email,
+      phone,
+      position,
+      department,
+      address,
+      location,
+      language,
       role,
       status,
       password_hash: hash,
@@ -465,14 +524,14 @@ const upsertLocalEmployeeFromOnline = (
     `
   ).run({
     id: employeeId,
-    first_name: splitFullName(deriveFullName(input.email)).firstName,
-    last_name: splitFullName(deriveFullName(input.email)).lastName,
-    full_name: deriveFullName(input.email),
+    first_name: firstName,
+    last_name: lastName,
+    full_name: fullName,
     email: input.email,
-    phone: '',
-    position: '',
-    department: '',
-    address: '',
+    phone,
+    position,
+    department,
+    address,
     role,
     status,
     password_hash: hash,
@@ -486,11 +545,11 @@ const upsertLocalEmployeeFromOnline = (
     verification_expires_at: null,
     hashed_session_token: null,
     created_at: now,
-    location: '',
+    location,
     two_factor_enabled: 0,
     email_notifications: 0,
     low_stock_alerts: 0,
-    language: 'English',
+    language,
     sync_status: 'synced',
     is_dirty: 0,
     last_modified: now,
@@ -716,7 +775,16 @@ export const authService = {
           role: online.role,
           status: online.accountStatus,
           supabaseUserId: online.supabaseUserId,
-          profileEmployeeId: online.profileEmployeeId
+          profileEmployeeId: online.profileEmployeeId,
+          firstName: online.firstName,
+          lastName: online.lastName,
+          fullName: online.fullName,
+          phone: online.phone,
+          position: online.position,
+          department: online.department,
+          address: online.address,
+          location: online.location,
+          language: online.language
         });
         return applyOnlineLogin(db, employee, online, password);
       } catch (error: unknown) {
@@ -730,7 +798,19 @@ export const authService = {
               email,
               password,
               employeeId: employee.id,
-              role: 'system_admin'
+              role: 'system_admin',
+              status: normalizeStatus(employee.status),
+              profile: {
+                fullName: employee.full_name,
+                firstName: employee.first_name,
+                lastName: employee.last_name,
+                phone: employee.phone,
+                position: employee.position,
+                department: employee.department,
+                address: employee.address,
+                location: employee.location,
+                language: employee.language
+              }
             });
             const online = await supabaseAuth.onlineLogin(email, password);
             try {
@@ -751,7 +831,16 @@ export const authService = {
               role: 'system_admin',
               status: normalizeStatus(employee.status),
               supabaseUserId: online.supabaseUserId,
-              profileEmployeeId: employee.id
+              profileEmployeeId: employee.id,
+              firstName: online.firstName,
+              lastName: online.lastName,
+              fullName: online.fullName,
+              phone: online.phone,
+              position: online.position,
+              department: online.department,
+              address: online.address,
+              location: online.location,
+              language: online.language
             });
             return applyOnlineLogin(db, employee, online, password);
           } catch (bootstrapError: unknown) {
@@ -764,7 +853,18 @@ export const authService = {
                   password,
                   employeeId: employee.id,
                   role: 'system_admin',
-                  status: normalizeStatus(employee.status)
+                  status: normalizeStatus(employee.status),
+                  profile: {
+                    fullName: employee.full_name,
+                    firstName: employee.first_name,
+                    lastName: employee.last_name,
+                    phone: employee.phone,
+                    position: employee.position,
+                    department: employee.department,
+                    address: employee.address,
+                    location: employee.location,
+                    language: employee.language
+                  }
                 });
                 const online = await supabaseAuth.onlineLogin(email, password);
                 try {
@@ -785,7 +885,16 @@ export const authService = {
                   role: 'system_admin',
                   status: normalizeStatus(employee.status),
                   supabaseUserId: online.supabaseUserId,
-                  profileEmployeeId: employee.id
+                  profileEmployeeId: employee.id,
+                  firstName: online.firstName,
+                  lastName: online.lastName,
+                  fullName: online.fullName,
+                  phone: online.phone,
+                  position: online.position,
+                  department: online.department,
+                  address: online.address,
+                  location: online.location,
+                  language: online.language
                 });
                 return applyOnlineLogin(db, employee, online, password);
               } catch (serviceBootstrapError: unknown) {
@@ -983,6 +1092,13 @@ export const authService = {
 
     const role = normalizeRole(input.role);
     const status = normalizeStatus(input.status);
+    const splitName = splitFullName(fullName);
+    const profilePhone = (input.phone || '').trim();
+    const profilePosition = (input.position || '').trim();
+    const profileDepartment = (input.department || '').trim();
+    const profileAddress = (input.address || '').trim();
+    const profileLocation = (input.location || input.address || '').trim();
+    const profileLanguage = normalizeOptionalText(input.language) || 'English';
     const employeeId = randomUUID();
 
     const provisionViaServiceRole = async (): Promise<{ supabaseUserId: string }> => {
@@ -991,7 +1107,18 @@ export const authService = {
         password,
         employeeId,
         role,
-        status
+        status,
+        profile: {
+          fullName,
+          firstName: splitName.firstName,
+          lastName: splitName.lastName,
+          phone: profilePhone,
+          position: profilePosition,
+          department: profileDepartment,
+          address: profileAddress,
+          location: profileLocation,
+          language: profileLanguage
+        }
       });
 
       await supabaseAuth.upsertAppUserStatus({
@@ -1017,7 +1144,18 @@ export const authService = {
             email,
             password,
             role,
-            status
+            status,
+            profile: {
+              fullName,
+              firstName: splitName.firstName,
+              lastName: splitName.lastName,
+              phone: profilePhone,
+              position: profilePosition,
+              department: profileDepartment,
+              address: profileAddress,
+              location: profileLocation,
+              language: profileLanguage
+            }
           });
         } catch (scopedProvisionError: unknown) {
           if (!serviceRoleEnabled) {
@@ -1040,16 +1178,16 @@ export const authService = {
         employeeId,
         fullName,
         email,
-        phone: (input.phone || '').trim(),
-        position: (input.position || '').trim(),
-        department: (input.department || '').trim(),
-        address: (input.address || '').trim(),
+        phone: profilePhone,
+        position: profilePosition,
+        department: profileDepartment,
+        address: profileAddress,
         role,
         status,
         password,
         supabaseUserId: provisioned.supabaseUserId,
-        location: input.location || input.address,
-        language: input.language
+        location: profileLocation,
+        language: profileLanguage
       });
 
       return { success: true, employeeId };
