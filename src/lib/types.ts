@@ -17,6 +17,7 @@ export interface Employee {
   passwordHash: string;
   passwordSalt: string;
   credentialFingerprint?: string;
+  credentialUpdatedAt?: string | null;
   supabaseUserId?: string;
   authSyncStatus?: EmployeeAuthSyncStatus;
   authLastError?: string;

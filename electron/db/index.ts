@@ -60,6 +60,7 @@ const ensureCoreSchema = (db: Database.Database): void => {
   ensureTableColumn(db, 'employees', employeesColumns, 'last_verified_at', 'TEXT');
   ensureTableColumn(db, 'employees', employeesColumns, 'verification_expires_at', 'TEXT');
   ensureTableColumn(db, 'employees', employeesColumns, 'hashed_session_token', 'TEXT');
+  ensureTableColumn(db, 'employees', employeesColumns, 'credential_updated_at', 'TEXT');
   ensureTableColumn(db, 'employees', employeesColumns, 'supabase_refresh_token_enc', 'TEXT');
   ensureTableColumn(db, 'employees', employeesColumns, 'first_name', 'TEXT');
   ensureTableColumn(db, 'employees', employeesColumns, 'last_name', 'TEXT');
@@ -233,6 +234,7 @@ const mapEmployee = (row: any): Employee => ({
   lastVerifiedAt: row.last_verified_at ?? undefined,
   verificationExpiresAt: row.verification_expires_at ?? undefined,
   hashedSessionToken: row.hashed_session_token ?? undefined,
+  credentialUpdatedAt: row.credential_updated_at ?? undefined,
   profileImageDataUrl: row.profile_image_data ?? undefined,
   profileImageFormat: row.profile_image_format ?? undefined,
   profileImageUpdatedAt: row.profile_image_updated_at ?? undefined,
@@ -422,14 +424,14 @@ export const dataStore = {
         INSERT INTO employees (
           id, first_name, last_name, full_name, email, phone, position, department, address, role, status, password_hash, password_salt,
           supabase_user_id, auth_sync_status, auth_last_error, pending_password_enc, provisioned_at,
-          last_verified_at, verification_expires_at, hashed_session_token,
+          last_verified_at, verification_expires_at, hashed_session_token, credential_updated_at,
           created_at, location, profile_image_data, profile_image_format, profile_image_updated_at,
           two_factor_enabled, email_notifications, low_stock_alerts, language,
           sync_status, is_dirty, last_modified, last_synced_at, deleted_at, version
         ) VALUES (
           @id, @first_name, @last_name, @full_name, @email, @phone, @position, @department, @address, @role, @status, @password_hash, @password_salt,
           @supabase_user_id, @auth_sync_status, @auth_last_error, @pending_password_enc, @provisioned_at,
-          @last_verified_at, @verification_expires_at, @hashed_session_token,
+          @last_verified_at, @verification_expires_at, @hashed_session_token, @credential_updated_at,
           @created_at, @location, @profile_image_data, @profile_image_format, @profile_image_updated_at,
           @two_factor_enabled, @email_notifications, @low_stock_alerts, @language,
           @sync_status, @is_dirty, @last_modified, @last_synced_at, @deleted_at, @version
@@ -457,6 +459,7 @@ export const dataStore = {
         last_verified_at: employee.lastVerifiedAt ?? null,
         verification_expires_at: employee.verificationExpiresAt ?? null,
         hashed_session_token: employee.hashedSessionToken ?? null,
+        credential_updated_at: employee.credentialUpdatedAt ?? now,
         created_at: employee.createdAt,
         location: employee.location,
         profile_image_data: employee.profileImageDataUrl ?? null,
@@ -505,6 +508,12 @@ export const dataStore = {
         Object.prototype.hasOwnProperty.call(changes, 'pendingPasswordPlain') ||
         Object.prototype.hasOwnProperty.call(changes, 'pendingPasswordEncrypted');
 
+      const credentialFieldsChanged =
+        (changes.email != null &&
+          String(changes.email || '').trim().toLowerCase() !== String(existing.email || '').trim().toLowerCase()) ||
+        (changes.passwordHash != null && String(changes.passwordHash || '') !== String(existing.passwordHash || '')) ||
+        (changes.passwordSalt != null && String(changes.passwordSalt || '') !== String(existing.passwordSalt || ''));
+
       let nextAuthSyncStatus = normalizeAuthSyncStatus(changes.authSyncStatus ?? existing.authSyncStatus ?? 'pending_upload');
       if (provisioningFieldsChanged) {
         nextAuthSyncStatus = 'pending_upload';
@@ -512,15 +521,22 @@ export const dataStore = {
         nextAuthSyncStatus = 'synced';
       }
 
+      const now = nowIso();
+      const nextCredentialUpdatedAt = Object.prototype.hasOwnProperty.call(changes, 'credentialUpdatedAt')
+        ? changes.credentialUpdatedAt || null
+        : credentialFieldsChanged
+          ? now
+          : existing.credentialUpdatedAt ?? null;
+
       const updated: Employee = {
         ...existing,
         ...changes,
         pendingPasswordEncrypted: nextPendingPasswordEncrypted || undefined,
         authSyncStatus: nextAuthSyncStatus,
         authLastError: provisioningFieldsChanged ? undefined : changes.authLastError ?? existing.authLastError,
+        credentialUpdatedAt: nextCredentialUpdatedAt ?? undefined,
         version: nextVersion
       };
-      const now = nowIso();
       db.prepare(
         `
         UPDATE employees SET
@@ -544,6 +560,7 @@ export const dataStore = {
           last_verified_at = @last_verified_at,
           verification_expires_at = @verification_expires_at,
           hashed_session_token = @hashed_session_token,
+          credential_updated_at = @credential_updated_at,
           created_at = @created_at,
           location = @location,
           profile_image_data = @profile_image_data,
@@ -581,6 +598,7 @@ export const dataStore = {
         last_verified_at: updated.lastVerifiedAt ?? null,
         verification_expires_at: updated.verificationExpiresAt ?? null,
         hashed_session_token: updated.hashedSessionToken ?? null,
+        credential_updated_at: updated.credentialUpdatedAt ?? null,
         created_at: updated.createdAt,
         location: updated.location,
         profile_image_data: updated.profileImageDataUrl ?? null,

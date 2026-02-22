@@ -1059,27 +1059,15 @@ export const authService = {
       const expiresAt = new Date(Date.now() + AUTH_VERIFICATION_DAYS * DAY_MS).toISOString();
       const { hash, salt } = createPasswordHash(newPassword);
 
-      db.prepare(
-        `
-          UPDATE employees
-          SET
-            password_hash = @password_hash,
-            password_salt = @password_salt,
-            auth_sync_status = 'synced',
-            auth_last_error = NULL,
-            pending_password_enc = NULL,
-            last_verified_at = @last_verified_at,
-            verification_expires_at = @verification_expires_at,
-            hashed_session_token = @hashed_session_token
-          WHERE id = @id
-        `
-      ).run({
-        id: employee.id,
-        password_hash: hash,
-        password_salt: salt,
-        last_verified_at: verifiedAt,
-        verification_expires_at: expiresAt,
-        hashed_session_token: hashSessionToken(refreshedSession.accessToken)
+      dataStore.employees.update(employee.id, {
+        passwordHash: hash,
+        passwordSalt: salt,
+        authSyncStatus: 'synced',
+        authLastError: undefined,
+        lastVerifiedAt: verifiedAt,
+        verificationExpiresAt: expiresAt,
+        hashedSessionToken: hashSessionToken(refreshedSession.accessToken),
+        credentialUpdatedAt: verifiedAt
       });
 
       setCachedSession(employee.id, refreshedSession.accessToken, refreshedSession.expiresAt, refreshedSession.refreshToken);
@@ -1353,10 +1341,9 @@ export const authService = {
         passwordSalt: salt,
         authSyncStatus: 'synced',
         authLastError: undefined,
-        pendingPasswordPlain: undefined,
-        pendingPasswordEncrypted: undefined,
         lastVerifiedAt: verifiedAt,
-        verificationExpiresAt: expiresAt
+        verificationExpiresAt: expiresAt,
+        credentialUpdatedAt: verifiedAt
       });
 
       setStoredRefreshToken(db, target.id, null);

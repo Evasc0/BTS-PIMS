@@ -2376,14 +2376,14 @@ const rebuildLocalInventoryFromDataset = (db: Database.Database, dataset: any): 
         INSERT INTO employees (
           id, first_name, last_name, full_name, email, phone, position, department, address, role, status, password_hash, password_salt,
           supabase_user_id, auth_sync_status, auth_last_error, pending_password_enc, provisioned_at,
-          last_verified_at, verification_expires_at, hashed_session_token,
+          last_verified_at, verification_expires_at, hashed_session_token, credential_updated_at,
           created_at, location, profile_image_data, profile_image_format, profile_image_updated_at,
           two_factor_enabled, email_notifications, low_stock_alerts, language,
           sync_status, is_dirty, last_modified, last_synced_at, deleted_at, version
         ) VALUES (
           @id, @first_name, @last_name, @full_name, @email, @phone, @position, @department, @address, @role, @status, @password_hash, @password_salt,
           @supabase_user_id, @auth_sync_status, @auth_last_error, @pending_password_enc, @provisioned_at,
-          @last_verified_at, @verification_expires_at, @hashed_session_token,
+          @last_verified_at, @verification_expires_at, @hashed_session_token, @credential_updated_at,
           @created_at, @location, @profile_image_data, @profile_image_format, @profile_image_updated_at,
           @two_factor_enabled, @email_notifications, @low_stock_alerts, @language,
           'synced', 0, @last_modified, @last_synced_at, NULL, @version
@@ -2415,6 +2415,7 @@ const rebuildLocalInventoryFromDataset = (db: Database.Database, dataset: any): 
         last_verified_at: row.last_verified_at ?? row.lastVerifiedAt ?? null,
         verification_expires_at: row.verification_expires_at ?? row.verificationExpiresAt ?? null,
         hashed_session_token: row.hashed_session_token ?? row.hashedSessionToken ?? null,
+        credential_updated_at: row.credential_updated_at ?? row.credentialUpdatedAt ?? null,
         created_at: row.created_at ?? row.createdAt ?? now,
         location: row.location ?? '',
         profile_image_data: row.profile_image_data ?? row.profileImageDataUrl ?? null,
@@ -2677,7 +2678,7 @@ const applyRemoteEmployee = (db: Database.Database, payload: any, version: numbe
     `SELECT
         id, first_name, last_name, email, phone, department, position, role, status, address, location, password_hash, password_salt,
         supabase_user_id, auth_sync_status, provisioned_at, created_at, two_factor_enabled, email_notifications, low_stock_alerts, language,
-        profile_image_data, profile_image_format, profile_image_updated_at, deleted_at
+        profile_image_data, profile_image_format, profile_image_updated_at, credential_updated_at, deleted_at
        FROM employees
        WHERE id = ?
        LIMIT 1`
@@ -2707,6 +2708,7 @@ const applyRemoteEmployee = (db: Database.Database, payload: any, version: numbe
         profile_image_data?: string | null;
         profile_image_format?: string | null;
         profile_image_updated_at?: string | null;
+        credential_updated_at?: string | null;
         deleted_at?: string | null;
       }
     | undefined;
@@ -2717,7 +2719,7 @@ const applyRemoteEmployee = (db: Database.Database, payload: any, version: numbe
       `SELECT
         first_name, last_name, email, phone, department, position, role, status, address, location, password_hash, password_salt,
         supabase_user_id, auth_sync_status, provisioned_at, created_at, two_factor_enabled, email_notifications, low_stock_alerts, language,
-        profile_image_data, profile_image_format, profile_image_updated_at
+        profile_image_data, profile_image_format, profile_image_updated_at, credential_updated_at
        FROM employees
        WHERE id = ?
        LIMIT 1`
@@ -2747,6 +2749,7 @@ const applyRemoteEmployee = (db: Database.Database, payload: any, version: numbe
         profile_image_data?: string | null;
         profile_image_format?: string | null;
         profile_image_updated_at?: string | null;
+        credential_updated_at?: string | null;
       }
     | undefined;
   const current = (existingById || existing) as typeof existing;
@@ -2774,6 +2777,11 @@ const applyRemoteEmployee = (db: Database.Database, payload: any, version: numbe
     Object.prototype.hasOwnProperty.call(payload, 'profile_image_updated_at')
       ? payload.profileImageUpdatedAt ?? payload.profile_image_updated_at ?? null
       : current?.profile_image_updated_at ?? null;
+  const resolvedCredentialUpdatedAt =
+    Object.prototype.hasOwnProperty.call(payload, 'credentialUpdatedAt') ||
+    Object.prototype.hasOwnProperty.call(payload, 'credential_updated_at')
+      ? payload.credentialUpdatedAt ?? payload.credential_updated_at ?? null
+      : current?.credential_updated_at ?? null;
   const fallbackEmail = String(current?.email ?? '').trim().toLowerCase();
   let resolvedEmail = incomingEmail || fallbackEmail || `sync-missing-${employeeId.toLowerCase()}@local.invalid`;
   repairLegacyEmployeeIdentity(db, employeeId, incomingSupabaseUserId, resolvedEmail);
@@ -2788,14 +2796,14 @@ const applyRemoteEmployee = (db: Database.Database, payload: any, version: numbe
       INSERT INTO employees (
         id, first_name, last_name, full_name, email, phone, position, department, address, role, status, password_hash, password_salt,
         supabase_user_id, auth_sync_status, auth_last_error, pending_password_enc, provisioned_at,
-        last_verified_at, verification_expires_at, hashed_session_token,
+        last_verified_at, verification_expires_at, hashed_session_token, credential_updated_at,
         created_at, location, profile_image_data, profile_image_format, profile_image_updated_at,
         two_factor_enabled, email_notifications, low_stock_alerts, language,
         sync_status, is_dirty, last_modified, last_synced_at, deleted_at, version
       ) VALUES (
         @id, @first_name, @last_name, @full_name, @email, @phone, @position, @department, @address, @role, @status, COALESCE(@password_hash, 'remote_managed'), COALESCE(@password_salt, 'remote_managed'),
         @supabase_user_id, @auth_sync_status, @auth_last_error, @pending_password_enc, @provisioned_at,
-        @last_verified_at, @verification_expires_at, @hashed_session_token,
+        @last_verified_at, @verification_expires_at, @hashed_session_token, @credential_updated_at,
         @created_at, @location, @profile_image_data, @profile_image_format, @profile_image_updated_at,
         @two_factor_enabled, @email_notifications, @low_stock_alerts, @language,
         @sync_status, @is_dirty, @last_modified, @last_synced_at, @deleted_at, @version
@@ -2821,6 +2829,7 @@ const applyRemoteEmployee = (db: Database.Database, payload: any, version: numbe
         last_verified_at = excluded.last_verified_at,
         verification_expires_at = excluded.verification_expires_at,
         hashed_session_token = excluded.hashed_session_token,
+        credential_updated_at = COALESCE(excluded.credential_updated_at, employees.credential_updated_at),
         created_at = excluded.created_at,
         location = excluded.location,
         profile_image_data = excluded.profile_image_data,
@@ -2859,6 +2868,7 @@ const applyRemoteEmployee = (db: Database.Database, payload: any, version: numbe
     last_verified_at: null,
     verification_expires_at: null,
     hashed_session_token: null,
+    credential_updated_at: resolvedCredentialUpdatedAt,
     created_at: payload.createdAt ?? payload.created_at ?? current?.created_at ?? now,
     location: payload.location ?? current?.location ?? '',
     profile_image_data: profileImageDataUrl,
@@ -3359,6 +3369,7 @@ const readLocalEmployeeForSync = (db: Database.Database, employeeId: string): Re
       `SELECT
         id, first_name, last_name, full_name, email, phone, position, department, address, role, status,
         password_hash, password_salt, supabase_user_id, auth_sync_status, provisioned_at,
+        credential_updated_at,
         created_at, location, profile_image_data, profile_image_format, profile_image_updated_at,
         two_factor_enabled, email_notifications, low_stock_alerts, language, last_modified, deleted_at, version
        FROM employees
@@ -3383,6 +3394,7 @@ const readLocalEmployeeForSync = (db: Database.Database, employeeId: string): Re
         supabase_user_id?: string | null;
         auth_sync_status?: string | null;
         provisioned_at?: string | null;
+        credential_updated_at?: string | null;
         created_at?: string | null;
         location?: string | null;
         profile_image_data?: string | null;
@@ -3418,6 +3430,7 @@ const readLocalEmployeeForSync = (db: Database.Database, employeeId: string): Re
     supabaseUserId: row.supabase_user_id ?? null,
     authSyncStatus: row.auth_sync_status ?? 'pending_upload',
     provisionedAt: row.provisioned_at ?? null,
+    credentialUpdatedAt: row.credential_updated_at ?? null,
     createdAt: row.created_at ?? now,
     location: row.location ?? '',
     profileImageDataUrl: row.profile_image_data ?? null,
