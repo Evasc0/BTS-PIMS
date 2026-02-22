@@ -355,6 +355,14 @@ const normalizeOptionalText = (value: unknown): string | null => {
   return trimmed ? trimmed : null;
 };
 
+const normalizeProfilePosition = (value: unknown): string | null => {
+  const normalized = normalizeOptionalText(value);
+  if (!normalized) return null;
+  const roleLike = normalized.toLowerCase().replace(/[\s-]+/gu, '_');
+  if (roleLike === 'system_admin' || roleLike === 'admin' || roleLike === 'employee') return null;
+  return normalized;
+};
+
 const updateAuthVerificationCache = (
   db: Database.Database,
   input: {
@@ -439,12 +447,18 @@ const upsertLocalEmployeeFromOnline = (
   const existingLastName = normalizeOptionalText(existing?.last_name);
   const existingFullName = normalizeOptionalText(existing?.full_name);
   const splitIncoming = splitFullName(incomingFullName || '');
-  const splitFallback = splitFullName(existingFullName || fallbackFullName);
-  const firstName = incomingFirstName || splitIncoming.firstName || existingFirstName || splitFallback.firstName;
-  const lastName = incomingLastName || splitIncoming.lastName || existingLastName || splitFallback.lastName;
-  const fullName = incomingFullName || [firstName, lastName].filter(Boolean).join(' ').trim() || fallbackFullName;
+  const splitFallback = splitFullName(fallbackFullName);
+  const firstName = existing
+    ? existingFirstName || incomingFirstName || splitIncoming.firstName || splitFallback.firstName
+    : incomingFirstName || splitIncoming.firstName || splitFallback.firstName;
+  const lastName = existing
+    ? existingLastName || incomingLastName || splitIncoming.lastName || splitFallback.lastName
+    : incomingLastName || splitIncoming.lastName || splitFallback.lastName;
+  const fullName = existing
+    ? existingFullName || incomingFullName || [firstName, lastName].filter(Boolean).join(' ').trim() || fallbackFullName
+    : incomingFullName || [firstName, lastName].filter(Boolean).join(' ').trim() || fallbackFullName;
   const phone = normalizeOptionalText(input.phone) ?? normalizeOptionalText(existing?.phone) ?? '';
-  const position = normalizeOptionalText(input.position) ?? normalizeOptionalText(existing?.position) ?? '';
+  const position = normalizeProfilePosition(input.position) ?? normalizeProfilePosition(existing?.position) ?? '';
   const department = normalizeOptionalText(input.department) ?? normalizeOptionalText(existing?.department) ?? '';
   const address = normalizeOptionalText(input.address) ?? normalizeOptionalText(existing?.address) ?? '';
   const location = normalizeOptionalText(input.location) ?? normalizeOptionalText(existing?.location) ?? address;

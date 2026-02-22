@@ -59,7 +59,12 @@ const conditionOptions: { value: ReturnCondition; label: string }[] = [
   { value: 'damaged', label: 'Damaged' }
 ];
 
-const roleOptions: EmployeeRole[] = ['employee', 'system_admin'];
+const resolveReceiverPosition = (employee?: Employee | null): string => {
+  if (!employee) return '';
+  const position = String(employee.position || '').trim();
+  if (position) return position;
+  return employee.role === 'system_admin' ? 'system_admin' : 'employee';
+};
 
 export function ReturnsPage({ user }: ReturnsPageProps) {
   const [searchTerm, setSearchTerm] = useState('');
@@ -238,18 +243,20 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
     conditionOptions.find((option) => option.value === condition)?.label || condition;
 
   const resetForm = () => {
-    const defaultAdmin = adminEmployees[0];
+    const defaultEmployeeReceiver =
+      isEmployee && adminEmployees.length > 0
+        ? {
+            receiverName: adminEmployees[0].fullName,
+            position: resolveReceiverPosition(adminEmployees[0]),
+            receivedDate: '',
+            location: ''
+          }
+        : { ...emptyReceiver };
+
     setFormState({
       ...emptyReturnForm,
       productId: isEmployee && availableProducts.length === 1 ? availableProducts[0].id : '',
-      receivers: [
-        {
-          receiverName: isEmployee ? defaultAdmin?.fullName || '' : '',
-          position: isEmployee ? 'system_admin' : '',
-          receivedDate: '',
-          location: ''
-        }
-      ]
+      receivers: [defaultEmployeeReceiver]
     });
     setFormError(null);
     setPropertySearch('');
@@ -262,6 +269,28 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
     setAdminDraftCondition('');
     setAdminDraftRemarks('');
   };
+
+  useEffect(() => {
+    if (!showSubmitModal || !isEmployee || adminEmployees.length === 0) return;
+    const defaultAdmin = adminEmployees[0];
+    if (!defaultAdmin) return;
+    setFormState((prev) => {
+      if (!prev.receivers.length) return prev;
+      const first = prev.receivers[0];
+      const fillName = !first.receiverName.trim();
+      const fillPosition = !first.position.trim();
+      if (!fillName && !fillPosition) return prev;
+      const nextFirst: ReceiverFormState = {
+        ...first,
+        receiverName: fillName ? defaultAdmin.fullName : first.receiverName,
+        position: fillPosition ? resolveReceiverPosition(defaultAdmin) : first.position
+      };
+      return {
+        ...prev,
+        receivers: [nextFirst, ...prev.receivers.slice(1)]
+      };
+    });
+  }, [showSubmitModal, isEmployee, adminEmployees]);
 
   const selectEmployeeProperty = (productId: string) => {
     setFormState((prev) => ({ ...prev, productId }));
@@ -355,6 +384,15 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
       const updated = [...prev.receivers];
       const current = { ...updated[index] };
       current[field] = value;
+      if (field === 'receiverName') {
+        const normalizedName = value.trim().toLowerCase();
+        const matchedEmployee =
+          employeesByName.get(normalizedName) ||
+          (user.fullName.trim().toLowerCase() === normalizedName ? user : undefined);
+        if (matchedEmployee?.role === 'system_admin') {
+          current.position = resolveReceiverPosition(matchedEmployee);
+        }
+      }
       updated[index] = current;
       return { ...prev, receivers: updated };
     });
@@ -516,9 +554,12 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
       return;
     }
 
-    const validReceivers = formState.receivers.filter(
-      (receiver) => receiver.receiverName.trim() && receiver.position.trim() && receiver.receivedDate && receiver.location.trim()
-    );
+    const validReceivers = formState.receivers.filter((receiver) => {
+      const receiverName = receiver.receiverName.trim();
+      const matchedEmployee = employeesByName.get(receiverName.toLowerCase());
+      const resolvedPosition = receiver.position.trim() || resolveReceiverPosition(matchedEmployee);
+      return Boolean(receiverName && resolvedPosition && receiver.receivedDate && receiver.location.trim());
+    });
     if (validReceivers.length === 0) {
       setFormError('Receiver name, position, date, and location are required.');
       return;
@@ -535,29 +576,29 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
       return {
         employeeId: matchedEmployee?.id,
         receiverName,
-        position: receiver.position.trim(),
+        position: receiver.position.trim() || resolveReceiverPosition(matchedEmployee),
         receivedDate: receiver.receivedDate,
         location: receiver.location.trim()
       };
     });
 
     if (isEmployee) {
-      const primaryAdmin = adminEmployees[0];
-      if (!primaryAdmin) {
-        setFormError('No active system admin account found for receiver routing.');
-        return;
-      }
-
       const firstReceiver = receiverEntries[0];
       if (!firstReceiver || !firstReceiver.receivedDate || !firstReceiver.location) {
         setFormError('Received date and location are required.');
         return;
       }
 
+      const matchedAdmin = firstReceiver.employeeId ? employeeMap.get(firstReceiver.employeeId) : undefined;
+      if (!matchedAdmin || matchedAdmin.role !== 'system_admin' || matchedAdmin.status !== 'active') {
+        setFormError('Receiver must be an active system admin account.');
+        return;
+      }
+
       receiverEntries.splice(0, receiverEntries.length, {
-        employeeId: primaryAdmin.id,
-        receiverName: primaryAdmin.fullName,
-        position: 'system_admin',
+        employeeId: matchedAdmin.id,
+        receiverName: firstReceiver.receiverName,
+        position: firstReceiver.position.trim() || resolveReceiverPosition(matchedAdmin),
         receivedDate: firstReceiver.receivedDate,
         location: firstReceiver.location
       });
@@ -1108,7 +1149,7 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
                     <div className="space-y-4">
                       {!adminDraftProduct && (
                         <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-2">Step 1: Search Inventory Number *</label>
+                          <label className="block text-sm font-medium text-gray-700 mb-2">Search Inventory Number *</label>
                           <div>
                             <input
                               type="text"
@@ -1211,7 +1252,7 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
 
                       <div className="border border-gray-200 rounded-lg divide-y divide-gray-100">
                         <p className="px-3 py-2 text-xs font-semibold text-gray-500 bg-gray-50 uppercase tracking-wide">
-                          Step 5: Added Products
+                          Added Property
                         </p>
                         {selectedAdminProducts.length === 0 ? (
                           <p className="px-3 py-3 text-sm text-gray-500">No added properties yet.</p>
@@ -1287,17 +1328,12 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">Position *</label>
-                    <select
-                      value={user.role}
-                      disabled
+                    <input
+                      type="text"
+                      value={resolveReceiverPosition(user)}
+                      readOnly
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-50 text-gray-600"
-                    >
-                      {roleOptions.map((role) => (
-                        <option key={role} value={role}>
-                          {role}
-                        </option>
-                      ))}
-                    </select>
+                    />
                   </div>
                 </div>
               </div>
@@ -1343,11 +1379,8 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
                             type="text"
                             value={receiver.receiverName}
                             onChange={(e) => handleReceiverChange(index, 'receiverName', e.target.value)}
-                            placeholder={isEmployee ? 'System admin' : 'Type receiver name'}
-                            readOnly={isEmployee}
-                            className={`w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none ${
-                              isEmployee ? 'bg-gray-50 text-gray-600' : ''
-                            }`}
+                            placeholder={isEmployee ? 'Type system admin name' : 'Type receiver name'}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
                             required
                           />
                         </div>
@@ -1358,10 +1391,7 @@ export function ReturnsPage({ user }: ReturnsPageProps) {
                             value={receiver.position}
                             onChange={(e) => handleReceiverChange(index, 'position', e.target.value)}
                             placeholder={isEmployee ? 'system_admin' : 'Type receiver position'}
-                            readOnly={isEmployee}
-                            className={`w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none ${
-                              isEmployee ? 'bg-gray-50 text-gray-600' : ''
-                            }`}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
                             required
                           />
                         </div>

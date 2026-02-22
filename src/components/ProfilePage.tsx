@@ -28,6 +28,14 @@ interface ProfileFormState {
   address: string;
 }
 
+const normalizeProfilePosition = (value: unknown): string => {
+  const trimmed = String(value ?? '').trim();
+  if (!trimmed) return '';
+  const roleLike = trimmed.toLowerCase().replace(/[\s-]+/gu, '_');
+  if (roleLike === 'system_admin' || roleLike === 'admin' || roleLike === 'employee') return '';
+  return trimmed;
+};
+
 const profileStateFromUser = (user: Employee): ProfileFormState => {
   const split = splitFullName(user.fullName);
   return {
@@ -35,7 +43,7 @@ const profileStateFromUser = (user: Employee): ProfileFormState => {
     lastName: user.lastName ?? split.lastName,
     email: user.email,
     phone: user.phone,
-    position: user.position ?? (user.role === 'system_admin' ? 'System Admin' : 'Employee'),
+    position: normalizeProfilePosition(user.position),
     department: user.department,
     address: user.address ?? user.location ?? ''
   };
@@ -146,6 +154,7 @@ export function ProfilePage({ user }: ProfilePageProps) {
     setFormError(null);
     setFormSuccess(null);
     const fullName = buildFullName(profileState.firstName, profileState.lastName);
+    const normalizedPosition = normalizeProfilePosition(profileState.position);
     if (!fullName) {
       setFormError('First name and last name are required.');
       return;
@@ -195,7 +204,7 @@ export function ProfilePage({ user }: ProfilePageProps) {
       fullName,
       email: normalizedEmail,
       phone: profileState.phone.trim(),
-      position: profileState.position.trim(),
+      position: normalizedPosition,
       department: profileState.department.trim(),
       address: trimmedAddress,
       location: trimmedAddress
@@ -386,7 +395,7 @@ export function ProfilePage({ user }: ProfilePageProps) {
                 onChange={handleImageFileChange}
               />
               <h2 className="font-bold text-gray-900 mb-1">{user.fullName}</h2>
-              <p className="text-sm text-gray-600">{profileState.position || user.role}</p>
+              <p className="text-sm text-gray-600">{profileState.position || 'No position set'}</p>
               {user.profileImageDataUrl && (
                 <button
                   onClick={handleRemoveImage}
@@ -521,6 +530,7 @@ export function ProfilePage({ user }: ProfilePageProps) {
                   value={profileState.position}
                   onChange={(e) => setProfileState({ ...profileState, position: e.target.value })}
                   disabled={!isEditing}
+                  placeholder="Enter your position"
                   className={`w-full px-4 py-2 border border-gray-300 rounded-lg outline-none ${
                     isEditing ? 'focus:ring-2 focus:ring-indigo-500 focus:border-transparent' : 'bg-gray-50 text-gray-600'
                   }`}
