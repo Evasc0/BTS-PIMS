@@ -1188,6 +1188,12 @@ export const authService = {
     if (normalizeStatus(employee.status) !== 'active') {
       return { success: false, error: 'Account is inactive. Contact administrator.' };
     }
+    if (normalizeRole(employee.role) !== 'system_admin') {
+      return {
+        success: false,
+        error: 'Only system admin accounts can change their own email. Ask an admin to update employee emails.'
+      };
+    }
     if (!supabaseAuth.isConfigured()) {
       return {
         success: false,
