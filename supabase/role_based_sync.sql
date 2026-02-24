@@ -186,8 +186,14 @@ delete from public.employee_sync_queue q
 using ranked r
 where q.id = r.id and r.rn > 1;
 
-create table if not exists public.full_sync_requests (
+create table if not exists public.admin_sync_requests (
   id uuid primary key default gen_random_uuid(),
+  requesting_admin_id text,
+  requesting_admin_name text,
+  approving_admin_id text,
+  approving_admin_name text,
+  requester_confirmed_at timestamptz,
+  approver_confirmed_at timestamptz,
   requesting_device_id text,
   target_device_id text,
   requested_by text,
@@ -213,9 +219,16 @@ create table if not exists public.full_sync_requests (
   updated_at timestamptz not null default now()
 );
 
-create table if not exists public.full_sync_chunks (
+create table if not exists public.admin_full_sync_temp (
   id uuid primary key default gen_random_uuid(),
-  request_id uuid not null references public.full_sync_requests(id) on delete cascade,
+  request_id uuid not null references public.admin_sync_requests(id) on delete cascade,
+  sync_id uuid,
+  table_name text,
+  record_id text,
+  data jsonb,
+  chunk_number integer,
+  total_chunks integer,
+  created_at timestamptz not null default now(),
   chunk_index integer not null,
   chunk_size_bytes bigint not null,
   checksum_sha256 text not null,
@@ -228,32 +241,42 @@ create table if not exists public.full_sync_chunks (
   unique (request_id, chunk_index)
 );
 
-alter table public.full_sync_requests add column if not exists requester_device_id text;
-alter table public.full_sync_requests add column if not exists requester_user_id text;
-alter table public.full_sync_requests add column if not exists requested_at timestamptz not null default now();
-alter table public.full_sync_requests add column if not exists requesting_device_id text;
-alter table public.full_sync_requests add column if not exists target_device_id text;
-alter table public.full_sync_requests add column if not exists requested_by text;
-alter table public.full_sync_requests add column if not exists estimated_records integer;
-alter table public.full_sync_requests add column if not exists estimated_size_mb numeric;
-alter table public.full_sync_requests add column if not exists created_at timestamptz not null default now();
-alter table public.full_sync_requests add column if not exists status text not null default 'pending';
-alter table public.full_sync_requests add column if not exists last_successful_sync_at timestamptz;
-alter table public.full_sync_requests add column if not exists estimated_db_size_bytes bigint;
-alter table public.full_sync_requests add column if not exists approved_at timestamptz;
-alter table public.full_sync_requests add column if not exists approved_by_user_id text;
-alter table public.full_sync_requests add column if not exists rejected_at timestamptz;
-alter table public.full_sync_requests add column if not exists rejected_by_user_id text;
-alter table public.full_sync_requests add column if not exists rejection_reason text;
-alter table public.full_sync_requests add column if not exists total_chunks integer;
-alter table public.full_sync_requests add column if not exists manifest_checksum text;
-alter table public.full_sync_requests add column if not exists started_at timestamptz;
-alter table public.full_sync_requests add column if not exists completed_at timestamptz;
-alter table public.full_sync_requests add column if not exists completed_by_device_id text;
-alter table public.full_sync_requests add column if not exists updated_at timestamptz not null default now();
+alter table public.admin_sync_requests add column if not exists requester_device_id text;
+alter table public.admin_sync_requests add column if not exists requester_user_id text;
+alter table public.admin_sync_requests add column if not exists requested_at timestamptz not null default now();
+alter table public.admin_sync_requests add column if not exists requesting_admin_id text;
+alter table public.admin_sync_requests add column if not exists requesting_admin_name text;
+alter table public.admin_sync_requests add column if not exists approving_admin_id text;
+alter table public.admin_sync_requests add column if not exists approving_admin_name text;
+alter table public.admin_sync_requests add column if not exists requester_confirmed_at timestamptz;
+alter table public.admin_sync_requests add column if not exists approver_confirmed_at timestamptz;
+alter table public.admin_sync_requests add column if not exists requesting_device_id text;
+alter table public.admin_sync_requests add column if not exists target_device_id text;
+alter table public.admin_sync_requests add column if not exists requested_by text;
+alter table public.admin_sync_requests add column if not exists estimated_records integer;
+alter table public.admin_sync_requests add column if not exists estimated_size_mb numeric;
+alter table public.admin_sync_requests add column if not exists created_at timestamptz not null default now();
+alter table public.admin_sync_requests add column if not exists status text not null default 'pending';
+alter table public.admin_sync_requests add column if not exists last_successful_sync_at timestamptz;
+alter table public.admin_sync_requests add column if not exists estimated_db_size_bytes bigint;
+alter table public.admin_sync_requests add column if not exists approved_at timestamptz;
+alter table public.admin_sync_requests add column if not exists approved_by_user_id text;
+alter table public.admin_sync_requests add column if not exists rejected_at timestamptz;
+alter table public.admin_sync_requests add column if not exists rejected_by_user_id text;
+alter table public.admin_sync_requests add column if not exists rejection_reason text;
+alter table public.admin_sync_requests add column if not exists total_chunks integer;
+alter table public.admin_sync_requests add column if not exists manifest_checksum text;
+alter table public.admin_sync_requests add column if not exists started_at timestamptz;
+alter table public.admin_sync_requests add column if not exists completed_at timestamptz;
+alter table public.admin_sync_requests add column if not exists completed_by_device_id text;
+alter table public.admin_sync_requests add column if not exists updated_at timestamptz not null default now();
 
-update public.full_sync_requests
+update public.admin_sync_requests
 set
+  requesting_admin_id = coalesce(requesting_admin_id, requested_by, requester_user_id),
+  requesting_admin_name = coalesce(requesting_admin_name, requested_by, requester_user_id),
+  approving_admin_id = coalesce(approving_admin_id, approved_by_user_id),
+  approving_admin_name = coalesce(approving_admin_name, approved_by_user_id),
   requesting_device_id = coalesce(requesting_device_id, requester_device_id),
   target_device_id = coalesce(target_device_id, requester_device_id),
   requested_by = coalesce(requested_by, requester_user_id),
@@ -266,20 +289,30 @@ set
   ),
   created_at = coalesce(created_at, requested_at, now())
 where
-  requesting_device_id is null
+  requesting_admin_id is null
+  or requesting_admin_name is null
+  or (approved_by_user_id is not null and (approving_admin_id is null or approving_admin_name is null))
+  or requesting_device_id is null
   or target_device_id is null
   or requested_by is null
   or estimated_size_mb is null
   or created_at is null;
 
-alter table public.full_sync_chunks add column if not exists chunk_size_bytes bigint;
-alter table public.full_sync_chunks add column if not exists checksum_sha256 text;
-alter table public.full_sync_chunks add column if not exists storage_object text;
-alter table public.full_sync_chunks add column if not exists status text not null default 'uploaded';
-alter table public.full_sync_chunks add column if not exists uploaded_at timestamptz not null default now();
-alter table public.full_sync_chunks add column if not exists acked_at timestamptz;
-alter table public.full_sync_chunks add column if not exists acked_by_device_id text;
-alter table public.full_sync_chunks add column if not exists storage_deleted_at timestamptz;
+alter table public.admin_full_sync_temp add column if not exists chunk_size_bytes bigint;
+alter table public.admin_full_sync_temp add column if not exists checksum_sha256 text;
+alter table public.admin_full_sync_temp add column if not exists storage_object text;
+alter table public.admin_full_sync_temp add column if not exists sync_id uuid;
+alter table public.admin_full_sync_temp add column if not exists table_name text;
+alter table public.admin_full_sync_temp add column if not exists record_id text;
+alter table public.admin_full_sync_temp add column if not exists data jsonb;
+alter table public.admin_full_sync_temp add column if not exists chunk_number integer;
+alter table public.admin_full_sync_temp add column if not exists total_chunks integer;
+alter table public.admin_full_sync_temp add column if not exists created_at timestamptz not null default now();
+alter table public.admin_full_sync_temp add column if not exists status text not null default 'uploaded';
+alter table public.admin_full_sync_temp add column if not exists uploaded_at timestamptz not null default now();
+alter table public.admin_full_sync_temp add column if not exists acked_at timestamptz;
+alter table public.admin_full_sync_temp add column if not exists acked_by_device_id text;
+alter table public.admin_full_sync_temp add column if not exists storage_deleted_at timestamptz;
 
 create index if not exists idx_admin_sync_queue_timestamp
   on public.admin_sync_queue ("timestamp");
@@ -323,27 +356,30 @@ create index if not exists idx_profile_sync_queue_employee_updated_at
 create index if not exists idx_profile_sync_queue_origin_device
   on public.profile_sync_queue (origin_device_id);
 
-create index if not exists idx_full_sync_requests_status_requested_at
-  on public.full_sync_requests (status, requested_at desc);
+create index if not exists idx_admin_sync_requests_status_requested_at
+  on public.admin_sync_requests (status, requested_at desc);
 
-create index if not exists idx_full_sync_requests_device_requested_at
-  on public.full_sync_requests (requester_device_id, requested_at desc);
+create index if not exists idx_admin_sync_requests_device_requested_at
+  on public.admin_sync_requests (requester_device_id, requested_at desc);
 
-create index if not exists idx_full_sync_requests_target_status_created_at
-  on public.full_sync_requests (target_device_id, status, created_at desc);
+create index if not exists idx_admin_sync_requests_target_status_created_at
+  on public.admin_sync_requests (target_device_id, status, created_at desc);
 
-create index if not exists idx_full_sync_requests_requesting_created_at
-  on public.full_sync_requests (requesting_device_id, created_at desc);
+create index if not exists idx_admin_sync_requests_requesting_created_at
+  on public.admin_sync_requests (requesting_device_id, created_at desc);
 
-create index if not exists idx_full_sync_chunks_request_status_chunk
-  on public.full_sync_chunks (request_id, status, chunk_index);
+create index if not exists idx_admin_full_sync_temp_request_status_chunk
+  on public.admin_full_sync_temp (request_id, status, chunk_index);
+
+create index if not exists idx_admin_full_sync_temp_sync_chunk
+  on public.admin_full_sync_temp (sync_id, chunk_number, created_at);
 
 alter table public.app_users enable row level security;
 alter table public.admin_sync_queue enable row level security;
 alter table public.employee_sync_queue enable row level security;
 alter table public.profile_sync_queue enable row level security;
-alter table public.full_sync_requests enable row level security;
-alter table public.full_sync_chunks enable row level security;
+alter table public.admin_sync_requests enable row level security;
+alter table public.admin_full_sync_temp enable row level security;
 
 -- RLS helpers (role/employee resolution from app_users, not JWT custom claims).
 create or replace function public.sync_user_role()
@@ -491,8 +527,8 @@ begin
   ) oldest
   where ts is not null;
 
-  select count(*) into full_sync_chunk_rows from public.full_sync_chunks;
-  select count(*) into full_sync_request_rows from public.full_sync_requests;
+  select count(*) into full_sync_chunk_rows from public.admin_full_sync_temp;
+  select count(*) into full_sync_request_rows from public.admin_sync_requests;
 
   select
     count(*),
@@ -543,13 +579,13 @@ drop policy if exists "app_users_admin_all" on public.app_users;
 drop policy if exists "app_users_user_select_self" on public.app_users;
 drop policy if exists "app_users_user_insert_self" on public.app_users;
 drop policy if exists "app_users_user_update_self" on public.app_users;
-drop policy if exists "full_sync_requests_admin_all" on public.full_sync_requests;
-drop policy if exists "full_sync_requests_requester_insert" on public.full_sync_requests;
-drop policy if exists "full_sync_requests_requester_select" on public.full_sync_requests;
-drop policy if exists "full_sync_requests_requester_update" on public.full_sync_requests;
-drop policy if exists "full_sync_chunks_admin_all" on public.full_sync_chunks;
-drop policy if exists "full_sync_chunks_requester_select" on public.full_sync_chunks;
-drop policy if exists "full_sync_chunks_requester_update" on public.full_sync_chunks;
+drop policy if exists "admin_sync_requests_admin_all" on public.admin_sync_requests;
+drop policy if exists "admin_sync_requests_requester_insert" on public.admin_sync_requests;
+drop policy if exists "admin_sync_requests_requester_select" on public.admin_sync_requests;
+drop policy if exists "admin_sync_requests_requester_update" on public.admin_sync_requests;
+drop policy if exists "admin_full_sync_temp_admin_all" on public.admin_full_sync_temp;
+drop policy if exists "admin_full_sync_temp_requester_select" on public.admin_full_sync_temp;
+drop policy if exists "admin_full_sync_temp_requester_update" on public.admin_full_sync_temp;
 
 create policy "admin_queue_insert_admin"
 on public.admin_sync_queue
@@ -698,8 +734,8 @@ with check (
   )
 );
 
-create policy "full_sync_requests_admin_all"
-on public.full_sync_requests
+create policy "admin_sync_requests_admin_all"
+on public.admin_sync_requests
 for all
 to authenticated
 using (public.sync_is_admin())
@@ -707,8 +743,8 @@ with check (public.sync_is_admin());
 
 -- full sync workflow is system-admin only
 
-create policy "full_sync_chunks_admin_all"
-on public.full_sync_chunks
+create policy "admin_full_sync_temp_admin_all"
+on public.admin_full_sync_temp
 for all
 to authenticated
 using (public.sync_is_admin())
@@ -762,15 +798,15 @@ as $$
     and coalesce(o.updated_at, o.created_at) < now() - interval '2 days'
     and not exists (
       select 1
-      from public.full_sync_chunks c
+      from public.admin_full_sync_temp c
       where c.storage_object = o.name
         and c.status in ('uploaded', 'acked')
     );
 
-  delete from public.full_sync_chunks
+  delete from public.admin_full_sync_temp
   where uploaded_at < now() - interval '2 days';
 
-  delete from public.full_sync_requests
+  delete from public.admin_sync_requests
   where coalesce(created_at, requested_at) < now() - interval '2 days';
 $$;
 
@@ -843,11 +879,12 @@ end $$;
 -- alter table public.admin_sync_queue disable row level security;
 -- alter table public.employee_sync_queue disable row level security;
 -- alter table public.profile_sync_queue disable row level security;
--- alter table public.full_sync_requests disable row level security;
--- alter table public.full_sync_chunks disable row level security;
+-- alter table public.admin_sync_requests disable row level security;
+-- alter table public.admin_full_sync_temp disable row level security;
 -- drop policy if exists "full_sync_storage_admin_all" on storage.objects;
 -- drop policy if exists "full_sync_storage_authenticated_read" on storage.objects;
 -- drop policy if exists "full_sync_storage_authenticated_insert" on storage.objects;
 -- drop policy if exists "full_sync_storage_authenticated_delete" on storage.objects;
 -- create policy "full_sync_storage_dev_all" on storage.objects
 -- for all to public using (bucket_id = 'full-sync-temp') with check (bucket_id = 'full-sync-temp');
+

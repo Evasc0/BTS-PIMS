@@ -96,6 +96,8 @@ contextBridge.exposeInMainWorld('api', {
     fullSyncRequest: (userId: string) => ipcRenderer.invoke('sync:full:request', userId),
     fullSyncCheck: (userId: string) => ipcRenderer.invoke('sync:full:check', userId),
     fullSyncSession: (userId: string) => ipcRenderer.invoke('sync:full:session', userId),
+    fullSyncConfirm: (userId: string, requestId: string, decision: 'confirm' | 'cancel' = 'confirm') =>
+      ipcRenderer.invoke('sync:full:confirm', userId, requestId, decision),
     fullSyncPullNext: (userId: string) => ipcRenderer.invoke('sync:full:pull-next', userId),
     fullSyncAdminList: (userId: string) => ipcRenderer.invoke('sync:full:admin:list', userId),
     fullSyncAdminReview: (userId: string, requestId: string, decision: 'approve' | 'reject', reason?: string) =>

@@ -83,8 +83,8 @@ SUPABASE_ANON_KEY=sb_publishable_xxx
 SUPABASE_SERVICE_ROLE_KEY=sb_service_role_xxx
 SUPABASE_ADMIN_QUEUE_TABLE=admin_sync_queue
 SUPABASE_EMPLOYEE_QUEUE_TABLE=employee_sync_queue
-SUPABASE_FULL_SYNC_REQUESTS_TABLE=full_sync_requests
-SUPABASE_FULL_SYNC_CHUNKS_TABLE=full_sync_chunks
+SUPABASE_FULL_SYNC_REQUESTS_TABLE=admin_sync_requests
+SUPABASE_FULL_SYNC_CHUNKS_TABLE=admin_full_sync_temp
 SUPABASE_FULL_SYNC_STORAGE_BUCKET=full-sync-temp
 SUPABASE_APP_USERS_TABLE=app_users
 SYNC_PUSH_BATCH_SIZE=100
@@ -92,7 +92,8 @@ SYNC_PULL_PAGE_SIZE=200
 SYNC_QUEUE_RETENTION_DAYS=7
 SYNC_MAX_OFFLINE_DAYS=7
 SYNC_DELETE_RETRY_ATTEMPTS=3
-SYNC_FULL_CHUNK_MB=200
+SYNC_FULL_CHUNK_MB=5
+SYNC_FULL_CHUNK_RECORDS=75
 AUTH_VERIFICATION_DAYS=30
 ```
 
@@ -103,8 +104,8 @@ This creates:
 - `app_users` for Supabase identity metadata (role/status/employee mapping)
 - `admin_sync_queue` for global system-admin changes
 - `employee_sync_queue` for assigned employee updates
-- `full_sync_requests` for stale-device full-sync approval workflow
-- `full_sync_chunks` for chunk metadata (200MB max/chunk)
+- `admin_sync_requests` for admin-to-admin full-sync request/approval workflow
+- `admin_full_sync_temp` for chunk transfer metadata
 - indexes + RLS policies
 - `cleanup_sync_queues()` 7-day queue retention function + daily scheduler (pg_cron)
 - `cleanup_full_sync_requests()` retention cleanup for old full-sync sessions
@@ -135,12 +136,13 @@ This creates:
 - When verification expires, login is blocked until online verification succeeds.
 - User creation is instant and online-only from a signed-in `system_admin` session (no delayed queue for user provisioning).
 
-6. Controlled Full Sync (offline > 7 days):
-- Requesting device auto-creates a `full_sync_requests` row (`pending`) when switching online while full-sync lock is active.
-- Master approves/rejects requests from Settings page.
-- Master uploads one chunk at a time (`SYNC_FULL_CHUNK_MB`, max 200MB) to Supabase Storage bucket.
-- Requesting device pulls next chunk, verifies size + SHA256, acknowledges, then pulls next.
-- When all chunks are acknowledged, the requesting device rebuilds inventory tables locally and clears full-sync lock.
+6. Controlled Full Sync (admin-to-admin):
+- Requesting admin creates an `admin_sync_requests` row (`pending`) from Settings.
+- Co-admin approves/rejects requests from Settings.
+- Both admins must confirm stable internet before transfer starts.
+- Approving admin uploads one chunk at a time (`SYNC_FULL_CHUNK_MB`, `SYNC_FULL_CHUNK_RECORDS`) to Supabase Storage bucket.
+- Requesting admin pulls next chunk, verifies size + SHA256, acknowledges, then pulls next.
+- When all chunks are acknowledged, the requesting admin rebuilds inventory tables locally and clears full-sync lock.
 - Full sync export excludes `activity_logs` and other non-inventory tables.
 
 ### Building for Production

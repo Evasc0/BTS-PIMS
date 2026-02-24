@@ -27,6 +27,7 @@ const SYNC_PUSH_MAX_BATCH_BYTES = SYNC_PUSH_MAX_BATCH_MB * 1024 * 1024;
 const SYNC_PUSH_MAX_BATCH_RECORDS = Math.min(500, Math.max(300, Number(process.env.SYNC_PUSH_BATCH_SIZE || 500)));
 const FULL_SYNC_CHUNK_MB = Math.min(5, Math.max(1, Number(process.env.SYNC_FULL_CHUNK_MB || 5)));
 const FULL_SYNC_CHUNK_SIZE_BYTES = FULL_SYNC_CHUNK_MB * 1024 * 1024;
+const FULL_SYNC_CHUNK_RECORDS = Math.max(50, Math.min(100, Number(process.env.SYNC_FULL_CHUNK_RECORDS || 75)));
 const SYNC_RELAY_DB_LIMIT_MB = Math.max(100, Number(process.env.SYNC_RELAY_DB_LIMIT_MB || 500));
 const SYNC_RELAY_STORAGE_LIMIT_MB = Math.max(100, Number(process.env.SYNC_RELAY_STORAGE_LIMIT_MB || 1024));
 const SYNC_RELAY_DB_SOFT_THRESHOLD = clamp01(Number(process.env.SYNC_RELAY_DB_SOFT_THRESHOLD || 0.7), 0.7);
@@ -63,8 +64,14 @@ const getSupabaseServiceRoleKey = (): string =>
   process.env.SUPABASE_SECRET_KEY ||
   '';
 const getPullPageSize = (): number => Math.max(1, Number(process.env.SYNC_PULL_PAGE_SIZE || 200));
-const getFullSyncRequestsTable = (): string => process.env.SUPABASE_FULL_SYNC_REQUESTS_TABLE || 'full_sync_requests';
-const getFullSyncChunksTable = (): string => process.env.SUPABASE_FULL_SYNC_CHUNKS_TABLE || 'full_sync_chunks';
+const getFullSyncRequestsTable = (): string =>
+  process.env.SUPABASE_FULL_SYNC_REQUESTS_TABLE ||
+  process.env.SUPABASE_ADMIN_SYNC_REQUESTS_TABLE ||
+  'admin_sync_requests';
+const getFullSyncChunksTable = (): string =>
+  process.env.SUPABASE_FULL_SYNC_CHUNKS_TABLE ||
+  process.env.SUPABASE_ADMIN_FULL_SYNC_TEMP_TABLE ||
+  'admin_full_sync_temp';
 const getFullSyncStorageBucket = (): string => process.env.SUPABASE_FULL_SYNC_STORAGE_BUCKET || 'full-sync-temp';
 
 const entityToTable: Record<string, string> = {
@@ -227,6 +234,12 @@ interface LocalChangeSummaryItem {
 
 interface FullSyncRequestRow {
   id: string;
+  requesting_admin_id: string | null;
+  requesting_admin_name: string | null;
+  approving_admin_id: string | null;
+  approving_admin_name: string | null;
+  requester_confirmed_at: string | null;
+  approver_confirmed_at: string | null;
   requesting_device_id: string | null;
   target_device_id: string | null;
   requested_by: string | null;
@@ -255,7 +268,13 @@ interface FullSyncRequestRow {
 interface FullSyncChunkRow {
   id: string;
   request_id: string;
+  sync_id?: string | null;
   chunk_index: number;
+  chunk_number?: number | null;
+  table_name?: string | null;
+  record_id?: string | null;
+  data?: any;
+  total_chunks?: number | null;
   chunk_size_bytes: number;
   checksum_sha256: string;
   storage_object: string;
@@ -2257,7 +2276,11 @@ const readInventorySnapshot = (db: Database.Database) => {
       password_salt: 'remote_managed',
       pending_password_enc: null,
       hashed_session_token: null,
-      supabase_refresh_token_enc: null
+      supabase_refresh_token_enc: null,
+      // Never ship base64 image payloads in full-sync chunks.
+      profile_image_data: null,
+      profile_image_format: null,
+      profile_image_updated_at: null
     }));
   const products = db.prepare('SELECT * FROM products WHERE deleted_at IS NULL ORDER BY rowid ASC').all();
   const returns = db.prepare('SELECT * FROM returns WHERE deleted_at IS NULL ORDER BY created_at ASC').all();
@@ -2277,6 +2300,109 @@ const readInventorySnapshot = (db: Database.Database) => {
   };
 };
 
+interface FullSyncChunkRecord {
+  tableName: 'employees' | 'products' | 'returns' | 'return_receivers';
+  recordId: string;
+  data: any;
+}
+
+interface FullSyncChunkPayload {
+  schemaVersion: number;
+  requestId: string;
+  chunkIndex: number;
+  totalChunks: number;
+  records: FullSyncChunkRecord[];
+}
+
+const buildFullSyncRecordId = (tableName: FullSyncChunkRecord['tableName'], row: any): string => {
+  if (tableName === 'return_receivers') {
+    return [
+      String(row.return_id ?? row.returnId ?? ''),
+      String(row.employee_id ?? row.employeeId ?? ''),
+      String(row.received_date ?? row.receivedDate ?? ''),
+      String(row.position ?? '')
+    ].join('|');
+  }
+  return String(row.id ?? '').trim();
+};
+
+const buildSnapshotChunkRecords = (snapshot: ReturnType<typeof readInventorySnapshot>): FullSyncChunkRecord[] => {
+  const rows: FullSyncChunkRecord[] = [];
+
+  for (const row of snapshot.employees) {
+    rows.push({
+      tableName: 'employees',
+      recordId: buildFullSyncRecordId('employees', row),
+      data: row
+    });
+  }
+  for (const row of snapshot.products) {
+    rows.push({
+      tableName: 'products',
+      recordId: buildFullSyncRecordId('products', row),
+      data: row
+    });
+  }
+  for (const row of snapshot.returns) {
+    rows.push({
+      tableName: 'returns',
+      recordId: buildFullSyncRecordId('returns', row),
+      data: row
+    });
+  }
+  for (const row of snapshot.returnReceivers) {
+    rows.push({
+      tableName: 'return_receivers',
+      recordId: buildFullSyncRecordId('return_receivers', row),
+      data: row
+    });
+  }
+
+  return rows.filter((row) => row.recordId.length > 0);
+};
+
+const splitFullSyncRecords = (rows: FullSyncChunkRecord[]): FullSyncChunkRecord[][] => {
+  if (!rows.length) return [[]];
+  const chunks: FullSyncChunkRecord[][] = [];
+  for (let i = 0; i < rows.length; i += FULL_SYNC_CHUNK_RECORDS) {
+    chunks.push(rows.slice(i, i + FULL_SYNC_CHUNK_RECORDS));
+  }
+  return chunks;
+};
+
+const decodeRequesterChunkPayload = (raw: Buffer): any => {
+  const payload = zlib.gunzipSync(raw).toString('utf8');
+  return JSON.parse(payload);
+};
+
+const rebuildSnapshotFromChunkRecords = (records: FullSyncChunkRecord[]) => {
+  const map = new Map<string, FullSyncChunkRecord>();
+  for (const row of records) {
+    map.set(`${row.tableName}|${row.recordId}`, row);
+  }
+
+  const employees: any[] = [];
+  const products: any[] = [];
+  const returns: any[] = [];
+  const returnReceivers: any[] = [];
+
+  for (const entry of map.values()) {
+    if (entry.tableName === 'employees') employees.push(entry.data);
+    if (entry.tableName === 'products') products.push(entry.data);
+    if (entry.tableName === 'returns') returns.push(entry.data);
+    if (entry.tableName === 'return_receivers') returnReceivers.push(entry.data);
+  }
+
+  return {
+    exportedAt: nowIso(),
+    schemaVersion: 2,
+    employees,
+    products,
+    returns,
+    returnReceivers
+  };
+};
+
 const buildMasterChunkManifest = (db: Database.Database, requestId: string): LocalChunkManifest => {
   const masterDir = getFullSyncMasterDir(requestId);
   ensureDir(masterDir);
@@ -2288,11 +2414,25 @@ const buildMasterChunkManifest = (db: Database.Database, requestId: string): Loc
   }
 
   const payload = readInventorySnapshot(db);
-  const compressed = zlib.gzipSync(Buffer.from(JSON.stringify(payload), 'utf8'));
-
+  const records = buildSnapshotChunkRecords(payload);
+  const recordChunks = splitFullSyncRecords(records);
   const chunks: LocalChunkManifestItem[] = [];
-  for (let offset = 0, index = 0; offset < compressed.length; offset += FULL_SYNC_CHUNK_SIZE_BYTES, index += 1) {
-    const chunk = compressed.subarray(offset, Math.min(offset + FULL_SYNC_CHUNK_SIZE_BYTES, compressed.length));
+  let totalCompressedBytes = 0;
+  for (let index = 0; index < recordChunks.length; index += 1) {
+    const chunkPayload: FullSyncChunkPayload = {
+      schemaVersion: 2,
+      requestId,
+      chunkIndex: index,
+      totalChunks: recordChunks.length,
+      records: recordChunks[index]
+    };
+    const chunk = zlib.gzipSync(Buffer.from(JSON.stringify(chunkPayload), 'utf8'));
+    if (chunk.length > FULL_SYNC_CHUNK_SIZE_BYTES) {
+      throw new Error(
+        `Full-sync chunk ${index + 1} exceeds ${FULL_SYNC_CHUNK_MB}MB. Lower SYNC_FULL_CHUNK_RECORDS or simplify record payloads.`
+      );
+    }
+    totalCompressedBytes += chunk.length;
     const fileName = `chunk_${String(index).padStart(6, '0')}.bin`;
     fs.writeFileSync(path.join(masterDir, fileName), chunk);
     chunks.push({
@@ -2309,8 +2449,8 @@ const buildMasterChunkManifest = (db: Database.Database, requestId: string): Loc
     generatedAt: nowIso(),
     maxChunkBytes: FULL_SYNC_CHUNK_SIZE_BYTES,
     totalChunks: chunks.length,
-    totalCompressedBytes: compressed.length,
-    manifestChecksum: sha256Hex(compressed),
+    totalCompressedBytes,
+    manifestChecksum: sha256Hex(JSON.stringify(chunks.map((chunk) => `${chunk.chunkIndex}:${chunk.checksumSha256}`))),
     chunks
   };
 
@@ -2344,7 +2484,7 @@ const fetchFullSyncRequests = async (
   const params = new URLSearchParams();
   params.set(
     'select',
-    'id,requesting_device_id,target_device_id,requested_by,estimated_records,estimated_size_mb,created_at,requester_device_id,requester_user_id,requested_at,status,last_successful_sync_at,estimated_db_size_bytes,approved_at,approved_by_user_id,rejected_at,rejected_by_user_id,rejection_reason,total_chunks,manifest_checksum,started_at,completed_at,completed_by_device_id,updated_at'
+    'id,requesting_admin_id,requesting_admin_name,approving_admin_id,approving_admin_name,requester_confirmed_at,approver_confirmed_at,requesting_device_id,target_device_id,requested_by,estimated_records,estimated_size_mb,created_at,requester_device_id,requester_user_id,requested_at,status,last_successful_sync_at,estimated_db_size_bytes,approved_at,approved_by_user_id,rejected_at,rejected_by_user_id,rejection_reason,total_chunks,manifest_checksum,started_at,completed_at,completed_by_device_id,updated_at'
   );
   queryBuilder(params);
   const response = await supabaseRequest(`${getFullSyncRequestsTable()}?${params.toString()}`, { method: 'GET' });
@@ -2385,10 +2525,41 @@ const fetchLatestFullSyncRequestForDevice = async (deviceId: string): Promise<Fu
   return rows[0] || null;
 };
 
+const fetchLatestFullSyncRequestForActor = async (actor: SyncActor, deviceId: string): Promise<FullSyncRequestRow | null> => {
+  const rows = await fetchFullSyncRequests((params) => {
+    params.set(
+      'or',
+      `(target_device_id.eq.${deviceId},requesting_device_id.eq.${deviceId},requester_device_id.eq.${deviceId},requested_by.eq.${actor.userId},requester_user_id.eq.${actor.userId},approved_by_user_id.eq.${actor.userId},requesting_admin_id.eq.${actor.userId},approving_admin_id.eq.${actor.userId})`
+    );
+    params.set('order', 'requested_at.desc');
+    params.set('limit', '1');
+  });
+  return rows[0] || null;
+};
+
 const fetchPendingFullSyncRequestForTargetDevice = async (deviceId: string): Promise<FullSyncRequestRow | null> => {
   const rows = await fetchFullSyncRequests((params) => {
     applyFullSyncDeviceFilter(params, deviceId);
     params.set('status', 'eq.pending');
+    params.set('order', 'requested_at.desc');
+    params.set('limit', '1');
+  });
+  return rows[0] || null;
+};
+
+const fetchPendingFullSyncRequestForApprover = async (actorUserId: string): Promise<FullSyncRequestRow | null> => {
+  const rows = await fetchFullSyncRequests((params) => {
+    params.set('status', 'eq.pending');
+    params.set('requested_by', `neq.${actorUserId}`);
+    params.set('order', 'requested_at.asc');
+    params.set('limit', '1');
+  });
+  return rows[0] || null;
+};
+
+const fetchAnyActiveFullSyncRequest = async (): Promise<FullSyncRequestRow | null> => {
+  const rows = await fetchFullSyncRequests((params) => {
+    params.set('status', 'in.(pending,approved,transferring)');
     params.set('order', 'requested_at.desc');
     params.set('limit', '1');
   });
@@ -2428,7 +2599,7 @@ const fetchFullSyncChunks = async (
   const params = new URLSearchParams();
   params.set(
     'select',
-    'id,request_id,chunk_index,chunk_size_bytes,checksum_sha256,storage_object,status,uploaded_at,acked_at,acked_by_device_id,storage_deleted_at'
+    'id,request_id,sync_id,chunk_index,chunk_number,total_chunks,table_name,record_id,data,chunk_size_bytes,checksum_sha256,storage_object,status,uploaded_at,acked_at,acked_by_device_id,storage_deleted_at'
   );
   params.set('request_id', `eq.${requestId}`);
   params.set('order', 'chunk_index.asc');
@@ -2465,6 +2636,18 @@ const patchFullSyncChunk = async (chunkId: string, patch: Record<string, unknown
   return rows[0];
 };
 
+const deleteFullSyncChunksByRequestId = async (requestId: string): Promise<void> => {
+  const params = new URLSearchParams();
+  params.set('request_id', `eq.${requestId}`);
+  await supabaseRequest(`${getFullSyncChunksTable()}?${params.toString()}`, { method: 'DELETE' });
+};
+
+const deleteFullSyncRequestById = async (requestId: string): Promise<void> => {
+  const params = new URLSearchParams();
+  params.set('id', `eq.${requestId}`);
+  await supabaseRequest(`${getFullSyncRequestsTable()}?${params.toString()}`, { method: 'DELETE' });
+};
+
 const clearRequesterChunkDir = (requestId: string): void => {
   const dir = getFullSyncRequesterDir(requestId);
   if (fs.existsSync(dir)) {
@@ -2498,10 +2681,38 @@ const readRequesterDataset = (requestId: string): any => {
     throw new Error('No downloaded full-sync chunks were found.');
   }
 
-  const buffers = partFiles.map((name) => fs.readFileSync(path.join(dir, name)));
-  const compressed = Buffer.concat(buffers);
-  const payload = zlib.gunzipSync(compressed).toString('utf8');
-  return JSON.parse(payload);
+  const parsedChunks: any[] = [];
+  for (const name of partFiles) {
+    parsedChunks.push(decodeRequesterChunkPayload(fs.readFileSync(path.join(dir, name))));
+  }
+
+  // Backward compatibility: old full-sync payload was a single full dataset blob.
+  if (parsedChunks.length === 1 && Array.isArray(parsedChunks[0]?.employees)) {
+    return parsedChunks[0];
+  }
+
+  const rows: FullSyncChunkRecord[] = [];
+  for (const payload of parsedChunks) {
+    if (Array.isArray(payload?.records)) {
+      for (const row of payload.records) {
+        const tableName = String(row?.tableName || '').trim() as FullSyncChunkRecord['tableName'];
+        const recordId = String(row?.recordId || '').trim();
+        if (!tableName || !recordId) continue;
+        rows.push({
+          tableName,
+          recordId,
+          data: row?.data ?? null
+        });
+      }
+      continue;
+    }
+
+    if (Array.isArray(payload?.employees)) {
+      return payload;
+    }
+  }
+
+  return rebuildSnapshotFromChunkRecords(rows);
 };
 
 const toNumberSafe = (value: unknown, fallback = 0): number => {
@@ -2688,6 +2899,142 @@ const rebuildLocalInventoryFromDataset = (db: Database.Database, dataset: any): 
   tx();
 };
 
+type FullSyncVerificationSnapshot = Record<
+  'employees' | 'products' | 'returns' | 'return_receivers',
+  { count: number; latestUpdatedAt: string | null }
+>;
+
+const readRowUpdatedAt = (row: any): string | null => {
+  if (!row || typeof row !== 'object') return null;
+  const candidates = [
+    row.last_modified,
+    row.lastModified,
+    row.updated_at,
+    row.updatedAt,
+    row.created_at,
+    row.createdAt,
+    row.date
+  ];
+  for (const candidate of candidates) {
+    const value = String(candidate || '').trim();
+    if (!value) continue;
+    return value;
+  }
+  return null;
+};
+
+const toLatestTimestamp = (values: string[]): string | null => {
+  let latest: string | null = null;
+  let latestMs = -1;
+  for (const value of values) {
+    const parsed = parseTimestamp(value);
+    if (parsed == null) continue;
+    if (parsed > latestMs) {
+      latestMs = parsed;
+      latest = value;
+    }
+  }
+  return latest;
+};
+
+const buildDatasetVerificationSnapshot = (dataset: any): FullSyncVerificationSnapshot => {
+  const employees = Array.isArray(dataset?.employees) ? dataset.employees : [];
+  const products = Array.isArray(dataset?.products) ? dataset.products : [];
+  const returns = Array.isArray(dataset?.returns) ? dataset.returns : [];
+  const returnReceivers = Array.isArray(dataset?.returnReceivers) ? dataset.returnReceivers : [];
+  return {
+    employees: {
+      count: employees.length,
+      latestUpdatedAt: toLatestTimestamp(employees.map((row: any) => readRowUpdatedAt(row)).filter(Boolean) as string[])
+    },
+    products: {
+      count: products.length,
+      latestUpdatedAt: toLatestTimestamp(products.map((row: any) => readRowUpdatedAt(row)).filter(Boolean) as string[])
+    },
+    returns: {
+      count: returns.length,
+      latestUpdatedAt: toLatestTimestamp(returns.map((row: any) => readRowUpdatedAt(row)).filter(Boolean) as string[])
+    },
+    return_receivers: {
+      count: returnReceivers.length,
+      latestUpdatedAt: toLatestTimestamp(
+        returnReceivers.map((row: any) => String(row.received_date ?? row.receivedDate ?? '').trim()).filter(Boolean) as string[]
+      )
+    }
+  };
+};
+
+const buildLocalVerificationSnapshot = (db: Database.Database): FullSyncVerificationSnapshot => {
+  const readTable = (tableName: 'employees' | 'products' | 'returns') => {
+    const row = db
+      .prepare(`SELECT COUNT(*) AS count, MAX(last_modified) AS latest FROM ${tableName} WHERE deleted_at IS NULL`)
+      .get() as { count?: number; latest?: string | null } | undefined;
+    return {
+      count: Number(row?.count || 0),
+      latestUpdatedAt: row?.latest || null
+    };
+  };
+  return {
+    employees: readTable('employees'),
+    products: readTable('products'),
+    returns: readTable('returns'),
+    return_receivers: (() => {
+      const row = db
+        .prepare('SELECT COUNT(*) AS count, MAX(received_date) AS latest FROM return_receivers')
+        .get() as { count?: number; latest?: string | null } | undefined;
+      return {
+        count: Number(row?.count || 0),
+        latestUpdatedAt: row?.latest || null
+      };
+    })()
+  };
+};
+
+const compareVerificationSnapshots = (
+  expected: FullSyncVerificationSnapshot,
+  actual: FullSyncVerificationSnapshot
+): string[] => {
+  const mismatches: string[] = [];
+  const tables: Array<keyof FullSyncVerificationSnapshot> = ['employees', 'products', 'returns', 'return_receivers'];
+  for (const tableName of tables) {
+    if (expected[tableName].count !== actual[tableName].count) {
+      mismatches.push(
+        `${tableName} count mismatch (expected ${expected[tableName].count}, got ${actual[tableName].count})`
+      );
+    }
+    if ((expected[tableName].latestUpdatedAt || null) !== (actual[tableName].latestUpdatedAt || null)) {
+      mismatches.push(
+        `${tableName} latest timestamp mismatch (expected ${expected[tableName].latestUpdatedAt || 'none'}, got ${actual[tableName].latestUpdatedAt || 'none'})`
+      );
+    }
+  }
+  return mismatches;
+};
+
+const getActorDisplayName = (db: Database.Database, employeeId: string | null | undefined): string => {
+  const id = String(employeeId || '').trim();
+  if (!id) return 'Unknown Admin';
+  const row = db
+    .prepare('SELECT full_name, first_name, last_name, email FROM employees WHERE id = ? LIMIT 1')
+    .get(id) as { full_name?: string | null; first_name?: string | null; last_name?: string | null; email?: string | null } | undefined;
+  const fullName = String(row?.full_name || '').trim();
+  if (fullName) return fullName;
+  const firstName = String(row?.first_name || '').trim();
+  const lastName = String(row?.last_name || '').trim();
+  const joined = [firstName, lastName].filter(Boolean).join(' ').trim();
+  if (joined) return joined;
+  return String(row?.email || '').trim() || id;
+};
+
+const isFullSyncRequester = (request: FullSyncRequestRow, actorUserId: string): boolean =>
+  String(request.requested_by || request.requester_user_id || '').trim() === String(actorUserId || '').trim();
+
+const isFullSyncApprover = (request: FullSyncRequestRow, actorUserId: string): boolean =>
+  String(request.approved_by_user_id || request.approving_admin_id || '').trim() === String(actorUserId || '').trim();
+
+const hasBothFullSyncConfirmations = (request: FullSyncRequestRow): boolean =>
+  Boolean(request.requester_confirmed_at && request.approver_confirmed_at);
+
 const summarizeFullSyncRequest = (request: FullSyncRequestRow, chunks: FullSyncChunkRow[] = []) => {
   const uploadedChunks = chunks.filter((chunk) => chunk.status === 'uploaded').length;
   const ackedChunks = chunks.filter((chunk) => chunk.status === 'acked' || chunk.status === 'deleted').length;
@@ -2716,6 +3063,13 @@ const summarizeFullSyncRequest = (request: FullSyncRequestRow, chunks: FullSyncC
           ? Number((estimatedDbSizeBytes / 1024 / 1024).toFixed(3))
           : null,
     estimatedDbSizeBytes,
+    requestingAdminId: request.requesting_admin_id || request.requested_by || request.requester_user_id || null,
+    requestingAdminName: request.requesting_admin_name || null,
+    approvingAdminId: request.approving_admin_id || request.approved_by_user_id || null,
+    approvingAdminName: request.approving_admin_name || null,
+    requesterConfirmedAt: request.requester_confirmed_at || null,
+    approverConfirmedAt: request.approver_confirmed_at || null,
+    bothConfirmed: hasBothFullSyncConfirmations(request),
     approvedAt: request.approved_at,
     approvedByUserId: request.approved_by_user_id,
     rejectedAt: request.rejected_at,
@@ -2729,6 +3083,8 @@ const summarizeFullSyncRequest = (request: FullSyncRequestRow, chunks: FullSyncC
     uploadedChunks,
     ackedChunks,
     nextUploadedChunkIndex: nextUploaded ? nextUploaded.chunk_index : null,
+    progressPercent:
+      (request.total_chunks || 0) > 0 ? Math.min(100, Math.round((ackedChunks / Number(request.total_chunks || 1)) * 100)) : 0,
     updatedAt: request.updated_at
   };
 };
@@ -3872,8 +4228,8 @@ const chunkRecordsBySize = <T extends Record<string, unknown>>(
 const mapStatus = (actor: SyncActor, state: SyncStateRow, db: Database.Database) => ({
   fullSyncRequired: Boolean(state.full_sync_required),
   fullSyncReason: state.full_sync_reason,
-  fullSyncEligible: canRequestFullSync(actor) ? isManualFullSyncEligible(state) : false,
-  fullSyncEligibilityReason: canRequestFullSync(actor) ? getManualFullSyncBlockReason(state) : null,
+  fullSyncEligible: canRequestFullSync(actor),
+  fullSyncEligibilityReason: null,
   lastSuccessfulSyncAt: getLastSuccessfulSyncAt(state),
   deviceId: state.device_id,
   lastAutoSyncAt: state.last_auto_sync_at,
@@ -5250,8 +5606,6 @@ export async function syncNow(actor: SyncActor) {
 
 export async function checkPendingFullSyncRequest(actor: SyncActor) {
   return withActorToken(actor, async () => {
-    const db = dataStore.getDb();
-
     if (!canAdminSync(actor)) {
       return { status: 'forbidden', error: 'Only system admin accounts can check full sync requests.' };
     }
@@ -5264,8 +5618,7 @@ export async function checkPendingFullSyncRequest(actor: SyncActor) {
     }
 
     try {
-      const deviceId = getLocalDeviceId(db);
-      const request = await fetchPendingFullSyncRequestForTargetDevice(deviceId);
+      const request = await fetchPendingFullSyncRequestForApprover(actor.userId);
       if (!request) {
         return { status: 'none', request: null };
       }
@@ -5301,7 +5654,8 @@ export async function requestFullSync(actor: SyncActor) {
     }
 
     const deviceId = getLocalDeviceId(db);
-    const fullSyncReason = getFullSyncRequiredReason(state) || 'Manual full sync request was submitted.';
+    const fullSyncReason = getFullSyncRequiredReason(state) || 'Manual admin-to-admin full sync request was submitted.';
+    const requestingAdminName = getActorDisplayName(db, actor.userId);
 
     try {
       const existing = await fetchLatestActiveFullSyncRequestForDevice(deviceId);
@@ -5312,19 +5666,26 @@ export async function requestFullSync(actor: SyncActor) {
         };
       }
 
-      const eligibilityError = getManualFullSyncBlockReason(state);
-      if (eligibilityError) {
-        writeSyncState(db, actor, {
-          last_status: 'full_sync_not_allowed',
-          last_error: eligibilityError
-        });
-        return { status: 'not_allowed', error: eligibilityError };
+      const activeGlobalRequest = await fetchAnyActiveFullSyncRequest();
+      if (activeGlobalRequest) {
+        const requestedBy = String(activeGlobalRequest.requesting_admin_name || activeGlobalRequest.requested_by || 'another admin').trim();
+        return {
+          status: 'busy',
+          request: summarizeFullSyncRequest(activeGlobalRequest),
+          error: `Another full sync is already active (requested by ${requestedBy}). Finish or cancel it before creating a new request.`
+        };
       }
 
       const estimatedDbSizeBytes = getLocalDbSizeBytes(db);
       const estimatedRecords = getLocalInventoryRecordCount(db);
       const requestedAt = nowIso();
       const request = await createFullSyncRequest({
+        requesting_admin_id: actor.userId,
+        requesting_admin_name: requestingAdminName,
+        approving_admin_id: null,
+        approving_admin_name: null,
+        requester_confirmed_at: null,
+        approver_confirmed_at: null,
         requesting_device_id: deviceId,
         target_device_id: deviceId,
         requested_by: actor.userId,
@@ -5348,7 +5709,7 @@ export async function requestFullSync(actor: SyncActor) {
 
       logSyncEvent(db, {
         eventType: 'full_sync_request',
-        message: `${actor.role} requested full sync (${request.id}) and is waiting for master approval.`
+        message: `${requestingAdminName} requested full sync (${request.id}) and is waiting for co-admin approval.`
       });
 
       return {
@@ -5375,7 +5736,7 @@ export async function getFullSyncSession(actor: SyncActor) {
 
     try {
       const deviceId = getLocalDeviceId(db);
-      const request = await fetchLatestFullSyncRequestForDevice(deviceId);
+      const request = await fetchLatestFullSyncRequestForActor(actor, deviceId);
       if (!request) {
         return { status: 'idle', request: null, nextChunk: null };
       }
@@ -5466,17 +5827,28 @@ export async function reviewFullSyncRequest(
     }
 
     try {
+      const approverName = getActorDisplayName(db, actor.userId);
       const request = await fetchFullSyncRequestById(requestId);
       if (!request) {
         return { status: 'not_found', error: 'Full sync request was not found.' };
+      }
+      if (isFullSyncRequester(request, actor.userId)) {
+        return { status: 'forbidden', error: 'Another admin must approve this full sync request.' };
+      }
+      if (request.status !== 'pending' && decision === 'approve') {
+        return { status: 'invalid_state', error: `Request is in ${request.status} state.` };
       }
 
       let updated: FullSyncRequestRow;
       if (decision === 'approve') {
         updated = await patchFullSyncRequest(requestId, {
           status: 'approved',
+          approving_admin_id: actor.userId,
+          approving_admin_name: approverName,
           approved_at: nowIso(),
           approved_by_user_id: actor.userId,
+          requester_confirmed_at: null,
+          approver_confirmed_at: null,
           rejected_at: null,
           rejected_by_user_id: null,
           rejection_reason: null
@@ -5485,11 +5857,13 @@ export async function reviewFullSyncRequest(
         cleanupMasterChunkCache(requestId);
         logSyncEvent(db, {
           eventType: 'full_sync_review',
-          message: `System admin approved full sync request ${requestId}.`
+          message: `${approverName} approved full sync request ${requestId}.`
         });
       } else {
         updated = await patchFullSyncRequest(requestId, {
           status: 'rejected',
+          approving_admin_id: actor.userId,
+          approving_admin_name: approverName,
           rejected_at: nowIso(),
           rejected_by_user_id: actor.userId,
           rejection_reason: reason || 'Rejected by master device'
@@ -5497,7 +5871,7 @@ export async function reviewFullSyncRequest(
 
         logSyncEvent(db, {
           eventType: 'full_sync_review',
-          message: `System admin rejected full sync request ${requestId}.`
+          message: `${approverName} rejected full sync request ${requestId}.`
         });
       }
 
@@ -5507,6 +5881,85 @@ export async function reviewFullSyncRequest(
       };
     } catch (error: any) {
       return { status: 'error', error: error?.message ?? 'Failed to review full sync request.' };
+    }
+  });
+}
+
+export async function confirmFullSyncRequest(actor: SyncActor, requestId: string, decision: 'confirm' | 'cancel' = 'confirm') {
+  return withActorToken(actor, async () => {
+    const db = dataStore.getDb();
+
+    if (!canAdminSync(actor)) {
+      return { status: 'forbidden', error: 'Only system admin accounts can confirm full sync requests.' };
+    }
+
+    if (!isConfigured()) {
+      return {
+        status: 'error',
+        error: 'Supabase is not configured. Set SUPABASE_URL and SUPABASE_ANON_KEY (or SUPABASE_PUBLISHABLE_KEY).'
+      };
+    }
+
+    const state = readSyncState(db, actor);
+    if (!state.online_mode) {
+      return { status: 'offline', error: 'Sync is offline. Enable Online mode before confirming full sync.' };
+    }
+
+    try {
+      const request = await fetchFullSyncRequestById(requestId);
+      if (!request) {
+        return { status: 'not_found', error: 'Full sync request was not found.' };
+      }
+
+      const isRequester = isFullSyncRequester(request, actor.userId);
+      const isApprover = isFullSyncApprover(request, actor.userId);
+      if (!isRequester && !isApprover) {
+        return { status: 'forbidden', error: 'Only the requester and approving admin can confirm this full sync.' };
+      }
+
+      if (!(request.status === 'approved' || request.status === 'transferring' || request.status === 'pending')) {
+        return { status: 'invalid_state', error: `Request is in ${request.status} state.` };
+      }
+
+      if (decision === 'cancel') {
+        const cancelled = await patchFullSyncRequest(requestId, {
+          status: 'cancelled',
+          rejection_reason: 'Full sync cancelled before transfer.'
+        });
+        logSyncEvent(db, {
+          eventType: 'full_sync_confirm',
+          message: `${getActorDisplayName(db, actor.userId)} cancelled full sync request ${requestId}.`
+        });
+        return {
+          status: 'cancelled',
+          request: summarizeFullSyncRequest(cancelled)
+        };
+      }
+
+      const patch: Record<string, unknown> = {};
+      if (isRequester) patch.requester_confirmed_at = nowIso();
+      if (isApprover) patch.approver_confirmed_at = nowIso();
+      const updated = await patchFullSyncRequest(requestId, patch);
+      const bothConfirmed = hasBothFullSyncConfirmations(updated);
+      if (bothConfirmed && updated.status === 'pending') {
+        // Safety net: reviewer may confirm immediately after approve propagation lag.
+        await patchFullSyncRequest(requestId, {
+          status: 'approved'
+        });
+      }
+
+      logSyncEvent(db, {
+        eventType: 'full_sync_confirm',
+        message: `${getActorDisplayName(db, actor.userId)} confirmed full sync request ${requestId}.`
+      });
+
+      const refreshed = (await fetchFullSyncRequestById(requestId)) || updated;
+      return {
+        status: bothConfirmed ? 'ready' : 'waiting_peer',
+        request: summarizeFullSyncRequest(refreshed)
+      };
+    } catch (error: any) {
+      return { status: 'error', error: error?.message ?? 'Failed to confirm full sync request.' };
     }
   });
 }
@@ -5531,9 +5984,19 @@ export async function uploadNextFullSyncChunk(actor: SyncActor, requestId: strin
       if (!request) {
         return { status: 'not_found', error: 'Full sync request was not found.' };
       }
+      if (!isFullSyncApprover(request, actor.userId)) {
+        return { status: 'forbidden', error: 'Only the approving admin can push full sync chunks.' };
+      }
 
       if (!(request.status === 'approved' || request.status === 'transferring')) {
         return { status: 'invalid_state', error: `Request is in ${request.status} state.` };
+      }
+      if (!hasBothFullSyncConfirmations(request)) {
+        return {
+          status: 'waiting_confirm',
+          request: summarizeFullSyncRequest(request),
+          error: 'Waiting for requester and approver confirmation before chunk transfer.'
+        };
       }
 
       const chunksBefore = await fetchFullSyncChunks(requestId);
@@ -5588,6 +6051,12 @@ export async function uploadNextFullSyncChunk(actor: SyncActor, requestId: strin
       await uploadStorageObject(next.storageObject, buffer);
       await upsertFullSyncChunk({
         request_id: requestId,
+        sync_id: requestId,
+        chunk_number: next.chunkIndex,
+        total_chunks: manifest.totalChunks,
+        table_name: 'chunk_manifest',
+        record_id: `chunk_${next.chunkIndex}`,
+        data: null,
         chunk_index: next.chunkIndex,
         chunk_size_bytes: next.chunkSizeBytes,
         checksum_sha256: next.checksumSha256,
@@ -5642,15 +6111,21 @@ export async function pullNextFullSyncChunk(actor: SyncActor) {
       const deviceId = getLocalDeviceId(db);
       const request = await fetchLatestActiveFullSyncRequestForDevice(deviceId);
       if (!request) {
-        const eligibilityError = getManualFullSyncBlockReason(state);
-        if (eligibilityError) {
-          return { status: 'not_allowed', error: eligibilityError };
-        }
         return { status: 'idle', error: 'No active full sync request for this device.' };
+      }
+      if (!isFullSyncRequester(request, actor.userId)) {
+        return { status: 'forbidden', error: 'Only the requesting admin can pull full sync chunks.' };
       }
 
       if (request.status === 'pending') {
-        return { status: 'pending', request: summarizeFullSyncRequest(request), error: 'Waiting for master approval.' };
+        return { status: 'pending', request: summarizeFullSyncRequest(request), error: 'Waiting for co-admin approval.' };
+      }
+      if (request.status === 'approved' && !hasBothFullSyncConfirmations(request)) {
+        return {
+          status: 'waiting_confirm',
+          request: summarizeFullSyncRequest(request),
+          error: 'Waiting for requester and approver confirmation.'
+        };
       }
 
       if (!(request.status === 'approved' || request.status === 'transferring')) {
@@ -5667,7 +6142,7 @@ export async function pullNextFullSyncChunk(actor: SyncActor) {
         return {
           status: 'waiting_chunk',
           request: summarizeFullSyncRequest(request, chunks),
-          error: 'Waiting for next chunk from master.'
+          error: 'Waiting for next chunk from approving admin.'
         };
       }
 
@@ -5714,7 +6189,28 @@ export async function pullNextFullSyncChunk(actor: SyncActor) {
       if (totalChunks && ackedCount >= totalChunks) {
         const backupPath = backupLocalInventorySnapshot(db);
         const dataset = readRequesterDataset(request.id);
+        const expectedVerification = buildDatasetVerificationSnapshot(dataset);
         rebuildLocalInventoryFromDataset(db, dataset);
+        const actualVerification = buildLocalVerificationSnapshot(db);
+        const verificationErrors = compareVerificationSnapshots(expectedVerification, actualVerification);
+        if (verificationErrors.length > 0) {
+          const failureReason = `Full sync verification failed: ${verificationErrors.join('; ')}`;
+          await patchFullSyncRequest(request.id, {
+            status: 'cancelled',
+            rejection_reason: failureReason
+          });
+          writeSyncState(db, actor, {
+            last_status: 'error',
+            last_error: failureReason
+          });
+          return {
+            status: 'verify_failed',
+            request: summarizeFullSyncRequest(request, chunksAfterAck),
+            backupPath,
+            pulledChunkIndex: nextChunk.chunk_index,
+            error: failureReason
+          };
+        }
         clearRequesterChunkDir(request.id);
 
         await patchFullSyncRequest(request.id, {
@@ -5742,9 +6238,16 @@ export async function pullNextFullSyncChunk(actor: SyncActor) {
         });
 
         const completedRequest = (await fetchFullSyncRequestById(request.id)) || request;
+        const completedSummary = summarizeFullSyncRequest(completedRequest, chunksAfterAck);
+        try {
+          await deleteFullSyncChunksByRequestId(request.id);
+          await deleteFullSyncRequestById(request.id);
+        } catch {
+          // Cleanup is best-effort; retention cleanup job will remove leftovers if immediate delete fails.
+        }
         return {
           status: 'completed',
-          request: summarizeFullSyncRequest(completedRequest, chunksAfterAck),
+          request: completedSummary,
           backupPath,
           pulledChunkIndex: nextChunk.chunk_index
         };

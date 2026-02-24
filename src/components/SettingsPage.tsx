@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Settings, Save, Bell, Lock, Database, Mail, Globe, Shield } from 'lucide-react';
 import { useLiveQuery } from '../lib/useLiveQuery';
 import type { Employee, SystemSettings } from '../lib/types';
@@ -78,6 +78,13 @@ interface SyncLocalChangesSummary {
 
 interface FullSyncRequestSummary {
   requestId: string;
+  requestingAdminId?: string | null;
+  requestingAdminName?: string | null;
+  approvingAdminId?: string | null;
+  approvingAdminName?: string | null;
+  requesterConfirmedAt?: string | null;
+  approverConfirmedAt?: string | null;
+  bothConfirmed?: boolean;
   requestingDeviceId?: string;
   targetDeviceId?: string;
   requestedBy?: string | null;
@@ -102,6 +109,7 @@ interface FullSyncRequestSummary {
   uploadedChunks: number;
   ackedChunks: number;
   nextUploadedChunkIndex: number | null;
+  progressPercent?: number;
   updatedAt: string | null;
 }
 
@@ -160,11 +168,13 @@ export function SettingsPage({ user }: SettingsPageProps) {
   const [showPushConfirm, setShowPushConfirm] = useState(false);
   const [remotePreview, setRemotePreview] = useState<{ count: number; totalSizeKb: number; message?: string } | null>(null);
   const [syncRelayConnected, setSyncRelayConnected] = useState(false);
-  const [fullSyncBusy, setFullSyncBusy] = useState<'check' | 'request' | 'pull' | 'approve' | 'reject' | 'upload' | null>(null);
+  const [fullSyncBusy, setFullSyncBusy] = useState<'check' | 'request' | 'pull' | 'approve' | 'reject' | 'upload' | 'confirm' | null>(null);
   const [fullSyncMessage, setFullSyncMessage] = useState('');
   const [fullSyncSession, setFullSyncSession] = useState<FullSyncSessionSnapshot | null>(null);
   const [pendingFullSyncRequest, setPendingFullSyncRequest] = useState<FullSyncRequestSummary | null>(null);
+  const [showFullSyncConfirmModal, setShowFullSyncConfirmModal] = useState(false);
   const [networkOnline, setNetworkOnline] = useState<boolean>(navigator.onLine);
+  const fullSyncAutoInFlightRef = useRef(false);
 
   const settings = useLiveQuery(() => db.settings.get('system'), []);
   const syncStatus = useLiveQuery<SyncStatusSnapshot | undefined>(() => window.api?.sync?.getStatus?.(user.id), [user.id]);
@@ -197,20 +207,28 @@ export function SettingsPage({ user }: SettingsPageProps) {
   }, []);
 
   useEffect(() => {
-    let active = true;
-    const refresh = async () => {
-      if (!active) return;
-      await loadFullSyncData();
-    };
-
-    refresh();
-    const timer = window.setInterval(refresh, 10000);
-
-    return () => {
-      active = false;
-      window.clearInterval(timer);
-    };
+    void loadFullSyncData();
   }, [user.id, isAdmin, syncStatus?.mode, syncStatus?.configured, syncStatus?.fullSyncRequired]);
+
+  useEffect(() => {
+    if (!window.api?.db?.onChanged) return;
+    return window.api.db.onChanged((payload) => {
+      if (payload.table !== 'sync_state') return;
+      void loadFullSyncData();
+    });
+  }, [user.id]);
+
+  useEffect(() => {
+    const refresh = () => {
+      void loadFullSyncData();
+    };
+    window.addEventListener('focus', refresh);
+    window.addEventListener('visibilitychange', refresh);
+    return () => {
+      window.removeEventListener('focus', refresh);
+      window.removeEventListener('visibilitychange', refresh);
+    };
+  }, [user.id]);
 
   useEffect(() => {
     if (!isAdmin || syncStatus?.mode !== 'online' || networkOnline || !window.api?.sync?.setMode) return;
@@ -368,7 +386,7 @@ export function SettingsPage({ user }: SettingsPageProps) {
         if (window.api?.sync?.fullSyncRequest) {
           const requestResult = await window.api.sync.fullSyncRequest(user.id);
           if (requestResult.status === 'requested') {
-            autoRequestNote = ' Full Sync request sent. Waiting for Master approval.';
+            autoRequestNote = ' Full Sync request sent. Waiting for co-admin approval.';
           } else if (requestResult.status === 'exists') {
             autoRequestNote = ' Full Sync request is already pending.';
           }
@@ -626,25 +644,13 @@ export function SettingsPage({ user }: SettingsPageProps) {
     if (!window.api?.sync?.fullSyncRequest) return;
     setFullSyncBusy('request');
     try {
-      if (window.api?.sync?.previewPull) {
-        const preview = await window.api.sync.previewPull(user.id);
-        if (preview.status === 'ok') {
-          const estimatedSize = formatSizeFromKb(preview.totalSizeKb || 0);
-          const proceed = window.confirm(
-            `Full Sync Required\nRecords: ${Number(preview.newRecords || 0).toLocaleString()}\nEstimated Size: ${estimatedSize}\n\nProceed?`
-          );
-          if (!proceed) {
-            setFullSyncMessage('Full Sync request cancelled.');
-            return;
-          }
-        }
-      }
-
       const result = await window.api.sync.fullSyncRequest(user.id);
       if (result.status === 'requested') {
-        setFullSyncMessage('Full Sync requested. Waiting for Master approval.');
+        setFullSyncMessage('Waiting for co-admin approval...');
       } else if (result.status === 'exists') {
-        setFullSyncMessage('A Full Sync request is already active for this device.');
+        setFullSyncMessage('A Full Sync request is already active.');
+      } else if (result.status === 'busy') {
+        setFullSyncMessage(result.error || 'Another Full Sync session is active. Wait for it to finish.');
       } else {
         setFullSyncMessage(result.error || 'Failed to request Full Sync.');
       }
@@ -666,9 +672,13 @@ export function SettingsPage({ user }: SettingsPageProps) {
       } else if (result.status === 'completed') {
         setFullSyncMessage('Full Sync completed successfully. Local inventory was rebuilt.');
       } else if (result.status === 'pending') {
-        setFullSyncMessage('Full Sync request is pending master approval.');
+        setFullSyncMessage('Full Sync request is pending co-admin approval.');
+      } else if (result.status === 'waiting_confirm') {
+        setFullSyncMessage('Waiting for both admins to confirm stable internet before transfer.');
       } else if (result.status === 'waiting_chunk') {
-        setFullSyncMessage('Waiting for Master to upload the next chunk.');
+        setFullSyncMessage('Waiting for approving admin to upload the next chunk.');
+      } else if (result.status === 'verify_failed') {
+        setFullSyncMessage(result.error || 'Verification failed after full sync apply.');
       } else {
         setFullSyncMessage(result.error || 'Unable to pull next Full Sync chunk.');
       }
@@ -685,10 +695,11 @@ export function SettingsPage({ user }: SettingsPageProps) {
     setFullSyncBusy(decision === 'approve' ? 'approve' : 'reject');
     try {
       const reason =
-        decision === 'reject' ? window.prompt('Optional rejection reason:', 'Request rejected by master device.') || undefined : undefined;
+        decision === 'reject' ? window.prompt('Optional rejection reason:', 'Request rejected by co-admin.') || undefined : undefined;
       const result = await window.api.sync.fullSyncAdminReview(user.id, requestId, decision, reason);
       if (result.status === 'approved') {
         setFullSyncMessage(`Request ${requestId} approved.`);
+        setShowFullSyncConfirmModal(true);
       } else if (result.status === 'rejected') {
         setFullSyncMessage(`Request ${requestId} rejected.`);
       } else {
@@ -711,6 +722,8 @@ export function SettingsPage({ user }: SettingsPageProps) {
         setFullSyncMessage(`Uploaded chunk #${result.uploadedChunk.chunkIndex + 1} for request ${requestId}.`);
       } else if (result.status === 'waiting_for_ack') {
         setFullSyncMessage('Waiting for requester confirmation before uploading the next chunk.');
+      } else if (result.status === 'waiting_confirm') {
+        setFullSyncMessage('Waiting for both admins to confirm before transfer starts.');
       } else if (result.status === 'awaiting_finalize') {
         setFullSyncMessage('All chunks have been uploaded and acknowledged. Waiting for requester finalize.');
       } else {
@@ -736,15 +749,23 @@ export function SettingsPage({ user }: SettingsPageProps) {
         continue;
       }
       if (result.status === 'completed') {
-        setFullSyncMessage('Full Sync completed successfully. Local inventory was rebuilt.');
+        setFullSyncMessage('Full Sync completed successfully. Both admin databases are now identical.');
         return;
       }
       if (result.status === 'waiting_chunk') {
-        setFullSyncMessage('Full Sync approved. Waiting for the next batch from relay.');
+        setFullSyncMessage('Waiting for approving admin to upload the next batch.');
         return;
       }
       if (result.status === 'pending') {
         setFullSyncMessage('Full sync request is still pending approval.');
+        return;
+      }
+      if (result.status === 'waiting_confirm') {
+        setFullSyncMessage('Waiting for both admins to confirm stable internet.');
+        return;
+      }
+      if (result.status === 'verify_failed') {
+        setFullSyncMessage(result.error || 'Verification failed. Databases are not identical yet.');
         return;
       }
       if (result.status === 'idle') {
@@ -756,6 +777,72 @@ export function SettingsPage({ user }: SettingsPageProps) {
     }
 
     setFullSyncMessage('Full sync paused after 500 batches. Run Full Sync Check again to continue.');
+  };
+
+  const uploadApprovedFullSyncBatches = async (requestId: string) => {
+    if (!window.api?.sync?.fullSyncAdminUploadNext) return;
+
+    let uploaded = 0;
+    while (uploaded < 500) {
+      const result = await window.api.sync.fullSyncAdminUploadNext(user.id, requestId);
+      if (result.status === 'uploaded') {
+        uploaded += 1;
+        continue;
+      }
+      if (result.status === 'waiting_for_ack') {
+        setFullSyncMessage('Waiting for requester to pull current batch before uploading next.');
+        return;
+      }
+      if (result.status === 'awaiting_finalize') {
+        setFullSyncMessage('All batches uploaded. Waiting for requester completion.');
+        return;
+      }
+      if (result.status === 'waiting_confirm') {
+        setFullSyncMessage('Waiting for both admins to confirm stable internet.');
+        return;
+      }
+      setFullSyncMessage(result.error || 'Failed while uploading full-sync batches.');
+      return;
+    }
+
+    setFullSyncMessage('Upload paused after 500 batches. Continue once requester catches up.');
+  };
+
+  const handleConfirmFullSync = async (decision: 'confirm' | 'cancel') => {
+    const requestId = fullSyncSession?.request?.requestId || pendingFullSyncRequest?.requestId;
+    if (!requestId || !window.api?.sync?.fullSyncConfirm) return;
+    setFullSyncBusy('confirm');
+    try {
+      const result = await window.api.sync.fullSyncConfirm(user.id, requestId, decision);
+      if (decision === 'cancel' || result.status === 'cancelled') {
+        setShowFullSyncConfirmModal(false);
+        setFullSyncMessage('Full Sync cancelled.');
+        await loadFullSyncData();
+        return;
+      }
+
+      if (result.status === 'waiting_peer') {
+        setShowFullSyncConfirmModal(false);
+        setFullSyncMessage('Confirmation saved. Waiting for co-admin confirmation.');
+        await loadFullSyncData();
+        return;
+      }
+
+      setShowFullSyncConfirmModal(false);
+      setFullSyncMessage('Both admins confirmed. Starting chunked full sync...');
+      await loadFullSyncData();
+      const activeRequest = result.request || fullSyncSession?.request;
+      if (!activeRequest) return;
+      if (activeRequest.approvingAdminId === user.id || activeRequest.approvedByUserId === user.id) {
+        await uploadApprovedFullSyncBatches(activeRequest.requestId);
+      } else {
+        await pullApprovedFullSyncBatches();
+      }
+    } catch (error: any) {
+      setFullSyncMessage(error?.message || 'Failed to confirm full sync.');
+    } finally {
+      setFullSyncBusy(null);
+    }
   };
 
   const handleFullSyncCheck = async () => {
@@ -777,7 +864,7 @@ export function SettingsPage({ user }: SettingsPageProps) {
         setFullSyncMessage('');
       } else if (result.status === 'none') {
         setPendingFullSyncRequest(null);
-        setFullSyncMessage('No pending full sync request for this device.');
+        setFullSyncMessage('No pending co-admin full sync requests.');
       } else {
         setPendingFullSyncRequest(null);
         setFullSyncMessage(result.error || 'Unable to check full sync request.');
@@ -798,8 +885,8 @@ export function SettingsPage({ user }: SettingsPageProps) {
       const result = await window.api.sync.fullSyncAdminReview(user.id, pendingFullSyncRequest.requestId, 'approve');
       if (result.status === 'approved') {
         setPendingFullSyncRequest(null);
-        setFullSyncMessage('Full sync request approved. Starting batch sync...');
-        await pullApprovedFullSyncBatches();
+        setShowFullSyncConfirmModal(true);
+        setFullSyncMessage('Request approved. Waiting for both admin confirmations.');
       } else {
         setFullSyncMessage(result.error || 'Failed to approve full sync request.');
       }
@@ -845,6 +932,52 @@ export function SettingsPage({ user }: SettingsPageProps) {
       ? (syncStatus.lastPushAt > syncStatus.lastPullAt ? syncStatus.lastPushAt : syncStatus.lastPullAt)
       : syncStatus?.lastPushAt || syncStatus?.lastPullAt || null;
   const sessionRequest = fullSyncSession?.request || null;
+  const sessionRequesterId = sessionRequest?.requestingAdminId || sessionRequest?.requestedBy || sessionRequest?.requesterUserId || null;
+  const isSessionRequester = Boolean(sessionRequesterId && sessionRequesterId === user.id);
+  const isSessionApprover = Boolean(
+    (sessionRequest?.approvingAdminId && sessionRequest.approvingAdminId === user.id) ||
+      (sessionRequest?.approvedByUserId && sessionRequest.approvedByUserId === user.id)
+  );
+  const hasRequestedSession =
+    Boolean(sessionRequest && isSessionRequester) &&
+    ['pending', 'approved', 'transferring'].includes(String(sessionRequest?.status || '').toLowerCase());
+  const fullSyncProgressPercent =
+    sessionRequest?.totalChunks && sessionRequest.totalChunks > 0
+      ? Math.min(100, Math.max(0, Math.round((sessionRequest.ackedChunks / sessionRequest.totalChunks) * 100)))
+      : Number(sessionRequest?.progressPercent || 0);
+
+  useEffect(() => {
+    if (!sessionRequest) return;
+    const status = String(sessionRequest.status || '').toLowerCase();
+    if (status !== 'approved') return;
+    const requesterNeedsConfirm = isSessionRequester && !sessionRequest.requesterConfirmedAt;
+    const approverNeedsConfirm = isSessionApprover && !sessionRequest.approverConfirmedAt;
+    if (requesterNeedsConfirm || approverNeedsConfirm) {
+      setShowFullSyncConfirmModal(true);
+    }
+  }, [sessionRequest?.requestId, sessionRequest?.status, sessionRequest?.requesterConfirmedAt, sessionRequest?.approverConfirmedAt, isSessionRequester, isSessionApprover]);
+
+  useEffect(() => {
+    if (!sessionRequest || fullSyncBusy !== null) return;
+    const status = String(sessionRequest.status || '').toLowerCase();
+    if (!sessionRequest.bothConfirmed) return;
+    if (!(status === 'approved' || status === 'transferring')) return;
+    if (fullSyncAutoInFlightRef.current) return;
+    fullSyncAutoInFlightRef.current = true;
+    void (async () => {
+      try {
+        if (isSessionApprover) {
+          await uploadApprovedFullSyncBatches(sessionRequest.requestId);
+          return;
+        }
+        if (isSessionRequester) {
+          await pullApprovedFullSyncBatches();
+        }
+      } finally {
+        fullSyncAutoInFlightRef.current = false;
+      }
+    })();
+  }, [sessionRequest?.requestId, sessionRequest?.status, sessionRequest?.bothConfirmed, isSessionApprover, isSessionRequester, fullSyncBusy]);
 
   if (!settings) {
     return (
@@ -1297,7 +1430,7 @@ export function SettingsPage({ user }: SettingsPageProps) {
                       <div>
                         <p className="font-medium text-gray-900">Controlled Full Sync (Admin Only)</p>
                         <p className="text-sm text-gray-700">
-                          Full sync approval is for new admin-device onboarding and runs in safe batches.
+                          Admin-to-admin approved full sync runs in safe chunked batches and replaces outdated records.
                         </p>
                       </div>
 
@@ -1320,22 +1453,70 @@ export function SettingsPage({ user }: SettingsPageProps) {
 
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         <button
-                          onClick={handleFullSyncCheck}
-                          disabled={fullSyncBusy !== null || !syncStatus?.configured || !fullSyncEligible}
+                          onClick={handleRequestFullSync}
+                          disabled={fullSyncBusy !== null || !syncStatus?.configured || !fullSyncEligible || hasRequestedSession}
                           className="px-4 py-2 border border-amber-300 rounded-lg hover:bg-amber-100 transition disabled:opacity-60"
                         >
-                          {fullSyncBusy === 'check' ? 'Checking...' : 'Full Sync Check'}
+                          {fullSyncBusy === 'request' ? 'Requesting...' : 'Request Full Sync'}
                         </button>
+                        {!hasRequestedSession && (
+                          <button
+                            onClick={handleFullSyncCheck}
+                            disabled={fullSyncBusy !== null || !syncStatus?.configured || !fullSyncEligible}
+                            className="px-4 py-2 border border-amber-300 rounded-lg hover:bg-amber-100 transition disabled:opacity-60"
+                          >
+                            {fullSyncBusy === 'check' ? 'Checking...' : 'Check Request'}
+                          </button>
+                        )}
                       </div>
 
+                      {hasRequestedSession && (
+                        <p className="text-sm text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-lg p-2">
+                          Waiting for co-admin approval...
+                        </p>
+                      )}
+
                       {sessionRequest && (
-                        <div className="text-sm border border-amber-200 rounded-lg p-3 bg-white">
+                        <div className="text-sm border border-amber-200 rounded-lg p-3 bg-white space-y-2">
                           <p className="font-medium text-gray-900 mb-1">Current Full Sync Session</p>
                           <p className="text-gray-700 break-all">Request ID: {sessionRequest.requestId}</p>
+                          <p className="text-gray-700">Requesting Admin: {sessionRequest.requestingAdminName || sessionRequest.requestedBy || 'Unknown'}</p>
                           <p className="text-gray-700">Status: {sessionRequest.status}</p>
                           <p className="text-gray-700">
                             Progress: {sessionRequest.ackedChunks}/{sessionRequest.totalChunks ?? '?'} batch(es)
                           </p>
+                          <div className="space-y-1">
+                            <p className="text-xs text-gray-600">Full Sync Progress</p>
+                            <div className="h-2 rounded bg-gray-200 overflow-hidden">
+                              <div className="h-full bg-indigo-600 transition-all" style={{ width: `${fullSyncProgressPercent}%` }} />
+                            </div>
+                            <p className="text-xs text-gray-700">{fullSyncProgressPercent}%</p>
+                          </div>
+                          {sessionRequest.status === 'approved' && !sessionRequest.bothConfirmed && (
+                            <p className="text-xs text-amber-700">Waiting for both admins to confirm stable internet.</p>
+                          )}
+                          {sessionRequest.bothConfirmed && (sessionRequest.status === 'approved' || sessionRequest.status === 'transferring') && (
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                              {isSessionApprover && (
+                                <button
+                                  onClick={() => void uploadApprovedFullSyncBatches(sessionRequest.requestId)}
+                                  disabled={fullSyncBusy !== null}
+                                  className="px-3 py-2 border border-indigo-300 rounded-lg hover:bg-indigo-50 disabled:opacity-60"
+                                >
+                                  Push Next Chunk(s)
+                                </button>
+                              )}
+                              {isSessionRequester && (
+                                <button
+                                  onClick={() => void pullApprovedFullSyncBatches()}
+                                  disabled={fullSyncBusy !== null}
+                                  className="px-3 py-2 border border-indigo-300 rounded-lg hover:bg-indigo-50 disabled:opacity-60"
+                                >
+                                  Pull Next Chunk(s)
+                                </button>
+                              )}
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
@@ -1483,7 +1664,10 @@ export function SettingsPage({ user }: SettingsPageProps) {
           <div className="w-full max-w-lg bg-white rounded-xl border border-gray-200 p-6 space-y-4">
             <h3 className="font-bold text-gray-900">Full Sync Request Found</h3>
             <p className="text-sm text-gray-700">
-              Requested By: {pendingFullSyncRequest.requestedBy || pendingFullSyncRequest.requesterUserId || 'Unknown'}
+              Requested By: {pendingFullSyncRequest.requestingAdminName || pendingFullSyncRequest.requestedBy || pendingFullSyncRequest.requesterUserId || 'Unknown'}
+            </p>
+            <p className="text-sm text-gray-700">
+              Request ID: {pendingFullSyncRequest.requestId}
             </p>
             <p className="text-sm text-gray-700">
               Estimated Records: {Number(pendingFullSyncRequest.estimatedRecords || 0).toLocaleString()}
@@ -1506,6 +1690,34 @@ export function SettingsPage({ user }: SettingsPageProps) {
                 className="px-3 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-60"
               >
                 Approve
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showFullSyncConfirmModal && sessionRequest && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+          <div className="w-full max-w-lg bg-white rounded-xl border border-gray-200 p-6 space-y-4">
+            <h3 className="font-bold text-gray-900">Confirm Full Sync</h3>
+            <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-3">
+              Please ensure stable internet connection. Do not close the app during full sync.
+            </p>
+            <p className="text-sm text-gray-700">Request ID: {sessionRequest.requestId}</p>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                onClick={() => void handleConfirmFullSync('cancel')}
+                disabled={fullSyncBusy !== null}
+                className="px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => void handleConfirmFullSync('confirm')}
+                disabled={fullSyncBusy !== null}
+                className="px-3 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-60"
+              >
+                Confirm
               </button>
             </div>
           </div>

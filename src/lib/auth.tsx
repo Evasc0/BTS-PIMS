@@ -82,7 +82,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           if (window.api?.sync?.fullSyncRequest) {
             const requestResult = await window.api.sync.fullSyncRequest(user.id);
             if (requestResult.status === 'requested') {
-              note += ' Full Sync request sent. Waiting for Master approval.';
+              note += ' Full Sync request sent. Waiting for co-admin approval.';
             } else if (requestResult.status === 'exists') {
               note += ' Full Sync request is already pending.';
             }
@@ -97,7 +97,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (window.api?.sync?.fullSyncRequest) {
           const requestResult = await window.api.sync.fullSyncRequest(user.id);
           if (requestResult.status === 'requested') {
-            note += ' Full Sync request sent. Waiting for Master approval.';
+            note += ' Full Sync request sent. Waiting for co-admin approval.';
           } else if (requestResult.status === 'exists') {
             note += ' Full Sync request is already pending.';
           }

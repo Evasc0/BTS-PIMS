@@ -78,6 +78,13 @@ interface SyncLocalChangesSummary {
 
 interface FullSyncRequestSummary {
   requestId: string;
+  requestingAdminId?: string | null;
+  requestingAdminName?: string | null;
+  approvingAdminId?: string | null;
+  approvingAdminName?: string | null;
+  requesterConfirmedAt?: string | null;
+  approverConfirmedAt?: string | null;
+  bothConfirmed?: boolean;
   requestingDeviceId?: string;
   targetDeviceId?: string;
   requestedBy?: string | null;
@@ -102,6 +109,7 @@ interface FullSyncRequestSummary {
   uploadedChunks: number;
   ackedChunks: number;
   nextUploadedChunkIndex: number | null;
+  progressPercent?: number;
   updatedAt: string | null;
 }
 
@@ -285,6 +293,11 @@ declare global {
         fullSyncSession: (
           userId: string
         ) => Promise<{ status: string; request?: FullSyncRequestSummary | null; nextChunk?: FullSyncChunkSummary | null; error?: string }>;
+        fullSyncConfirm: (
+          userId: string,
+          requestId: string,
+          decision?: 'confirm' | 'cancel'
+        ) => Promise<{ status: string; request?: FullSyncRequestSummary; error?: string }>;
         fullSyncPullNext: (
           userId: string
         ) => Promise<{ status: string; request?: FullSyncRequestSummary; pulledChunkIndex?: number; backupPath?: string; error?: string }>;

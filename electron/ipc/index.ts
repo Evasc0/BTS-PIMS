@@ -5,6 +5,7 @@ import { authService as importedAuthService } from '../auth/authService';
 import {
   autoPullEmployeeSubmissions,
   checkPendingFullSyncRequest,
+  confirmFullSyncRequest,
   clearSyncActorAccessToken,
   getFullSyncSession,
   getLocalChanges,
@@ -389,6 +390,12 @@ export function registerIpc(mainWindow: BrowserWindow): void {
   ipcMain.handle('sync:full:session', async (_evt, userId: string) => {
     const actor = resolveSyncActor(userId);
     return getFullSyncSession(actor);
+  });
+  ipcMain.handle('sync:full:confirm', async (_evt, userId: string, requestId: string, decision: 'confirm' | 'cancel' = 'confirm') => {
+    const actor = resolveSyncActor(userId);
+    const result = await confirmFullSyncRequest(actor, requestId, decision);
+    notify('sync_state', [`sync:${actor.userId}`]);
+    return result;
   });
   ipcMain.handle('sync:full:pull-next', async (_evt, userId: string) => {
     const actor = resolveSyncActor(userId);
