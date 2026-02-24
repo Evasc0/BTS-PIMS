@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Download, Calendar } from 'lucide-react';
 import { useLiveQuery } from '../lib/useLiveQuery';
 import type { Employee, ValueCategory } from '../lib/types';
@@ -14,6 +14,7 @@ import {
   downloadBlob,
   exportInventoryToPDF,
   exportReturnsToPDF,
+  getReturnPurposeFromCondition,
   type InventoryReportFilter,
   type ReturnPurposeFilter,
   type ReturnSubmitterFilter
@@ -66,6 +67,10 @@ export function ReportsPage({ user }: ReportsPageProps) {
   const [inventoryFilter, setInventoryFilter] = useState<InventoryReportFilter>('HV');
   const [returnsSubmitterFilter, setReturnsSubmitterFilter] = useState<ReturnSubmitterFilter>('employee');
   const [returnsPurposeFilter, setReturnsPurposeFilter] = useState<ReturnPurposeFilter>('functional');
+  const [returnsRrspFilter, setReturnsRrspFilter] = useState<string>('all');
+  const [rrspSearch, setRrspSearch] = useState('');
+  const [debouncedRrspSearch, setDebouncedRrspSearch] = useState('');
+  const [showRrspResults, setShowRrspResults] = useState(false);
   const [dateRange, setDateRange] = useState<DateRange>('month');
   const [customRange, setCustomRange] = useState<{ start: string; end: string } | null>(null);
 
@@ -101,17 +106,73 @@ export function ReportsPage({ user }: ReportsPageProps) {
     });
   }, [returns, rangeStart, rangeEnd]);
 
+  const availableAdminRrspNumbers = useMemo(() => {
+    if (returnsSubmitterFilter !== 'system_admin') return [] as string[];
+    const rrspValues = filteredReturns
+      .filter((ret) => ret.returnedByPosition === 'system_admin')
+      .filter((ret) => getReturnPurposeFromCondition(ret.condition) === returnsPurposeFilter)
+      .map((ret) => String(ret.rrspNumber || '').trim())
+      .filter((value) => value.length > 0);
+    return Array.from(new Set(rrspValues)).sort((a, b) => a.localeCompare(b));
+  }, [filteredReturns, returnsSubmitterFilter, returnsPurposeFilter]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedRrspSearch(rrspSearch.trim().toLowerCase());
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [rrspSearch]);
+
+  const searchableRrspNumbers = useMemo(() => {
+    return availableAdminRrspNumbers
+      .filter((rrspNumber) => {
+        if (!debouncedRrspSearch) return true;
+        return rrspNumber.toLowerCase().includes(debouncedRrspSearch);
+      })
+      .slice(0, 50);
+  }, [availableAdminRrspNumbers, debouncedRrspSearch]);
+
+  useEffect(() => {
+    if (returnsSubmitterFilter === 'system_admin') return;
+    setReturnsRrspFilter('all');
+    setRrspSearch('');
+    setDebouncedRrspSearch('');
+    setShowRrspResults(false);
+  }, [returnsSubmitterFilter]);
+
+  useEffect(() => {
+    if (returnsRrspFilter === 'all') return;
+    if (availableAdminRrspNumbers.includes(returnsRrspFilter)) return;
+    setReturnsRrspFilter('all');
+    setRrspSearch('');
+    setDebouncedRrspSearch('');
+  }, [availableAdminRrspNumbers, returnsRrspFilter]);
+
+  const returnsForReport = useMemo(() => {
+    if (returnsSubmitterFilter !== 'system_admin' || returnsRrspFilter === 'all') {
+      return filteredReturns;
+    }
+    return filteredReturns.filter((ret) => String(ret.rrspNumber || '').trim() === returnsRrspFilter);
+  }, [filteredReturns, returnsSubmitterFilter, returnsRrspFilter]);
+
+  const selectRrspFilter = (rrspNumber: string) => {
+    setReturnsRrspFilter(rrspNumber);
+    setRrspSearch('');
+    setDebouncedRrspSearch('');
+    setShowRrspResults(false);
+  };
+
   const returnReportRows = useMemo(
     () =>
       buildReturnReportRows(
-        filteredReturns,
+        returnsForReport,
         products || [],
         employees || [],
         returnsSubmitterFilter,
         returnsPurposeFilter,
         returns || []
       ),
-    [filteredReturns, products, employees, returns, returnsSubmitterFilter, returnsPurposeFilter]
+    [returnsForReport, products, employees, returns, returnsSubmitterFilter, returnsPurposeFilter]
   );
 
   const returnsRrspDisplay = useMemo(() => {
@@ -135,7 +196,13 @@ export function ReportsPage({ user }: ReportsPageProps) {
       return;
     }
 
-    exportReturnsToPDF(returnReportRows, returnsSubmitterFilter, returnsPurposeFilter);
+    exportReturnsToPDF(
+      returnReportRows,
+      returnsSubmitterFilter,
+      returnsPurposeFilter,
+      new Date(),
+      returnsSubmitterFilter === 'system_admin' && returnsRrspFilter !== 'all' ? returnsRrspFilter : undefined
+    );
   };
 
   const handleExportExcel = async () => {
@@ -151,7 +218,11 @@ export function ReportsPage({ user }: ReportsPageProps) {
       returnsSubmitterFilter,
       returnsPurposeFilter
     );
-    downloadBlob(blob, `returns-report-${returnsSubmitterFilter}.xlsx`);
+    const rrspFileToken =
+      returnsSubmitterFilter === 'system_admin' && returnsRrspFilter !== 'all'
+        ? `-${returnsRrspFilter.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '') || 'rrsp'}`
+        : '';
+    downloadBlob(blob, `returns-report-${returnsSubmitterFilter}${rrspFileToken}.xlsx`);
   };
 
   const handleCustomRange = () => {
@@ -191,7 +262,7 @@ export function ReportsPage({ user }: ReportsPageProps) {
           )}
         </div>
 
-        <div className="flex gap-4">
+        <div className="flex items-start gap-4">
           <select
             value={reportType}
             onChange={(e) => setReportType(e.target.value as 'inventory' | 'returns')}
@@ -236,6 +307,76 @@ export function ReportsPage({ user }: ReportsPageProps) {
                 </option>
               ))}
             </select>
+          )}
+          {reportType === 'returns' && returnsSubmitterFilter === 'system_admin' && (
+            <div className="w-[260px]">
+              {returnsRrspFilter === 'all' ? (
+                <div>
+                  <input
+                    type="text"
+                    value={rrspSearch}
+                    onChange={(e) => {
+                      setRrspSearch(e.target.value);
+                      setShowRrspResults(true);
+                    }}
+                    onFocus={() => setShowRrspResults(true)}
+                    onBlur={() => {
+                      window.setTimeout(() => setShowRrspResults(false), 120);
+                    }}
+                    placeholder="Search RRSP No..."
+                    className={`w-full px-3 py-2 border border-gray-300 focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none ${
+                      showRrspResults ? 'rounded-t-2xl rounded-b-none border-b-0' : 'rounded-2xl'
+                    }`}
+                  />
+                  {showRrspResults && (
+                    <div className="border border-indigo-200 border-t-0 rounded-b-2xl max-h-60 overflow-y-auto divide-y divide-indigo-100 bg-indigo-50 shadow-sm">
+                      <button
+                        type="button"
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() => selectRrspFilter('all')}
+                        className="w-full px-3 py-2 text-left hover:bg-indigo-100 transition"
+                      >
+                        <p className="text-sm font-medium text-gray-900">All RRSP No.</p>
+                      </button>
+                      {searchableRrspNumbers.length === 0 ? (
+                        <p className="px-3 py-3 text-sm text-indigo-700">No RRSP numbers found.</p>
+                      ) : (
+                        searchableRrspNumbers.map((rrspNumber) => (
+                          <button
+                            key={rrspNumber}
+                            type="button"
+                            onMouseDown={(event) => event.preventDefault()}
+                            onClick={() => selectRrspFilter(rrspNumber)}
+                            className="w-full px-3 py-2 text-left hover:bg-indigo-100 transition"
+                          >
+                            <p className="text-sm font-medium text-gray-900">{rrspNumber}</p>
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-xs text-indigo-700 font-semibold uppercase tracking-wide mb-1">Selected RRSP No.</p>
+                      <p className="text-sm font-semibold text-gray-900">{returnsRrspFilter}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setReturnsRrspFilter('all');
+                        setShowRrspResults(true);
+                      }}
+                      className="text-xs text-indigo-700 hover:text-indigo-800"
+                    >
+                      Change
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           )}
           <select
             value={dateRange}

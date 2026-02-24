@@ -42,6 +42,9 @@ const getComparableTimestamp = (value: string | undefined): number => {
   return Number.isFinite(parsed) ? parsed : 0;
 };
 
+const toSafeFileToken = (value: string): string =>
+  value.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '');
+
 const getReturnPurposeCheckboxText = (selectedPurpose: ReturnPurposeFilter): string => {
   return RETURN_PURPOSE_OPTIONS.map((option) => `[${option.value === selectedPurpose ? 'X' : ' '}] ${option.label}`).join('   ');
 };
@@ -525,12 +528,15 @@ export const exportReturnsToPDF = (
   rows: ReportRow[],
   submitterFilter: ReturnSubmitterFilter,
   purposeFilter: ReturnPurposeFilter,
-  reportDate: Date = new Date()
+  reportDate: Date = new Date(),
+  rrspNumber?: string
 ): void => {
   const title = submitterFilter === 'system_admin' ? 'Returns Report - Admin' : 'Returns Report - Employee';
   const fileDate = formatFileDate(reportDate);
   const doc = buildReturnsPdfDocument(title, rows, submitterFilter, purposeFilter);
-  doc.save(`Returns_Report_${submitterFilter}_${fileDate}.pdf`);
+  const rrspToken = submitterFilter === 'system_admin' && rrspNumber ? toSafeFileToken(rrspNumber.trim()) : '';
+  const fileTag = rrspToken ? `${submitterFilter}_${rrspToken}` : submitterFilter;
+  doc.save(`Returns_Report_${fileTag}_${fileDate}.pdf`);
 };
 
 export const createInventoryExcelBlob = async (
