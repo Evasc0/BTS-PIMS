@@ -108,9 +108,10 @@ export function ReportsPage({ user }: ReportsPageProps) {
         products || [],
         employees || [],
         returnsSubmitterFilter,
-        returnsPurposeFilter
+        returnsPurposeFilter,
+        returns || []
       ),
-    [filteredReturns, products, employees, returnsSubmitterFilter, returnsPurposeFilter]
+    [filteredReturns, products, employees, returns, returnsSubmitterFilter, returnsPurposeFilter]
   );
 
   const returnsRrspDisplay = useMemo(() => {

@@ -37,6 +37,11 @@ export const getReturnPurposeFromCondition = (condition: ReturnRecord['condition
   return 'others';
 };
 
+const getComparableTimestamp = (value: string | undefined): number => {
+  const parsed = Date.parse(String(value || '').trim());
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
 const getReturnPurposeCheckboxText = (selectedPurpose: ReturnPurposeFilter): string => {
   return RETURN_PURPOSE_OPTIONS.map((option) => `[${option.value === selectedPurpose ? 'X' : ' '}] ${option.label}`).join('   ');
 };
@@ -425,10 +430,55 @@ export const buildReturnReportRows = (
   products: Product[],
   employees: Employee[],
   submitterFilter: ReturnSubmitterFilter,
-  purposeFilter: ReturnPurposeFilter
+  purposeFilter: ReturnPurposeFilter,
+  allReturns: ReturnRecord[] = returns
 ): ReportRow[] => {
   const productMap = new Map(products.map((product) => [product.id, product]));
   const employeeMap = new Map(employees.map((employee) => [employee.id, employee]));
+  const employeeReturnsByProduct = new Map<string, ReturnRecord[]>();
+
+  allReturns
+    .filter((record) => record.returnedByPosition === 'employee')
+    .forEach((record) => {
+      const list = employeeReturnsByProduct.get(record.productId) || [];
+      list.push(record);
+      employeeReturnsByProduct.set(record.productId, list);
+    });
+
+  employeeReturnsByProduct.forEach((records) => {
+    records.sort(
+      (a, b) =>
+        getComparableTimestamp(b.createdAt || b.returnDate) -
+        getComparableTimestamp(a.createdAt || a.returnDate)
+    );
+  });
+
+  const pickBestSourceRecord = (records: ReturnRecord[]): ReturnRecord | undefined => {
+    return (
+      records.find((candidate) => candidate.status === 'approved') ||
+      records.find((candidate) => candidate.status !== 'rejected') ||
+      records[0]
+    );
+  };
+
+  const resolveActualUserId = (record: ReturnRecord): string => {
+    if (record.returnedByPosition !== 'system_admin') return record.returnedByEmployeeId;
+
+    const candidates = employeeReturnsByProduct.get(record.productId) || [];
+    if (!candidates.length) return record.returnedByEmployeeId;
+
+    const adminRecordTs = getComparableTimestamp(record.createdAt || record.returnDate);
+    const beforeOrSameTs = candidates.filter(
+      (candidate) =>
+        getComparableTimestamp(candidate.createdAt || candidate.returnDate) <= adminRecordTs
+    );
+    const matchedBeforeOrSame = pickBestSourceRecord(beforeOrSameTs);
+    if (matchedBeforeOrSame?.returnedByEmployeeId) return matchedBeforeOrSame.returnedByEmployeeId;
+
+    const fallback = pickBestSourceRecord(candidates);
+    return fallback?.returnedByEmployeeId || record.returnedByEmployeeId;
+  };
+
   return returns
     .filter((record) => record.returnedByPosition === submitterFilter)
     .filter((record) => getReturnPurposeFromCondition(record.condition) === purposeFilter)
@@ -448,7 +498,7 @@ export const buildReturnReportRows = (
         description: [article, descriptionText].filter(Boolean).join('\n'),
         propertyOrIcs,
         dateAcquired: product?.date ? formatDate(product.date) : '',
-        actualUser: employeeMap.get(record.returnedByEmployeeId)?.fullName || '',
+        actualUser: employeeMap.get(resolveActualUserId(record))?.fullName || '',
         unitValue,
         totalValue,
         rrspNumber: record.rrspNumber,
