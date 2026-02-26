@@ -27,6 +27,7 @@ const readEnvMs = (key: string, fallback: number, min = 1000): number => {
 const REALTIME_SYNC_POLL_MS = readEnvMs('VITE_SYNC_REALTIME_POLL_MS', 10000, 5000);
 const IDLE_SYNC_AFTER_MS = readEnvMs('VITE_SYNC_IDLE_AFTER_MS', 5 * 60 * 1000, 60000);
 const IDLE_SYNC_POLL_MS = readEnvMs('VITE_SYNC_IDLE_POLL_MS', 30000, 5000);
+const ADMIN_SUBMISSION_PULL_MS = readEnvMs('VITE_SYNC_ADMIN_SUBMISSION_POLL_MS', 30000, 5000);
 const parseDateMs = (value?: string): number | null => {
   if (!value) return null;
   const parsed = Date.parse(value);
@@ -50,6 +51,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const lastActivityAtRef = useRef(Date.now());
   const idleSyncRef = useRef(false);
   const modeTransitionInFlightRef = useRef(false);
+  const lastAdminSubmissionPullAtRef = useRef(0);
 
   const autoPullAssignedUpdates = async (
     user: Employee,
@@ -222,9 +224,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
       }
 
-      if (window.api.sync.autoPullEmployeeSubmissions) {
+      const nowMs = Date.now();
+      const shouldPullEmployeeSubmissions = nowMs - lastAdminSubmissionPullAtRef.current >= ADMIN_SUBMISSION_PULL_MS;
+      if (window.api.sync.autoPullEmployeeSubmissions && shouldPullEmployeeSubmissions) {
         try {
           await window.api.sync.autoPullEmployeeSubmissions(user.id);
+          lastAdminSubmissionPullAtRef.current = nowMs;
         } catch (error: any) {
           lastStepError = error?.message || 'Automatic employee-submission pull failed.';
         }

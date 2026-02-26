@@ -45,6 +45,8 @@ const SYNC_RETENTION_RPC_COOLDOWN_MS = Math.max(
   5 * 60 * 1000,
   Number(process.env.SYNC_RETENTION_RPC_COOLDOWN_MS || 4 * 60 * 60 * 1000)
 );
+const SYNC_PRESENCE_HEARTBEAT_MS = Math.max(30 * 1000, Number(process.env.SYNC_PRESENCE_HEARTBEAT_MS || 2 * 60 * 1000));
+const SYNC_RELAY_STATS_POLL_MS = Math.max(30 * 1000, Number(process.env.SYNC_RELAY_STATS_POLL_MS || 2 * 60 * 1000));
 const SYNC_ORPHAN_OBJECT_RETENTION_DAYS = Math.max(1, Number(process.env.SYNC_ORPHAN_OBJECT_RETENTION_DAYS || 2));
 const SYNC_ORPHAN_OBJECT_CLEANUP_LIMIT = Math.max(100, Number(process.env.SYNC_ORPHAN_OBJECT_CLEANUP_LIMIT || 1000));
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
@@ -360,6 +362,21 @@ const withActorToken = async <T>(actor: SyncActor, task: () => Promise<T>): Prom
 };
 
 const stateIdForActor = (actor: SyncActor): string => `sync:${actor.userId}`;
+const isActorIntervalDue = (
+  tracker: Map<string, number>,
+  actor: SyncActor,
+  intervalMs: number,
+  force = false
+): boolean => {
+  const nowMs = Date.now();
+  const actorKey = stateIdForActor(actor);
+  if (!force) {
+    const lastAt = tracker.get(actorKey) || 0;
+    if (nowMs - lastAt < intervalMs) return false;
+  }
+  tracker.set(actorKey, nowMs);
+  return true;
+};
 
 const canAdminSync = (actor: SyncActor): boolean => actor.role === 'system_admin';
 const canEmployeePull = (actor: SyncActor): boolean => actor.role === 'employee';
@@ -506,6 +523,8 @@ const buildDeviceFingerprint = (): string => {
 
 let syncSchemaEnsured = false;
 let lastRetentionCleanupAtMs = 0;
+const lastPresenceHeartbeatAtByActor = new Map<string, number>();
+const lastRelayStatsPollAtByActor = new Map<string, number>();
 
 const getTableColumns = (db: Database.Database, tableName: string): Set<string> => {
   const rows = db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name?: string }>;
@@ -1352,6 +1371,16 @@ const touchActorPresence = async (db: Database.Database, actor: SyncActor, origi
   }
 };
 
+const touchActorPresenceIfDue = async (
+  db: Database.Database,
+  actor: SyncActor,
+  options?: { force?: boolean; originUserId?: string | null }
+): Promise<void> => {
+  const force = Boolean(options?.force);
+  if (!isActorIntervalDue(lastPresenceHeartbeatAtByActor, actor, SYNC_PRESENCE_HEARTBEAT_MS, force)) return;
+  await touchActorPresence(db, actor, options?.originUserId);
+};
+
 const fetchEmployeePresenceMap = async (employeeIds: string[]): Promise<Map<string, AppUserPresenceRow>> => {
   const uniqueIds = Array.from(new Set(employeeIds.map((value) => String(value || '').trim()).filter(Boolean)));
   if (!uniqueIds.length) return new Map<string, AppUserPresenceRow>();
@@ -1904,42 +1933,6 @@ const fetchProfileImageQueueRows = async (
   return rows;
 };
 
-const hasProfileImageQueueRows = async (
-  actor: SyncActor,
-  excludeOriginDeviceId: string | null,
-  sinceTimestamp: string | null = null
-): Promise<boolean> => {
-  const params = new URLSearchParams();
-  params.set('select', 'id,employee_id,origin_device_id,updated_at,created_at');
-  params.set('order', 'updated_at.asc,id.asc');
-  params.set('limit', '1');
-  if (sinceTimestamp) {
-    params.set('updated_at', `gt.${sinceTimestamp}`);
-  }
-  if (!canAdminSync(actor)) {
-    params.set('employee_id', `eq.${actor.userId}`);
-  }
-  if (excludeOriginDeviceId) {
-    params.set('or', `(origin_device_id.is.null,origin_device_id.neq.${excludeOriginDeviceId})`);
-  }
-
-  let response: Response;
-  try {
-    response = await supabaseRequest(`${getProfileQueueTable()}?${params.toString()}`, { method: 'GET' });
-  } catch (error: any) {
-    const message = String(error?.message || '').toLowerCase();
-    if (!message.includes('updated_at')) throw error;
-    params.delete('updated_at');
-    if (sinceTimestamp) {
-      params.set('created_at', `gt.${sinceTimestamp}`);
-    }
-    params.set('order', 'created_at.asc,id.asc');
-    response = await supabaseRequest(`${getProfileQueueTable()}?${params.toString()}`, { method: 'GET' });
-  }
-  const rows = (await response.json()) as ProfileImageQueueRow[];
-  return Array.isArray(rows) && rows.length > 0;
-};
-
 const getProfileImageUpdatedAtCandidate = (value: unknown): string | null => {
   const candidate = String(value ?? '').trim();
   if (!candidate) return null;
@@ -1959,9 +1952,6 @@ const pullProfileImageRelayChanges = async (
   currentDeviceId: string,
   sinceTimestamp: string | null = null
 ): Promise<{ pulled: number; skipped: number; latestSeenAt: string | null }> => {
-  const hasRows = await hasProfileImageQueueRows(actor, currentDeviceId, sinceTimestamp);
-  if (!hasRows) return { pulled: 0, skipped: 0, latestSeenAt: sinceTimestamp };
-
   const rows = await fetchProfileImageQueueRows(actor, currentDeviceId, sinceTimestamp);
   if (!rows.length) return { pulled: 0, skipped: 0, latestSeenAt: sinceTimestamp };
 
@@ -2080,6 +2070,18 @@ const fetchRelayUsageStats = async (): Promise<RelayUsageStats | null> => {
     return parseRelayUsageStats(payload);
   } catch {
     return null;
+  }
+};
+
+const refreshRelayUsageSnapshotIfDue = async (
+  db: Database.Database,
+  actor: SyncActor,
+  force = false
+): Promise<void> => {
+  if (!isActorIntervalDue(lastRelayStatsPollAtByActor, actor, SYNC_RELAY_STATS_POLL_MS, force)) return;
+  const relayUsage = await fetchRelayUsageStats();
+  if (relayUsage) {
+    persistRelayUsageSnapshot(db, actor, relayUsage, readSyncState(db, actor).last_warning);
   }
 };
 
@@ -4807,29 +4809,6 @@ const pullAdminChanges = async (
   conflictStrategy: ConflictStrategy,
   currentDeviceId: string
 ) => {
-  const hasRows = await hasRemoteQueueRows(getAdminQueueTable(), state.last_pull_at, EMPLOYEE_ID_NULL_FILTER, currentDeviceId);
-  if (!hasRows) {
-    const message = 'No new remote records available.';
-    const syncedAt = nowIso();
-    writeSyncState(db, actor, {
-      last_status: 'online',
-      last_error: null,
-      last_pull_count: 0,
-      last_conflict_count: 0,
-      last_successful_sync_at: syncedAt,
-      last_auto_sync_at: syncedAt,
-      device_registered_at: state.device_registered_at || syncedAt,
-      full_sync_required: 0,
-      full_sync_reason: null
-    });
-    return {
-      status: 'idle',
-      pulledCount: 0,
-      conflictCount: 0,
-      conflicts: [] as ConflictRecord[],
-      message
-    };
-  }
   const rows = await fetchAllRemoteQueueRows(getAdminQueueTable(), state.last_pull_at, EMPLOYEE_ID_NULL_FILTER, currentDeviceId);
   if (!rows.length) {
     const message = 'No new remote records available.';
@@ -4998,29 +4977,6 @@ const pullEmployeeAssignedChanges = async (
   conflictStrategy: ConflictStrategy,
   currentDeviceId: string
 ) => {
-  const hasRows = await hasRemoteQueueRows(getAdminQueueTable(), state.last_pull_at, actor.userId, currentDeviceId);
-  if (!hasRows) {
-    const message = 'No new remote records available.';
-    const syncedAt = nowIso();
-    writeSyncState(db, actor, {
-      last_status: 'online',
-      last_error: null,
-      last_pull_count: 0,
-      last_conflict_count: 0,
-      last_successful_sync_at: syncedAt,
-      last_auto_sync_at: syncedAt,
-      device_registered_at: state.device_registered_at || syncedAt,
-      full_sync_required: 0,
-      full_sync_reason: null
-    });
-    return {
-      status: 'idle',
-      pulledCount: 0,
-      conflictCount: 0,
-      conflicts: [] as ConflictRecord[],
-      message
-    };
-  }
   const rows = await fetchAllRemoteQueueRows(getAdminQueueTable(), state.last_pull_at, actor.userId, currentDeviceId);
   if (!rows.length) {
     const message = 'No new remote records available.';
@@ -5238,23 +5194,6 @@ const pullEmployeeSubmissionsForAdmin = async (
   currentDeviceId: string
 ) => {
   const sinceTimestamp = state.last_employee_submission_pull_at;
-  const hasRows = await hasRemoteQueueRows(getEmployeeQueueTable(), sinceTimestamp, null, currentDeviceId);
-  if (!hasRows) {
-    const syncedAt = nowIso();
-    writeSyncState(db, actor, {
-      last_successful_sync_at: syncedAt,
-      last_auto_sync_at: syncedAt,
-      device_registered_at: state.device_registered_at || syncedAt,
-      last_status: 'online',
-      last_error: null
-    });
-    return {
-      status: 'idle' as const,
-      pulledCount: 0,
-      conflictCount: 0,
-      conflicts: [] as ConflictRecord[]
-    };
-  }
   const rows = await fetchAllRemoteQueueRows(getEmployeeQueueTable(), sinceTimestamp, null, currentDeviceId);
   if (!rows.length) {
     const syncedAt = nowIso();
@@ -5496,11 +5435,9 @@ export async function pullRemoteChanges(actor: SyncActor, conflictStrategy: Conf
             message: `${actor.role} pulled ${profileImageResult.pulled} profile image update(s).`
           });
         }
-        await touchActorPresence(db, actor);
-        const relayUsage = await fetchRelayUsageStats();
-        if (relayUsage) {
-          persistRelayUsageSnapshot(db, actor, relayUsage, readSyncState(db, actor).last_warning);
-        }
+        const hasSyncActivity = result.pulledCount > 0 || result.conflictCount > 0 || profileImageResult.pulled > 0;
+        await touchActorPresenceIfDue(db, actor, { force: hasSyncActivity });
+        await refreshRelayUsageSnapshotIfDue(db, actor, hasSyncActivity);
       }
 
       return {
@@ -5590,11 +5527,9 @@ export async function autoPullEmployeeSubmissions(actor: SyncActor) {
             message: `System admin pulled ${profileImageResult.pulled} employee profile image update(s).`
           });
         }
-        await touchActorPresence(db, actor);
-        const relayUsage = await fetchRelayUsageStats();
-        if (relayUsage) {
-          persistRelayUsageSnapshot(db, actor, relayUsage, readSyncState(db, actor).last_warning);
-        }
+        const hasSyncActivity = result.pulledCount > 0 || result.conflictCount > 0 || profileImageResult.pulled > 0;
+        await touchActorPresenceIfDue(db, actor, { force: hasSyncActivity });
+        await refreshRelayUsageSnapshotIfDue(db, actor, hasSyncActivity);
       }
       return {
         ...result,
