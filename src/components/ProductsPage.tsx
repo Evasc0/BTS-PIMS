@@ -13,7 +13,7 @@ import {
 import { useLiveQuery } from '../lib/useLiveQuery';
 import type { Employee, Product, ProductStatus, ValueCategory } from '../lib/types';
 import { db } from '../lib/db';
-import { createId, formatCurrency, toNumber } from '../lib/utils';
+import { createId, formatCurrency, formatDate, toNumber } from '../lib/utils';
 import { logActivity } from '../lib/activity';
 
 interface ProductsPageProps {
@@ -445,7 +445,7 @@ export function ProductsPage({ user }: ProductsPageProps) {
                   </div>
                 </td>
                 <td className="px-6 py-4 text-sm text-gray-600 border-r border-gray-200">{product.description}</td>
-                <td className="px-6 py-4 text-sm text-gray-600 border-r border-gray-200">{product.date}</td>
+                <td className="px-6 py-4 text-sm text-gray-600 border-r border-gray-200">{formatDate(product.date)}</td>
                 <td className="px-6 py-4 text-sm text-gray-600 border-r border-gray-200">{product.parControlNumber}</td>
                 <td className="px-6 py-4 text-sm text-gray-600 border-r border-gray-200">{product.propertyNumber}</td>
                 <td className="px-6 py-4 text-sm text-gray-600 border-r border-gray-200">{product.unit}</td>

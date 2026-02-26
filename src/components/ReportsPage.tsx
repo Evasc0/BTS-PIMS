@@ -26,11 +26,67 @@ interface ReportsPageProps {
 
 type DateRange = 'week' | 'month' | 'quarter' | 'year' | 'custom';
 
-const getRangeStart = (range: DateRange, customStart?: string) => {
-  if (range === 'custom' && customStart) {
-    return new Date(customStart);
+const DATE_ONLY_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+const parseSystemDate = (value: string | undefined): Date | null => {
+  const safeValue = String(value || '').trim();
+  if (!safeValue) return null;
+
+  const dateOnlyMatch = DATE_ONLY_PATTERN.exec(safeValue);
+  if (dateOnlyMatch) {
+    const year = Number(dateOnlyMatch[1]);
+    const month = Number(dateOnlyMatch[2]);
+    const day = Number(dateOnlyMatch[3]);
+    const date = new Date(year, month - 1, day);
+    if (date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day) {
+      return date;
+    }
+    return null;
   }
+
+  const parsed = new Date(safeValue);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+const startOfDay = (date: Date): Date =>
+  new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0);
+
+const endOfDay = (date: Date): Date =>
+  new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999);
+
+const toDateInputValue = (date: Date): string => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+const getDefaultCustomRange = (): { start: string; end: string } => {
+  const end = new Date();
+  const start = new Date(end);
+  start.setMonth(end.getMonth() - 1);
+  return {
+    start: toDateInputValue(start),
+    end: toDateInputValue(end)
+  };
+};
+
+const getRangeBounds = (
+  range: DateRange,
+  customRange: { start: string; end: string } | null
+): { start: Date; end: Date } => {
   const now = new Date();
+  const end = endOfDay(now);
+
+  if (range === 'custom') {
+    const customStartDate = parseSystemDate(customRange?.start);
+    const customEndDate = parseSystemDate(customRange?.end);
+    return {
+      start: startOfDay(customStartDate || now),
+      end: endOfDay(customEndDate || now)
+    };
+  }
+
   const start = new Date(now);
   switch (range) {
     case 'week':
@@ -48,7 +104,7 @@ const getRangeStart = (range: DateRange, customStart?: string) => {
     default:
       start.setMonth(now.getMonth() - 1);
   }
-  return start;
+  return { start: startOfDay(start), end };
 };
 
 const getInventoryControlHeader = (inventoryFilter: InventoryReportFilter) =>
@@ -84,12 +140,15 @@ export function ReportsPage({ user }: ReportsPageProps) {
     return map;
   }, [employees]);
 
-  const rangeStart = getRangeStart(dateRange, customRange?.start);
-  const rangeEnd = customRange?.end ? new Date(customRange.end) : new Date();
+  const { start: rangeStart, end: rangeEnd } = useMemo(
+    () => getRangeBounds(dateRange, customRange),
+    [dateRange, customRange]
+  );
 
   const filteredProducts = useMemo(() => {
     return (products || []).filter((product) => {
-      const date = new Date(product.date);
+      const date = parseSystemDate(product.date);
+      if (!date) return false;
       return date >= rangeStart && date <= rangeEnd;
     });
   }, [products, rangeStart, rangeEnd]);
@@ -101,7 +160,8 @@ export function ReportsPage({ user }: ReportsPageProps) {
 
   const filteredReturns = useMemo(() => {
     return (returns || []).filter((ret) => {
-      const date = new Date(ret.returnDate);
+      const date = parseSystemDate(ret.returnDate);
+      if (!date) return false;
       return date >= rangeStart && date <= rangeEnd;
     });
   }, [returns, rangeStart, rangeEnd]);
@@ -225,13 +285,34 @@ export function ReportsPage({ user }: ReportsPageProps) {
     downloadBlob(blob, `returns-report-${returnsSubmitterFilter}${rrspFileToken}.xlsx`);
   };
 
+  const handleDateRangeChange = (nextRange: DateRange) => {
+    setDateRange(nextRange);
+    if (nextRange === 'custom') {
+      setCustomRange((previous) => previous || getDefaultCustomRange());
+    }
+  };
+
+  const handleCustomRangeFieldChange = (field: 'start' | 'end', value: string) => {
+    setCustomRange((previous) => {
+      const base = previous || getDefaultCustomRange();
+      const next = { ...base, [field]: value.trim() };
+      const parsedStart = parseSystemDate(next.start);
+      const parsedEnd = parseSystemDate(next.end);
+
+      if (parsedStart && parsedEnd && parsedStart.getTime() > parsedEnd.getTime()) {
+        if (field === 'start') {
+          next.end = next.start;
+        } else {
+          next.start = next.end;
+        }
+      }
+
+      return next;
+    });
+  };
+
   const handleCustomRange = () => {
-    const start = window.prompt('Enter start date (YYYY-MM-DD):', customRange?.start || '');
-    if (!start) return;
-    const end = window.prompt('Enter end date (YYYY-MM-DD):', customRange?.end || '');
-    if (!end) return;
-    setCustomRange({ start, end });
-    setDateRange('custom');
+    handleDateRangeChange('custom');
   };
 
   return (
@@ -380,7 +461,7 @@ export function ReportsPage({ user }: ReportsPageProps) {
           )}
           <select
             value={dateRange}
-            onChange={(e) => setDateRange(e.target.value as DateRange)}
+            onChange={(e) => handleDateRangeChange(e.target.value as DateRange)}
             className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
           >
             <option value="week">Last Week</option>
@@ -396,6 +477,25 @@ export function ReportsPage({ user }: ReportsPageProps) {
             <Calendar className="w-5 h-5" />
             Custom Range
           </button>
+          {dateRange === 'custom' && (
+            <div className="flex items-center gap-2 rounded-lg border border-gray-300 px-3 py-2">
+              <input
+                type="date"
+                value={customRange?.start || ''}
+                max={customRange?.end || undefined}
+                onChange={(e) => handleCustomRangeFieldChange('start', e.target.value)}
+                className="border border-gray-300 rounded-md px-2 py-1 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
+              />
+              <span className="text-sm text-gray-500">to</span>
+              <input
+                type="date"
+                value={customRange?.end || ''}
+                min={customRange?.start || undefined}
+                onChange={(e) => handleCustomRangeFieldChange('end', e.target.value)}
+                className="border border-gray-300 rounded-md px-2 py-1 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
+              />
+            </div>
+          )}
         </div>
       </div>
 

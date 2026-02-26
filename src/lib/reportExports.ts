@@ -2,7 +2,6 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import ExcelJS from 'exceljs';
 import type { Employee, Product, ReturnRecord } from './types';
-import { formatCurrency, formatDate } from './utils';
 
 type ReportColumn = {
   key: string;
@@ -49,49 +48,88 @@ const getReturnPurposeCheckboxText = (selectedPurpose: ReturnPurposeFilter): str
   return RETURN_PURPOSE_OPTIONS.map((option) => `[${option.value === selectedPurpose ? 'X' : ' '}] ${option.label}`).join('   ');
 };
 
-const PDF_MARGINS = { top: 56, left: 24, right: 24, bottom: 24 };
+const PDF_MARGINS = { top: 56, left: 14, right: 14, bottom: 24 };
 const PDF_TITLE_Y = 32;
 const PDF_FONT_SIZE = 9;
 const PDF_HEADER_FONT_SIZE = 9;
 const PDF_PAGE_NUMBER_FONT_SIZE = 8;
+const LONG_BOND_WIDTH_PT = 13 * 72;
+const LONG_BOND_HEIGHT_PT = 8.5 * 72;
+// Excel supports Folio (8.5x13) as code 14, but this exceljs version does not include it in PaperSize enum.
+const EXCEL_LONG_BOND_PAPER_SIZE = 14 as unknown as ExcelJS.PaperSize;
+const EXCEL_HEADER_FILL = 'FFE6E6E6';
+const EXCEL_DEFAULT_ROW_HEIGHT = 20;
+const EXCEL_HEADER_ROW_HEIGHT = 24;
+const EXCEL_HEADING_ROW_HEIGHT = 20;
+const EXCEL_TARGET_TOTAL_COLUMN_WIDTH = 165;
+const EXCEL_PAGE_MARGINS = {
+  left: 0.15,
+  right: 0.15,
+  top: 0.45,
+  bottom: 0.45,
+  header: 0.2,
+  footer: 0.2
+};
+const EXCEL_GRID_BORDER = {
+  top: { style: 'thin', color: { argb: 'FFBDBDBD' } },
+  left: { style: 'thin', color: { argb: 'FFBDBDBD' } },
+  bottom: { style: 'thin', color: { argb: 'FFBDBDBD' } },
+  right: { style: 'thin', color: { argb: 'FFBDBDBD' } }
+} as const;
 const NUMBER_FORMAT = new Intl.NumberFormat('en-US');
+const EXPORT_CURRENCY_FORMAT = new Intl.NumberFormat('en-US', {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2
+});
+const EXPORT_DATE_FORMAT = new Intl.DateTimeFormat('en-US', {
+  month: 'long',
+  day: 'numeric',
+  year: 'numeric'
+});
+
+const formatExportDate = (value: string): string => {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return EXPORT_DATE_FORMAT.format(date);
+};
 
 const getInventoryColumns = (inventoryFilter: InventoryReportFilter): ReportColumn[] => {
   const controlHeader = inventoryFilter === 'PPEIR' ? 'ICS CONTROL NO.' : 'PAR CONTROL NO.';
   const assetHeader = inventoryFilter === 'PPEIR' ? 'INVENTORY NO.' : 'PROPERTY NO.';
 
   return [
-    { key: 'article', header: 'ARTICLE', align: 'left', pdfWidth: 56, excelWidth: 16 },
-    { key: 'description', header: 'DESCRIPTION', align: 'left', pdfWidth: 132, excelWidth: 36 },
-    { key: 'dateAcquired', header: 'DATE ACQUIRED', align: 'center', pdfWidth: 62, excelWidth: 14 },
-    { key: 'controlNumber', header: controlHeader, align: 'left', pdfWidth: 72, excelWidth: 20 },
-    { key: 'assetNumber', header: assetHeader, align: 'left', pdfWidth: 72, excelWidth: 20 },
-    { key: 'uom', header: 'UOM', align: 'left', pdfWidth: 36, excelWidth: 10 },
-    { key: 'unitCost', header: 'UNIT COST', align: 'right', pdfWidth: 58, excelWidth: 14, format: 'currency' },
-    { key: 'qty', header: 'QTY', align: 'right', pdfWidth: 38, excelWidth: 10, format: 'number' },
-    { key: 'totalAmount', header: 'TOTAL AMOUNT', align: 'right', pdfWidth: 64, excelWidth: 16, format: 'currency' },
-    { key: 'location', header: 'LOCATION', align: 'left', pdfWidth: 58, excelWidth: 16 },
-    { key: 'actualUser', header: 'ACTUAL USER', align: 'left', pdfWidth: 76, excelWidth: 22 },
-    { key: 'remarks', header: 'REMARKS', align: 'left', pdfWidth: 72, excelWidth: 24 }
+    { key: 'article', header: 'ARTICLE', align: 'left', pdfWidth: 56, excelWidth: 10 },
+    { key: 'description', header: 'DESCRIPTION', align: 'left', pdfWidth: 132, excelWidth: 24 },
+    { key: 'dateAcquired', header: 'DATE ACQUIRED', align: 'center', pdfWidth: 62, excelWidth: 12 },
+    { key: 'controlNumber', header: controlHeader, align: 'left', pdfWidth: 72, excelWidth: 14 },
+    { key: 'assetNumber', header: assetHeader, align: 'left', pdfWidth: 72, excelWidth: 14 },
+    { key: 'uom', header: 'UOM', align: 'left', pdfWidth: 36, excelWidth: 7 },
+    { key: 'unitCost', header: 'UNIT COST', align: 'right', pdfWidth: 58, excelWidth: 11, format: 'currency' },
+    { key: 'qty', header: 'QTY', align: 'right', pdfWidth: 38, excelWidth: 7, format: 'number' },
+    { key: 'totalAmount', header: 'TOTAL AMOUNT', align: 'right', pdfWidth: 64, excelWidth: 12, format: 'currency' },
+    { key: 'location', header: 'LOCATION', align: 'left', pdfWidth: 58, excelWidth: 10 },
+    { key: 'actualUser', header: 'ACTUAL USER', align: 'left', pdfWidth: 76, excelWidth: 14 },
+    { key: 'remarks', header: 'REMARKS', align: 'left', pdfWidth: 72, excelWidth: 14 }
   ];
 };
 
 const returnsColumns: ReportColumn[] = [
-  { key: 'no', header: 'NO.', align: 'center', pdfWidth: 36, excelWidth: 7, format: 'number' },
-  { key: 'qty', header: 'QTY.', align: 'right', pdfWidth: 44, excelWidth: 9, format: 'number' },
-  { key: 'unit', header: 'UNIT', align: 'left', pdfWidth: 48, excelWidth: 10 },
-  { key: 'description', header: 'DESCRIPTION', align: 'left', pdfWidth: 200, excelWidth: 40 },
-  { key: 'propertyOrIcs', header: 'PROPERTY No./ICS CONTROL No.', align: 'left', pdfWidth: 130, excelWidth: 28 },
-  { key: 'dateAcquired', header: 'Date Acquired', align: 'center', pdfWidth: 82, excelWidth: 14 },
-  { key: 'actualUser', header: 'Actual User', align: 'left', pdfWidth: 118, excelWidth: 24 },
-  { key: 'unitValue', header: 'UNIT VALUE', align: 'right', pdfWidth: 84, excelWidth: 16, format: 'currency' },
-  { key: 'totalValue', header: 'TOTAL VALUE', align: 'right', pdfWidth: 84, excelWidth: 16, format: 'currency' }
+  { key: 'no', header: 'NO.', align: 'center', pdfWidth: 36, excelWidth: 6, format: 'number' },
+  { key: 'qty', header: 'QTY.', align: 'right', pdfWidth: 44, excelWidth: 7, format: 'number' },
+  { key: 'unit', header: 'UNIT', align: 'left', pdfWidth: 48, excelWidth: 8 },
+  { key: 'description', header: 'DESCRIPTION', align: 'left', pdfWidth: 200, excelWidth: 24 },
+  { key: 'propertyOrIcs', header: 'PROPERTY No./ICS CONTROL No.', align: 'left', pdfWidth: 130, excelWidth: 18 },
+  { key: 'dateAcquired', header: 'Date Acquired', align: 'center', pdfWidth: 82, excelWidth: 12 },
+  { key: 'actualUser', header: 'Actual User', align: 'left', pdfWidth: 118, excelWidth: 16 },
+  { key: 'unitValue', header: 'UNIT VALUE', align: 'right', pdfWidth: 84, excelWidth: 12, format: 'currency' },
+  { key: 'totalValue', header: 'TOTAL VALUE', align: 'right', pdfWidth: 84, excelWidth: 12, format: 'currency' }
 ];
 
 const formatPdfValue = (value: ReportRow[string], column: ReportColumn): string => {
   if (value === null || value === undefined) return '';
   if (column.format === 'currency' && typeof value === 'number') {
-    return formatCurrency(value);
+    return EXPORT_CURRENCY_FORMAT.format(value);
   }
   if (column.format === 'number' && typeof value === 'number') {
     return NUMBER_FORMAT.format(value);
@@ -99,23 +137,100 @@ const formatPdfValue = (value: ReportRow[string], column: ReportColumn): string 
   return String(value);
 };
 
+const buildPdfColumnStyles = (
+  columns: ReportColumn[],
+  maxTableWidth: number
+): Record<number, { cellWidth: number; halign: 'left' | 'right' | 'center' }> => {
+  const totalRequestedWidth = columns.reduce((sum, column) => sum + column.pdfWidth, 0);
+  const fitRatio = totalRequestedWidth > 0 ? maxTableWidth / totalRequestedWidth : 1;
+
+  return columns.reduce<Record<number, { cellWidth: number; halign: 'left' | 'right' | 'center' }>>(
+    (styles, column, index) => {
+      styles[index] = {
+        cellWidth: Number((column.pdfWidth * fitRatio).toFixed(2)),
+        halign: column.align
+      };
+      return styles;
+    },
+    {}
+  );
+};
+
+const fitExcelColumnsToPage = (
+  columns: ReportColumn[],
+  targetTotalWidth: number = EXCEL_TARGET_TOTAL_COLUMN_WIDTH
+): ReportColumn[] => {
+  const baseTotalWidth = columns.reduce((sum, column) => sum + column.excelWidth, 0);
+  if (baseTotalWidth <= 0) return columns;
+
+  const ratio = targetTotalWidth / baseTotalWidth;
+  return columns.map((column) => ({
+    ...column,
+    excelWidth: Number((column.excelWidth * ratio).toFixed(2))
+  }));
+};
+
+const configureExcelPageSetup = (sheet: ExcelJS.Worksheet): void => {
+  sheet.pageSetup = {
+    orientation: 'landscape',
+    paperSize: EXCEL_LONG_BOND_PAPER_SIZE,
+    fitToPage: true,
+    fitToWidth: 1,
+    fitToHeight: 0,
+    margins: EXCEL_PAGE_MARGINS
+  };
+  sheet.properties.defaultRowHeight = EXCEL_DEFAULT_ROW_HEIGHT;
+};
+
+const getExcelColumnLetter = (columnNumber: number): string => {
+  let current = columnNumber;
+  let columnLabel = '';
+
+  while (current > 0) {
+    const remainder = (current - 1) % 26;
+    columnLabel = String.fromCharCode(65 + remainder) + columnLabel;
+    current = Math.floor((current - 1) / 26);
+  }
+
+  return columnLabel || 'A';
+};
+
+const applyExcelBorders = (
+  sheet: ExcelJS.Worksheet,
+  startRow: number,
+  endRow: number,
+  columnCount: number
+): void => {
+  for (let rowNumber = startRow; rowNumber <= endRow; rowNumber += 1) {
+    for (let columnNumber = 1; columnNumber <= columnCount; columnNumber += 1) {
+      sheet.getCell(rowNumber, columnNumber).border = EXCEL_GRID_BORDER;
+    }
+  }
+};
+
+const applyExcelPrintLayout = (
+  sheet: ExcelJS.Worksheet,
+  startRow: number,
+  endRow: number,
+  columnCount: number,
+  repeatingHeaderRow: number
+): void => {
+  const lastColumnLabel = getExcelColumnLetter(columnCount);
+  sheet.pageSetup.printArea = `A${startRow}:${lastColumnLabel}${endRow}`;
+  sheet.pageSetup.printTitlesRow = `${repeatingHeaderRow}:${repeatingHeaderRow}`;
+};
+
 const buildPdfDocument = (title: string, columns: ReportColumn[], rows: ReportRow[]): jsPDF => {
   const doc = new jsPDF({
     orientation: 'landscape',
     unit: 'pt',
-    format: 'a4'
+    format: [LONG_BOND_HEIGHT_PT, LONG_BOND_WIDTH_PT]
   });
 
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
-  const columnStyles: Record<number, { cellWidth: number; halign: 'left' | 'right' | 'center' }> = {};
-
-  columns.forEach((column, index) => {
-    columnStyles[index] = {
-      cellWidth: column.pdfWidth,
-      halign: column.align
-    };
-  });
+  const availableTableWidth = pageWidth - PDF_MARGINS.left - PDF_MARGINS.right;
+  const columnStyles = buildPdfColumnStyles(columns, availableTableWidth);
 
   autoTable(doc, {
     startY: PDF_MARGINS.top,
@@ -123,6 +238,7 @@ const buildPdfDocument = (title: string, columns: ReportColumn[], rows: ReportRo
     head: [columns.map((column) => column.header)],
     body: rows.map((row) => columns.map((column) => formatPdfValue(row[column.key], column))),
     theme: 'grid',
+    tableWidth: availableTableWidth,
     styles: {
       fontSize: PDF_FONT_SIZE,
       cellPadding: 3,
@@ -165,19 +281,13 @@ const buildReturnsPdfDocument = (
   const doc = new jsPDF({
     orientation: 'landscape',
     unit: 'pt',
-    format: 'a4'
+    format: [LONG_BOND_HEIGHT_PT, LONG_BOND_WIDTH_PT]
   });
 
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
-  const columnStyles: Record<number, { cellWidth: number; halign: 'left' | 'right' | 'center' }> = {};
-
-  returnsColumns.forEach((column, index) => {
-    columnStyles[index] = {
-      cellWidth: column.pdfWidth,
-      halign: column.align
-    };
-  });
+  const availableTableWidth = pageWidth - PDF_MARGINS.left - PDF_MARGINS.right;
+  const columnStyles = buildPdfColumnStyles(returnsColumns, availableTableWidth);
 
   const rrspNumbers = Array.from(
     new Set(
@@ -194,6 +304,7 @@ const buildReturnsPdfDocument = (
     head: [returnsColumns.map((column) => column.header)],
     body: rows.map((row) => returnsColumns.map((column) => formatPdfValue(row[column.key], column))),
     theme: 'grid',
+    tableWidth: availableTableWidth,
     styles: {
       fontSize: 8.5,
       cellPadding: 3,
@@ -250,10 +361,11 @@ const buildExcelBlob = async (title: string, columns: ReportColumn[], rows: Repo
   workbook.creator = 'BTS Inventory Management System';
   workbook.created = new Date();
 
+  const printableColumns = fitExcelColumnsToPage(columns);
   const sheet = workbook.addWorksheet(title, { views: [{ state: 'frozen', ySplit: 1 }] });
-  sheet.pageSetup = { orientation: 'landscape' };
+  configureExcelPageSetup(sheet);
 
-  sheet.columns = columns.map((column) => ({
+  sheet.columns = printableColumns.map((column) => ({
     header: column.header,
     key: column.key,
     width: column.excelWidth
@@ -263,18 +375,11 @@ const buildExcelBlob = async (title: string, columns: ReportColumn[], rows: Repo
     sheet.addRow(row);
   });
 
-  const borderStyle = {
-    top: { style: 'thin', color: { argb: 'FFBDBDBD' } },
-    left: { style: 'thin', color: { argb: 'FFBDBDBD' } },
-    bottom: { style: 'thin', color: { argb: 'FFBDBDBD' } },
-    right: { style: 'thin', color: { argb: 'FFBDBDBD' } }
-  } as const;
-
-  columns.forEach((column, index) => {
+  printableColumns.forEach((column, index) => {
     const excelColumn = sheet.getColumn(index + 1);
     excelColumn.alignment = { vertical: 'top', horizontal: column.align, wrapText: true };
     if (column.format === 'currency') {
-      excelColumn.numFmt = '"PHP" #,##0.00';
+      excelColumn.numFmt = '#,##0.00';
     }
     if (column.format === 'number') {
       excelColumn.numFmt = '#,##0';
@@ -282,19 +387,20 @@ const buildExcelBlob = async (title: string, columns: ReportColumn[], rows: Repo
   });
 
   const headerRow = sheet.getRow(1);
+  headerRow.height = EXCEL_HEADER_ROW_HEIGHT;
   headerRow.font = { bold: true };
   headerRow.eachCell((cell, colNumber) => {
-    const column = columns[colNumber - 1];
-    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE6E6E6' } };
-    cell.alignment = { vertical: 'middle', horizontal: column.align, wrapText: true };
-    cell.border = borderStyle;
+    const column = printableColumns[colNumber - 1];
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: EXCEL_HEADER_FILL } };
+    cell.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
   });
 
-  sheet.eachRow((row) => {
-    row.eachCell({ includeEmpty: true }, (cell) => {
-      cell.border = borderStyle;
-    });
-  });
+  const lastRowNumber = Math.max(sheet.lastRow?.number || 1, 1);
+  for (let rowNumber = 2; rowNumber <= lastRowNumber; rowNumber += 1) {
+    sheet.getRow(rowNumber).height = EXCEL_DEFAULT_ROW_HEIGHT;
+  }
+  applyExcelBorders(sheet, 1, lastRowNumber, printableColumns.length);
+  applyExcelPrintLayout(sheet, 1, lastRowNumber, printableColumns.length, 1);
 
   const buffer = await workbook.xlsx.writeBuffer();
   return new Blob([buffer], {
@@ -312,10 +418,11 @@ const buildReturnsExcelBlob = async (
   workbook.creator = 'BTS Inventory Management System';
   workbook.created = new Date();
 
+  const printableColumns = fitExcelColumnsToPage(returnsColumns);
   const ySplit = submitterFilter === 'system_admin' ? 6 : 5;
   const sheet = workbook.addWorksheet(title, { views: [{ state: 'frozen', ySplit }] });
-  sheet.pageSetup = { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0 };
-  sheet.columns = returnsColumns.map((column) => ({
+  configureExcelPageSetup(sheet);
+  sheet.columns = printableColumns.map((column) => ({
     key: column.key,
     width: column.excelWidth
   }));
@@ -332,77 +439,85 @@ const buildReturnsExcelBlob = async (
   sheet.mergeCells('A1:I1');
   sheet.getCell('A1').value = title;
   sheet.getCell('A1').font = { bold: true, size: 12 };
-  sheet.getCell('A1').alignment = { vertical: 'middle', horizontal: 'center' };
+  sheet.getCell('A1').alignment = { vertical: 'middle', horizontal: 'left' };
+  sheet.getRow(1).height = EXCEL_HEADING_ROW_HEIGHT;
 
   sheet.mergeCells('A2:I2');
   sheet.getCell('A2').value = 'Section/Dept.: PGO-BTS';
   sheet.getCell('A2').font = { bold: true };
   sheet.getCell('A2').alignment = { vertical: 'middle', horizontal: 'left' };
+  sheet.getRow(2).height = EXCEL_HEADING_ROW_HEIGHT;
 
   let tableHeaderRowNumber = 5;
   if (submitterFilter === 'system_admin') {
     sheet.mergeCells('A3:I3');
     sheet.getCell('A3').value = `RRSP No.: ${rrspLabel}`;
     sheet.getCell('A3').alignment = { vertical: 'middle', horizontal: 'left' };
+    sheet.getRow(3).height = EXCEL_HEADING_ROW_HEIGHT;
     sheet.mergeCells('A4:I4');
     sheet.getCell('A4').value = `PURPOSE: ${getReturnPurposeCheckboxText(purposeFilter)}`;
     sheet.getCell('A4').alignment = { vertical: 'middle', horizontal: 'left' };
+    sheet.getRow(4).height = EXCEL_HEADING_ROW_HEIGHT;
     tableHeaderRowNumber = 6;
   } else {
     sheet.mergeCells('A3:I3');
     sheet.getCell('A3').value = `PURPOSE: ${getReturnPurposeCheckboxText(purposeFilter)}`;
     sheet.getCell('A3').alignment = { vertical: 'middle', horizontal: 'left' };
+    sheet.getRow(3).height = EXCEL_HEADING_ROW_HEIGHT;
   }
 
   for (let current = 4; current < tableHeaderRowNumber; current += 1) {
     if (submitterFilter === 'system_admin' && current === 4) continue;
     sheet.mergeCells(`A${current}:I${current}`);
     sheet.getCell(`A${current}`).value = '';
+    sheet.getRow(current).height = 10;
   }
 
-  const headerValues = returnsColumns.map((column) => column.header);
+  const headerValues = printableColumns.map((column) => column.header);
   const headerRow = sheet.insertRow(tableHeaderRowNumber, headerValues);
   rows.forEach((row) => {
     sheet.addRow(row);
   });
 
-  const borderStyle = {
-    top: { style: 'thin', color: { argb: 'FFBDBDBD' } },
-    left: { style: 'thin', color: { argb: 'FFBDBDBD' } },
-    bottom: { style: 'thin', color: { argb: 'FFBDBDBD' } },
-    right: { style: 'thin', color: { argb: 'FFBDBDBD' } }
-  } as const;
-
-  returnsColumns.forEach((column, index) => {
+  printableColumns.forEach((column, index) => {
     const excelColumn = sheet.getColumn(index + 1);
     excelColumn.alignment = {
       vertical: 'top',
       horizontal: column.align,
-      wrapText: column.key === 'description'
+      wrapText: true
     };
     if (column.format === 'currency') {
-      excelColumn.numFmt = '"PHP" #,##0.00';
+      excelColumn.numFmt = '#,##0.00';
     }
     if (column.format === 'number') {
       excelColumn.numFmt = '#,##0';
     }
   });
 
+  // Re-apply merged heading alignment after column alignment so headers stay left-aligned.
+  sheet.getCell('A1').alignment = { vertical: 'middle', horizontal: 'left' };
+  sheet.getCell('A2').alignment = { vertical: 'middle', horizontal: 'left' };
+  if (submitterFilter === 'system_admin') {
+    sheet.getCell('A3').alignment = { vertical: 'middle', horizontal: 'left' };
+    sheet.getCell('A4').alignment = { vertical: 'middle', horizontal: 'left' };
+  } else {
+    sheet.getCell('A3').alignment = { vertical: 'middle', horizontal: 'left' };
+  }
+
   headerRow.font = { bold: true };
+  headerRow.height = EXCEL_HEADER_ROW_HEIGHT;
   headerRow.eachCell((cell, colNumber) => {
-    const column = returnsColumns[colNumber - 1];
-    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE6E6E6' } };
-    cell.alignment = { vertical: 'middle', horizontal: column.align, wrapText: true };
-    cell.border = borderStyle;
+    const column = printableColumns[colNumber - 1];
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: EXCEL_HEADER_FILL } };
+    cell.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
   });
 
   const lastRow = sheet.lastRow?.number || tableHeaderRowNumber;
-  for (let rowNumber = tableHeaderRowNumber; rowNumber <= lastRow; rowNumber += 1) {
-    const row = sheet.getRow(rowNumber);
-    row.eachCell({ includeEmpty: true }, (cell) => {
-      cell.border = borderStyle;
-    });
+  for (let rowNumber = tableHeaderRowNumber + 1; rowNumber <= lastRow; rowNumber += 1) {
+    sheet.getRow(rowNumber).height = EXCEL_DEFAULT_ROW_HEIGHT;
   }
+  applyExcelBorders(sheet, tableHeaderRowNumber, lastRow, printableColumns.length);
+  applyExcelPrintLayout(sheet, 1, lastRow, printableColumns.length, tableHeaderRowNumber);
 
   const buffer = await workbook.xlsx.writeBuffer();
   return new Blob([buffer], {
@@ -415,7 +530,7 @@ export const buildInventoryReportRows = (products: Product[], employees: Employe
   return products.map((product) => ({
     article: product.article,
     description: product.description,
-    dateAcquired: formatDate(product.date),
+    dateAcquired: formatExportDate(product.date),
     controlNumber: product.parControlNumber,
     assetNumber: product.propertyNumber,
     uom: product.unit,
@@ -500,7 +615,7 @@ export const buildReturnReportRows = (
         unit: product?.unit || '',
         description: [article, descriptionText].filter(Boolean).join('\n'),
         propertyOrIcs,
-        dateAcquired: product?.date ? formatDate(product.date) : '',
+        dateAcquired: product?.date ? formatExportDate(product.date) : '',
         actualUser: employeeMap.get(resolveActualUserId(record))?.fullName || '',
         unitValue,
         totalValue,

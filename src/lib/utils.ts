@@ -18,11 +18,17 @@ export const formatCurrency = (value: number): string => {
   return `PHP ${formatted}`;
 };
 
+const DATE_FORMAT = new Intl.DateTimeFormat('en-US', {
+  month: 'long',
+  day: 'numeric',
+  year: 'numeric'
+});
+
 export const formatDate = (value: string): string => {
   if (!value) return '';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '';
-  return date.toLocaleDateString();
+  return DATE_FORMAT.format(date);
 };
 
 export const toNumber = (value: string | number): number => {
