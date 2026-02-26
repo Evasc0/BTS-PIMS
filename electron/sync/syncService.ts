@@ -2547,14 +2547,16 @@ const fetchPendingFullSyncRequestForTargetDevice = async (deviceId: string): Pro
   return rows[0] || null;
 };
 
-const fetchPendingFullSyncRequestForApprover = async (actorUserId: string): Promise<FullSyncRequestRow | null> => {
+const fetchPendingFullSyncRequestForApprover = async (
+  actorUserId: string,
+  actorDeviceId: string
+): Promise<FullSyncRequestRow | null> => {
   const rows = await fetchFullSyncRequests((params) => {
     params.set('status', 'eq.pending');
-    params.set('requested_by', `neq.${actorUserId}`);
     params.set('order', 'requested_at.asc');
-    params.set('limit', '1');
+    params.set('limit', '50');
   });
-  return rows[0] || null;
+  return rows.find((request) => !isFullSyncRequester(request, actorUserId, actorDeviceId)) || null;
 };
 
 const fetchAnyActiveFullSyncRequest = async (): Promise<FullSyncRequestRow | null> => {
@@ -3026,11 +3028,39 @@ const getActorDisplayName = (db: Database.Database, employeeId: string | null | 
   return String(row?.email || '').trim() || id;
 };
 
-const isFullSyncRequester = (request: FullSyncRequestRow, actorUserId: string): boolean =>
-  String(request.requested_by || request.requester_user_id || '').trim() === String(actorUserId || '').trim();
+const normalizeIdentityValue = (value: unknown): string => String(value || '').trim();
 
-const isFullSyncApprover = (request: FullSyncRequestRow, actorUserId: string): boolean =>
-  String(request.approved_by_user_id || request.approving_admin_id || '').trim() === String(actorUserId || '').trim();
+const fullSyncRequesterUserId = (request: FullSyncRequestRow): string =>
+  normalizeIdentityValue(request.requested_by || request.requester_user_id || request.requesting_admin_id);
+
+const fullSyncRequesterDeviceId = (request: FullSyncRequestRow): string =>
+  normalizeIdentityValue(request.requester_device_id || request.requesting_device_id || request.target_device_id);
+
+const fullSyncApproverUserId = (request: FullSyncRequestRow): string =>
+  normalizeIdentityValue(request.approved_by_user_id || request.approving_admin_id);
+
+const fullSyncApproverDeviceId = (request: FullSyncRequestRow): string =>
+  normalizeIdentityValue(request.target_device_id);
+
+function isFullSyncRequester(request: FullSyncRequestRow, actorUserId: string, actorDeviceId?: string | null): boolean {
+  const requesterUserId = fullSyncRequesterUserId(request);
+  const requesterDeviceId = fullSyncRequesterDeviceId(request);
+  const actorUser = normalizeIdentityValue(actorUserId);
+  const actorDevice = normalizeIdentityValue(actorDeviceId);
+  if (!requesterUserId || requesterUserId !== actorUser) return false;
+  if (requesterDeviceId && actorDevice) return requesterDeviceId === actorDevice;
+  return true;
+}
+
+function isFullSyncApprover(request: FullSyncRequestRow, actorUserId: string, actorDeviceId?: string | null): boolean {
+  const approverUserId = fullSyncApproverUserId(request);
+  const approverDeviceId = fullSyncApproverDeviceId(request);
+  const actorUser = normalizeIdentityValue(actorUserId);
+  const actorDevice = normalizeIdentityValue(actorDeviceId);
+  if (!approverUserId || approverUserId !== actorUser) return false;
+  if (approverDeviceId && actorDevice) return approverDeviceId === actorDevice;
+  return true;
+}
 
 const hasBothFullSyncConfirmations = (request: FullSyncRequestRow): boolean =>
   Boolean(request.requester_confirmed_at && request.approver_confirmed_at);
@@ -5606,6 +5636,7 @@ export async function syncNow(actor: SyncActor) {
 
 export async function checkPendingFullSyncRequest(actor: SyncActor) {
   return withActorToken(actor, async () => {
+    const db = dataStore.getDb();
     if (!canAdminSync(actor)) {
       return { status: 'forbidden', error: 'Only system admin accounts can check full sync requests.' };
     }
@@ -5618,7 +5649,8 @@ export async function checkPendingFullSyncRequest(actor: SyncActor) {
     }
 
     try {
-      const request = await fetchPendingFullSyncRequestForApprover(actor.userId);
+      const deviceId = getLocalDeviceId(db);
+      const request = await fetchPendingFullSyncRequestForApprover(actor.userId, deviceId);
       if (!request) {
         return { status: 'none', request: null };
       }
@@ -5814,6 +5846,7 @@ export async function reviewFullSyncRequest(
 ) {
   return withActorToken(actor, async () => {
     const db = dataStore.getDb();
+    const deviceId = getLocalDeviceId(db);
 
     if (!canAdminSync(actor)) {
       return { status: 'forbidden', error: 'Only system admin accounts can approve/reject full sync requests.' };
@@ -5832,8 +5865,8 @@ export async function reviewFullSyncRequest(
       if (!request) {
         return { status: 'not_found', error: 'Full sync request was not found.' };
       }
-      if (isFullSyncRequester(request, actor.userId)) {
-        return { status: 'forbidden', error: 'Another admin must approve this full sync request.' };
+      if (isFullSyncRequester(request, actor.userId, deviceId)) {
+        return { status: 'forbidden', error: 'A different admin device must approve this full sync request.' };
       }
       if (request.status !== 'pending' && decision === 'approve') {
         return { status: 'invalid_state', error: `Request is in ${request.status} state.` };
@@ -5847,6 +5880,7 @@ export async function reviewFullSyncRequest(
           approving_admin_name: approverName,
           approved_at: nowIso(),
           approved_by_user_id: actor.userId,
+          target_device_id: deviceId,
           requester_confirmed_at: null,
           approver_confirmed_at: null,
           rejected_at: null,
@@ -5901,6 +5935,7 @@ export async function confirmFullSyncRequest(actor: SyncActor, requestId: string
     }
 
     const state = readSyncState(db, actor);
+    const deviceId = getLocalDeviceId(db);
     if (!state.online_mode) {
       return { status: 'offline', error: 'Sync is offline. Enable Online mode before confirming full sync.' };
     }
@@ -5911,8 +5946,8 @@ export async function confirmFullSyncRequest(actor: SyncActor, requestId: string
         return { status: 'not_found', error: 'Full sync request was not found.' };
       }
 
-      const isRequester = isFullSyncRequester(request, actor.userId);
-      const isApprover = isFullSyncApprover(request, actor.userId);
+      const isRequester = isFullSyncRequester(request, actor.userId, deviceId);
+      const isApprover = isFullSyncApprover(request, actor.userId, deviceId);
       if (!isRequester && !isApprover) {
         return { status: 'forbidden', error: 'Only the requester and approving admin can confirm this full sync.' };
       }
@@ -5967,6 +6002,7 @@ export async function confirmFullSyncRequest(actor: SyncActor, requestId: string
 export async function uploadNextFullSyncChunk(actor: SyncActor, requestId: string) {
   return withActorToken(actor, async () => {
     const db = dataStore.getDb();
+    const deviceId = getLocalDeviceId(db);
 
     if (!canAdminSync(actor)) {
       return { status: 'forbidden', error: 'Only system admin accounts can upload full sync chunks.' };
@@ -5984,8 +6020,8 @@ export async function uploadNextFullSyncChunk(actor: SyncActor, requestId: strin
       if (!request) {
         return { status: 'not_found', error: 'Full sync request was not found.' };
       }
-      if (!isFullSyncApprover(request, actor.userId)) {
-        return { status: 'forbidden', error: 'Only the approving admin can push full sync chunks.' };
+      if (!isFullSyncApprover(request, actor.userId, deviceId)) {
+        return { status: 'forbidden', error: 'Only the approving admin device can push full sync chunks.' };
       }
 
       if (!(request.status === 'approved' || request.status === 'transferring')) {
@@ -6113,8 +6149,8 @@ export async function pullNextFullSyncChunk(actor: SyncActor) {
       if (!request) {
         return { status: 'idle', error: 'No active full sync request for this device.' };
       }
-      if (!isFullSyncRequester(request, actor.userId)) {
-        return { status: 'forbidden', error: 'Only the requesting admin can pull full sync chunks.' };
+      if (!isFullSyncRequester(request, actor.userId, deviceId)) {
+        return { status: 'forbidden', error: 'Only the requesting admin device can pull full sync chunks.' };
       }
 
       if (request.status === 'pending') {

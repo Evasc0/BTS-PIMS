@@ -833,7 +833,13 @@ export function SettingsPage({ user }: SettingsPageProps) {
       await loadFullSyncData();
       const activeRequest = result.request || fullSyncSession?.request;
       if (!activeRequest) return;
-      if (activeRequest.approvingAdminId === user.id || activeRequest.approvedByUserId === user.id) {
+      const localDeviceId = String(syncStatus?.deviceId || '').trim();
+      const approverDeviceId = String(activeRequest.targetDeviceId || '').trim();
+      const actingAsApprover =
+        localDeviceId && approverDeviceId
+          ? localDeviceId === approverDeviceId
+          : activeRequest.approvingAdminId === user.id || activeRequest.approvedByUserId === user.id;
+      if (actingAsApprover) {
         await uploadApprovedFullSyncBatches(activeRequest.requestId);
       } else {
         await pullApprovedFullSyncBatches();
@@ -931,12 +937,20 @@ export function SettingsPage({ user }: SettingsPageProps) {
     syncStatus?.lastPushAt && syncStatus?.lastPullAt
       ? (syncStatus.lastPushAt > syncStatus.lastPullAt ? syncStatus.lastPushAt : syncStatus.lastPullAt)
       : syncStatus?.lastPushAt || syncStatus?.lastPullAt || null;
+  const localDeviceId = String(syncStatus?.deviceId || '').trim();
   const sessionRequest = fullSyncSession?.request || null;
   const sessionRequesterId = sessionRequest?.requestingAdminId || sessionRequest?.requestedBy || sessionRequest?.requesterUserId || null;
-  const isSessionRequester = Boolean(sessionRequesterId && sessionRequesterId === user.id);
+  const sessionRequesterDeviceId = String(sessionRequest?.requesterDeviceId || sessionRequest?.requestingDeviceId || '').trim();
+  const sessionApproverId = sessionRequest?.approvingAdminId || sessionRequest?.approvedByUserId || null;
+  const sessionApproverDeviceId = String(sessionRequest?.targetDeviceId || '').trim();
+  const isSessionRequester = Boolean(
+    sessionRequest &&
+      (localDeviceId && sessionRequesterDeviceId ? localDeviceId === sessionRequesterDeviceId : sessionRequesterId && sessionRequesterId === user.id)
+  );
   const isSessionApprover = Boolean(
-    (sessionRequest?.approvingAdminId && sessionRequest.approvingAdminId === user.id) ||
-      (sessionRequest?.approvedByUserId && sessionRequest.approvedByUserId === user.id)
+    sessionRequest &&
+      sessionApproverId &&
+      (localDeviceId && sessionApproverDeviceId ? localDeviceId === sessionApproverDeviceId : sessionApproverId === user.id)
   );
   const hasRequestedSession =
     Boolean(sessionRequest && isSessionRequester) &&
