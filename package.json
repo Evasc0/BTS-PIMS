@@ -101,7 +101,8 @@
                   {
                         "provider": "github",
                         "owner": "Evasc0",
-                        "repo": "BTS-PIMS"
+                        "repo": "BTS-PIMS",
+                        "releaseType": "release"
                   }
             ]
       }
