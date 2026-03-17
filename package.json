@@ -1,6 +1,6 @@
 {
       "name": "bts-inventory-management-system",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "private": true,
       "main": "dist-electron/main.js",
       "productName": "BTS Inventory Management System",
@@ -78,6 +78,7 @@
             "start": "electron .",
             "pack": "npm run build && electron-builder --dir",
             "dist:local": "npm run build && electron-builder --publish never --config.win.signAndEditExecutable=false",
+            "dist:publish": "npm run build && electron-builder --publish always --config.win.signAndEditExecutable=false",
             "dist": "npm run build && electron-builder",
             "postinstall": "electron-builder install-app-deps"
       },
