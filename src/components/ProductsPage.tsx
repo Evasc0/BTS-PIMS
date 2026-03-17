@@ -53,8 +53,92 @@ const emptyFormState: ProductFormState = {
 };
 
 const valueOptions: ValueCategory[] = ['HV', 'MV', 'LV'];
-const articleOptions = ['Desktop', 'Chair', 'Table'];
-const unitOptions = ['pcs', 'set', 'box', 'unit', 'pack'];
+const articleOptions = [
+  'PAPER TRIMMER CUTTER MACHINE',
+  'WHITE BOARD',
+  'WHITEBOARD WITH STAND',
+  'BOARD',
+  'BLACK BOARD',
+  'CORK BOARD',
+  'SIGNATURE PAD',
+  'PRINTER',
+  'DESKTOP COMPUTER',
+  'LAPTOP COMPUTER',
+  'SERVER',
+  'SYSTEM UNIT',
+  'MONITOR',
+  'UPS (UNINTERRUPTED POWER SUPPLY)',
+  'KEYBOARD',
+  'MOUSE',
+  'SPEAKER',
+  'OPTICAL DISK DRIVE',
+  'PROJECTOR',
+  'CELLULAR PHONE',
+  'CAMERA',
+  'CAMERA WITH KIT LENS',
+  'PHOTOCOPIER MACHINE',
+  'CCTV (CLOSE-CIRCUIT TELEVISION)',
+  'CALCULATOR',
+  'FLASH DRIVE',
+  'HARD DISK DRIVE',
+  'FILE TRAY',
+  'STAMP (RUBBER)',
+  'DATER',
+  'DRY SEAL',
+  'TAPE DISPENSER',
+  'LAMINATOR',
+  'PUNCHER',
+  'STAPLER',
+  'STAPLE WIRE REMOVER',
+  'SCISSOR',
+  'RULER',
+  'I.D CUTTER',
+  'GUN TACKER',
+  'TABLE',
+  'OFFICE TABLE',
+  'CHAIR',
+  'CABINET',
+  'GORILLA RACK',
+  'FLOOR MAT',
+  'STOOL',
+  'FAN',
+  'WATER DISPENSER',
+  'SINK',
+  'MOP',
+  'LADDER',
+  'RICE COOKER',
+  'PERCOLATOR',
+  'LPG TANK',
+  'SUGGESTION BOX',
+  'SEWING MACHINE',
+  'EMBROIDERY MACHINE',
+  'HEAT PRESS MACHINE',
+  'WELDING MACHINE',
+  'OXY-ACETYLENE CUTTING OUTFIT',
+  'METAL CUTTER',
+  'BENCH VISE',
+  'FIRE EXTINGUISHER',
+  'POWER AMPLIFIER',
+  'HARD HAT',
+  'GLOVES',
+  'SHOVEL',
+  'RAKE WITH HANDLE',
+  'HAND TROWEL',
+  'PIPE WRENCH',
+  'BOLO',
+  'KITCHEN KNIFE',
+  'WATER SPRINKLER',
+  'WEIGHING SCALE',
+  'STAINLESS MIXING BOWL',
+  'ROUND CAKE PAN',
+  'STAINLESS SERVING TRAY',
+  'STAINLESS DRY MEASURING CUP',
+  'MEASURING SPOON',
+  'STAINLESS WIRE WHISK',
+  'HIGH HEAT SPATULA / RUBBER SCRAPER',
+  'TEXTBOOKS AND INSTRUCTIONAL MATERIAL'
+];
+const unitOptions = ['pc', 'set', 'box', 'unit', 'pack'];
 
 const getControlNumberLabel = (valueCategory: ValueCategory | '') => {
   if (valueCategory === 'HV' || valueCategory === 'LV') return 'ICS Control Number';
@@ -118,14 +202,49 @@ export function ProductsPage({ user }: ProductsPageProps) {
   const controlNumberLabel = getControlNumberLabel(formState.valueCategory);
   const assetNumberLabel = getAssetNumberLabel(formState.valueCategory);
 
-  const editArticleOptions = useMemo(() => {
-    const options = [...articleOptions];
-    const current = formState.article.trim();
-    if (current && !options.some((option) => option.toLowerCase() === current.toLowerCase())) {
-      options.unshift(current);
-    }
+  const availableArticleOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const options: string[] = [];
+
+    const addOption = (value: string) => {
+      const trimmed = value.trim();
+      if (!trimmed) return;
+      const key = trimmed.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      options.push(trimmed);
+    };
+
+    articleOptions.forEach(addOption);
+    (products || []).forEach((product: Product) => addOption(product.article));
+
     return options;
-  }, [formState.article]);
+  }, [products]);
+
+  const articleSuggestions = useMemo(() => {
+    const current = formState.article.trim();
+    if (!current) return availableArticleOptions;
+
+    const query = current.toLowerCase();
+    const startsWithMatches: string[] = [];
+    const includesMatches: string[] = [];
+
+    availableArticleOptions.forEach((article) => {
+      const lowerArticle = article.toLowerCase();
+      if (lowerArticle.startsWith(query)) {
+        startsWithMatches.push(article);
+      } else if (lowerArticle.includes(query)) {
+        includesMatches.push(article);
+      }
+    });
+
+    const combinedMatches = [...startsWithMatches, ...includesMatches];
+    if (!combinedMatches.some((article) => article.toLowerCase() === query)) {
+      combinedMatches.unshift(current);
+    }
+
+    return combinedMatches;
+  }, [availableArticleOptions, formState.article]);
 
   const filteredProducts = (products || [])
     .filter((product: Product) => {
@@ -531,7 +650,7 @@ export function ProductsPage({ user }: ProductsPageProps) {
             className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
           >
             <option value="all">All Articles</option>
-            {articleOptions.map((article) => (
+            {availableArticleOptions.map((article) => (
               <option key={article} value={article}>
                 {article}
               </option>
@@ -573,7 +692,7 @@ export function ProductsPage({ user }: ProductsPageProps) {
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-xl max-w-3xl w-full p-6 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-6">
-              <h2 className="font-bold text-gray-900">Add New Product</h2>
+              <h2 className="font-bold text-gray-900">Add New Property</h2>
               <button onClick={() => setShowAddModal(false)} className="p-2 hover:bg-gray-100 rounded-lg">
                 <X className="w-5 h-5" />
               </button>
@@ -599,19 +718,20 @@ export function ProductsPage({ user }: ProductsPageProps) {
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">Article *</label>
-                  <select
+                  <input
+                    type="text"
+                    list="article-options-add"
                     value={formState.article}
                     onChange={(e) => setFormState({ ...formState, article: e.target.value })}
+                    placeholder="Search or type a new article"
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
                     required
-                  >
-                    <option value="">Select article</option>
-                    {articleOptions.map((article) => (
-                      <option key={article} value={article}>
-                        {article}
-                      </option>
+                  />
+                  <datalist id="article-options-add">
+                    {articleSuggestions.map((article) => (
+                      <option key={`add-${article}`} value={article} />
                     ))}
-                  </select>
+                  </datalist>
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">Date *</label>
@@ -804,19 +924,20 @@ export function ProductsPage({ user }: ProductsPageProps) {
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">Article *</label>
-                  <select
+                  <input
+                    type="text"
+                    list="article-options-edit"
                     value={formState.article}
                     onChange={(e) => setFormState({ ...formState, article: e.target.value })}
+                    placeholder="Search or type a new article"
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
                     required
-                  >
-                    <option value="">Select article</option>
-                    {editArticleOptions.map((article) => (
-                      <option key={article} value={article}>
-                        {article}
-                      </option>
+                  />
+                  <datalist id="article-options-edit">
+                    {articleSuggestions.map((article) => (
+                      <option key={`edit-${article}`} value={article} />
                     ))}
-                  </select>
+                  </datalist>
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">Date *</label>
