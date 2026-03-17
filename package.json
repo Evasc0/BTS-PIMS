@@ -65,6 +65,7 @@
             "electron": "^31.6.0",
             "electron-builder": "^24.13.3",
             "png-to-ico": "^3.0.1",
+            "rcedit": "^4.0.1",
             "sharp": "^0.34.5",
             "typescript": "^5.5.4",
             "vite": "6.3.5",
@@ -102,6 +103,7 @@
                   }
             ],
             "asar": true,
+            "afterPack": "scripts/after-pack.js",
             "win": {
                   "icon": "build/icon.ico"
             },
