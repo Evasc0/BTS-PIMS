@@ -95,8 +95,8 @@
             "publish": [
                   {
                         "provider": "github",
-                        "owner": "YOUR_GITHUB_ORG",
-                        "repo": "YOUR_REPO"
+                        "owner": "Evasc0",
+                        "repo": "BTS-PIMS"
                   }
             ]
       }
