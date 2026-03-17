@@ -1,4 +1,5 @@
 import { app, BrowserWindow } from 'electron';
+import fs from 'fs';
 import path from 'path';
 import { registerIpc } from './ipc';
 import { setupAutoUpdate } from './update/updater';
@@ -7,12 +8,13 @@ import { loadLocalEnv } from './env';
 loadLocalEnv();
 
 const createMainWindow = () => {
-  const appIcon = path.join(app.getAppPath(), 'build', 'LOGO.png');
+  const iconCandidates = [path.join(app.getAppPath(), 'build', 'icon.png'), path.join(app.getAppPath(), 'build', 'LOGO.png')];
+  const appIcon = iconCandidates.find((candidate) => fs.existsSync(candidate));
   const mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
     show: false,
-    icon: appIcon,
+    ...(appIcon ? { icon: appIcon } : {}),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
