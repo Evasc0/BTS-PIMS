@@ -1,10 +1,5 @@
 import type { ActivityLog, Employee, Product, ReturnRecord, SystemSettings } from './types';
 
-export const DEFAULT_ADMIN_CREDENTIALS = {
-  email: 'btsadmin@gmail.com',
-  password: 'btsadmin123'
-};
-
 type TableApi<T> = {
   list: () => Promise<T[]>;
   get: (id: string) => Promise<T | undefined>;

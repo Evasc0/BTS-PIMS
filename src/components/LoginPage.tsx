@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
-import { Eye, EyeOff, LogIn, Shield, UserCircle } from 'lucide-react';
+import { Eye, EyeOff, LogIn } from 'lucide-react';
 import { useAuth } from '../lib/auth';
-import { DEFAULT_ADMIN_CREDENTIALS } from '../lib/db';
 
 interface LoginPageProps {
   initError: string | null;
@@ -21,11 +20,6 @@ export function LoginPage({ initError }: LoginPageProps) {
     if (!result.success) {
       setError(result.error || 'Unable to sign in.');
     }
-  };
-
-  const fillDefaultAdmin = () => {
-    setEmail(DEFAULT_ADMIN_CREDENTIALS.email);
-    setPassword(DEFAULT_ADMIN_CREDENTIALS.password);
   };
 
   return (
@@ -99,32 +93,6 @@ export function LoginPage({ initError }: LoginPageProps) {
               Sign In
             </button>
           </form>
-
-          <div className="mt-8 pt-8 border-t border-gray-200">
-            <p className="text-sm text-gray-600 text-center mb-4">First Run System Admin Credentials</p>
-            <div className="space-y-3 text-sm text-gray-700">
-              <div className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2">
-                <span>Email</span>
-                <span className="font-medium">{DEFAULT_ADMIN_CREDENTIALS.email}</span>
-              </div>
-              <div className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2">
-                <span>Password</span>
-                <span className="font-medium">{DEFAULT_ADMIN_CREDENTIALS.password}</span>
-              </div>
-              <button
-                type="button"
-                onClick={fillDefaultAdmin}
-                className="w-full px-4 py-2 bg-indigo-50 text-indigo-700 rounded-lg hover:bg-indigo-100 transition font-medium text-sm flex items-center justify-center gap-2"
-              >
-                <Shield className="w-4 h-4" />
-                Use Default System Admin
-              </button>
-              <div className="flex items-center gap-2 text-xs text-gray-500">
-                <UserCircle className="w-4 h-4" />
-                Update these credentials after first login.
-              </div>
-            </div>
-          </div>
         </div>
       </div>
     </div>
