@@ -108,10 +108,10 @@ const getRangeBounds = (
 };
 
 const getInventoryControlHeader = (inventoryFilter: InventoryReportFilter) =>
-  inventoryFilter === 'PPEIR' ? 'ICS CONTROL NO.' : 'PAR CONTROL NO.';
+  inventoryFilter === 'PPEIR' ? 'PAR CONTROL NO.' : 'ICS CONTROL NO.';
 
 const getInventoryAssetHeader = (inventoryFilter: InventoryReportFilter) =>
-  inventoryFilter === 'PPEIR' ? 'INVENTORY NO.' : 'PROPERTY NO.';
+  inventoryFilter === 'PPEIR' ? 'PROPERTY NO.' : 'INVENTORY NO.';
 
 const isMatchingInventoryFilter = (valueCategory: ValueCategory, inventoryFilter: InventoryReportFilter): boolean => {
   if (inventoryFilter === 'PPEIR') return valueCategory === 'MV';
@@ -249,10 +249,14 @@ export function ReportsPage({ user }: ReportsPageProps) {
 
   const canExportData = user.role === 'system_admin';
 
-  const handleExportPdf = () => {
+  const handleExportPdf = async () => {
     if (reportType === 'inventory') {
       const rows = buildInventoryReportRows(filteredInventoryProducts, employees || []);
-      exportInventoryToPDF(rows, inventoryFilter);
+      await exportInventoryToPDF(rows, inventoryFilter, rangeEnd, {
+        accountableName: user.fullName,
+        accountablePosition: user.position || 'Administrator',
+        accountableOffice: "Provincial Governor's Office"
+      });
       return;
     }
 
@@ -268,7 +272,11 @@ export function ReportsPage({ user }: ReportsPageProps) {
   const handleExportExcel = async () => {
     if (reportType === 'inventory') {
       const rows = buildInventoryReportRows(filteredInventoryProducts, employees || []);
-      const blob = await createInventoryExcelBlob(rows, inventoryFilter);
+      const blob = await createInventoryExcelBlob(rows, inventoryFilter, rangeEnd, {
+        accountableName: user.fullName,
+        accountablePosition: user.position || 'Administrator',
+        accountableOffice: "Provincial Governor's Office"
+      });
       downloadBlob(blob, `inventory-report-${inventoryFilter.toLowerCase()}.xlsx`);
       return;
     }
@@ -518,19 +526,19 @@ export function ReportsPage({ user }: ReportsPageProps) {
                     <tr>
                       <th className="px-4 py-3 text-left text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200">Article</th>
                       <th className="px-4 py-3 text-left text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200 min-w-[560px] w-[560px]">Description</th>
-                      <th className="px-4 py-3 text-left text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200">Date Acquired</th>
-                      <th className="px-4 py-3 text-left text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200">
+                      <th className="px-4 py-3 text-center text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200">Date Acquired</th>
+                      <th className="px-4 py-3 text-center text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200">
                         {getInventoryControlHeader(inventoryFilter)}
                       </th>
-                      <th className="px-4 py-3 text-left text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200">
+                      <th className="px-4 py-3 text-center text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200">
                         {getInventoryAssetHeader(inventoryFilter)}
                       </th>
-                      <th className="px-4 py-3 text-left text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200">UOM</th>
-                      <th className="px-4 py-3 text-right text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200">Unit Cost</th>
-                      <th className="px-4 py-3 text-right text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200">Qty</th>
-                      <th className="px-4 py-3 text-right text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200">Total Amount</th>
-                      <th className="px-4 py-3 text-left text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200">Location</th>
-                      <th className="px-4 py-3 text-left text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200">Actual User</th>
+                      <th className="px-4 py-3 text-center text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200">UOM</th>
+                      <th className="px-4 py-3 text-center text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200">Unit Cost</th>
+                      <th className="px-4 py-3 text-center text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200">Qty</th>
+                      <th className="px-4 py-3 text-center text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200">Total Amount</th>
+                      <th className="px-4 py-3 text-center text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200">Location</th>
+                      <th className="px-4 py-3 text-center text-xs font-semibold tracking-wider text-gray-600 uppercase border-r border-gray-200">Actual User</th>
                       <th className="px-4 py-3 text-left text-xs font-semibold tracking-wider text-gray-600 uppercase">Remarks</th>
                     </tr>
                   </thead>
@@ -539,15 +547,15 @@ export function ReportsPage({ user }: ReportsPageProps) {
                       <tr key={item.id} className="hover:bg-gray-50">
                         <td className="px-4 py-3 text-sm text-gray-900 font-medium border-r border-gray-200">{item.article}</td>
                         <td className="px-4 py-3 text-sm text-gray-700 border-r border-gray-200 min-w-[360px] w-[360px]">{item.description}</td>
-                        <td className="px-4 py-3 text-sm text-gray-700 border-r border-gray-200">{formatDate(item.date)}</td>
-                        <td className="px-4 py-3 text-sm text-gray-700 border-r border-gray-200">{item.parControlNumber}</td>
-                        <td className="px-4 py-3 text-sm text-gray-700 border-r border-gray-200">{item.propertyNumber}</td>
-                        <td className="px-4 py-3 text-sm text-gray-700 border-r border-gray-200">{item.unit}</td>
-                        <td className="px-4 py-3 text-sm text-gray-900 text-right border-r border-gray-200">{formatCurrency(item.unitValue)}</td>
-                        <td className="px-4 py-3 text-sm text-gray-900 text-right border-r border-gray-200">{item.onHandPerCount}</td>
-                        <td className="px-4 py-3 text-sm text-gray-900 text-right font-medium border-r border-gray-200">{formatCurrency(item.total)}</td>
-                        <td className="px-4 py-3 text-sm text-gray-700 border-r border-gray-200">{item.location}</td>
-                        <td className="px-4 py-3 text-sm text-gray-700 border-r border-gray-200">
+                        <td className="px-4 py-3 text-sm text-gray-700 text-center border-r border-gray-200">{formatDate(item.date)}</td>
+                        <td className="px-4 py-3 text-sm text-gray-700 text-center border-r border-gray-200">{item.parControlNumber}</td>
+                        <td className="px-4 py-3 text-sm text-gray-700 text-center border-r border-gray-200">{item.propertyNumber}</td>
+                        <td className="px-4 py-3 text-sm text-gray-700 text-center border-r border-gray-200">{item.unit}</td>
+                        <td className="px-4 py-3 text-sm text-gray-900 text-center border-r border-gray-200">{formatCurrency(item.unitValue)}</td>
+                        <td className="px-4 py-3 text-sm text-gray-900 text-center border-r border-gray-200">{item.onHandPerCount}</td>
+                        <td className="px-4 py-3 text-sm text-gray-900 text-center font-medium border-r border-gray-200">{formatCurrency(item.total)}</td>
+                        <td className="px-4 py-3 text-sm text-gray-700 text-center border-r border-gray-200">{item.location}</td>
+                        <td className="px-4 py-3 text-sm text-gray-700 text-center border-r border-gray-200">
                           {item.assignedToEmployeeId ? employeeMap.get(item.assignedToEmployeeId) || 'Unknown' : 'Unassigned'}
                         </td>
                         <td className="px-4 py-3 text-sm text-gray-700">{item.remarks}</td>

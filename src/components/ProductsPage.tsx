@@ -267,6 +267,8 @@ export function ProductsPage({ user }: ProductsPageProps) {
       const term = searchTerm.trim().toLowerCase();
       if (!term) return true;
 
+      const assignedEmployee = product.assignedToEmployeeId ? employeeMap.get(product.assignedToEmployeeId) : undefined;
+
       const valueKeywords = [
         product.valueCategory,
         getValueBadgeLabel(product.valueCategory),
@@ -277,12 +279,26 @@ export function ProductsPage({ user }: ProductsPageProps) {
         .join(' ')
         .toLowerCase();
 
+      const assignedKeywords = [
+        product.assignedToEmployeeId || '',
+        assignedEmployee?.fullName || '',
+        assignedEmployee?.firstName || '',
+        assignedEmployee?.lastName || '',
+        assignedEmployee?.email || '',
+        assignedEmployee?.position || '',
+        assignedEmployee?.department || '',
+        product.assignedToEmployeeId ? 'assigned' : 'unassigned'
+      ]
+        .join(' ')
+        .toLowerCase();
+
       return (
         (product.article || '').toLowerCase().includes(term) ||
         (product.propertyNumber || '').toLowerCase().includes(term) ||
         (product.parControlNumber || '').toLowerCase().includes(term) ||
         (product.description || '').toLowerCase().includes(term) ||
-        valueKeywords.includes(term)
+        valueKeywords.includes(term) ||
+        assignedKeywords.includes(term)
       );
     });
 
@@ -638,7 +654,7 @@ export function ProductsPage({ user }: ProductsPageProps) {
             <Search className="w-5 h-5 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
-              placeholder="Search products..."
+              placeholder="Search property or assigned user..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
