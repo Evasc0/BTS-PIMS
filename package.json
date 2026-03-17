@@ -95,6 +95,12 @@
                   "dist-electron/**/*",
                   "package.json"
             ],
+            "extraResources": [
+                  {
+                        "from": ".env",
+                        "to": ".env"
+                  }
+            ],
             "asar": true,
             "win": {
                   "icon": "build/icon.ico"
