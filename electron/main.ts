@@ -7,10 +7,12 @@ import { loadLocalEnv } from './env';
 loadLocalEnv();
 
 const createMainWindow = () => {
+  const appIcon = path.join(app.getAppPath(), 'build', 'LOGO.png');
   const mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
     show: false,
+    icon: appIcon,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
